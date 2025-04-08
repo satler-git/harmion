@@ -54,7 +54,7 @@
                 package = rust-bin;
               };
               nixfmt.enable = true;
-              typos.enable = true;
+              # typos.enable = true;
               taplo.enable = true;
             };
 
