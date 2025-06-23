@@ -11,3 +11,5 @@ result
 result-*
 
 .pre-commit-config.yaml
+
+Cargo.lock
