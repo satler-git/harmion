@@ -73,3 +73,18 @@ where
         node_id: Option<Self::NodeID>,
     ) -> Result<Self::NodeID, <Self as Connection>::E>;
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Topic;
+    use crate::TopicTree;
+
+    #[test]
+    fn topic_macro() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tt = super::topic!("harmion", "write").0;
+
+        assert_eq!(tt.len(), 2);
+        assert_eq!(tt.pop().unwrap().value(), "harmion");
+        Ok(())
+    }
+}
