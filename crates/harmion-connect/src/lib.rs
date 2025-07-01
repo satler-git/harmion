@@ -55,7 +55,7 @@ pub trait Receiver {
 
 use serde::{de::DeserializeOwned, Serialize};
 
-trait Connection
+pub trait Connection
 where
     Self: Subscriber + Receiver + Sender,
 {
