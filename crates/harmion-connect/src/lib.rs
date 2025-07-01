@@ -25,7 +25,7 @@ macro_rules! topic {
     }};
     // 再帰ケース
     ( $head:expr , $($rest:expr),+ ) => {{
-        let mut tree = $crate::topic_tree!($($rest)/+).0;
+        let mut tree = $crate::topic!($($rest),+).0;
         tree.push(Box::new($head) as Box<dyn Topic>);
         TopicTree(tree)
     }};
