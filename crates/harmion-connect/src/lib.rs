@@ -34,8 +34,8 @@ macro_rules! topic {
 pub trait Subscriber {
     type E: std::error::Error;
 
-    fn subscribe(&self, topic: TopicTree) -> Result<(), Self::E>;
-    fn un_subscribe(&self, topic: TopicTree) -> Result<(), Self::E>;
+    fn subscribe(&self, topic: &TopicTree) -> Result<(), Self::E>;
+    fn un_subscribe(&self, topic: &TopicTree) -> Result<(), Self::E>;
 }
 
 pub trait Message {}
@@ -43,7 +43,7 @@ pub trait Message {}
 pub trait Sender {
     type E: std::error::Error;
 
-    async fn send(&mut self, topic: TopicTree, message: impl Message) -> Result<(), Self::E>;
+    async fn send(&mut self, topic: &TopicTree, message: impl Message) -> Result<(), Self::E>;
 }
 
 pub trait Receiver {
