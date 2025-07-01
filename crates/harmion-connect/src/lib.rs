@@ -49,7 +49,7 @@ pub trait Sender {
 pub trait Receiver {
     type E: std::error::Error;
 
-    fn topic<'a>() -> &'a TopicTree;
+    fn topic(&self) -> &TopicTree;
     async fn recv(&mut self) -> Result<impl Message, Self::E>;
 }
 
