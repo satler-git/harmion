@@ -73,7 +73,9 @@
           };
 
           devShells.default = pkgs.mkShell {
-            buildInputs = [
+            buildInputs = with pkgs; [
+              cargo-nextest
+
               rust-bin
             ];
           };
