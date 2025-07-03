@@ -38,6 +38,7 @@ struct Peer {
     dc: Arc<RTCDataChannel>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PeerID(String);
 
 #[derive(Error, Debug)]
