@@ -14,3 +14,14 @@ webrtc = "0.13.0"
 
 thiserror = "2.0.12"
 tracing   = "0.1.41"
+
+tokio   = { version = "1.46.0", features = ["full"] }
+warp    = "0.3"
+dashmap = "6.0.1"
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+
+tokio = { workspace = true }
+
+warp    = "0.3"
+dashmap = "6.0.1"
