@@ -66,7 +66,7 @@ mod tests {
         assert_eq!(format!("{:?}", topic), "harmion / write\n");
 
         let topic = crate::topic!("harmion", "write", "/to/file");
-        assert_eq!(format!("{:?}", topic), "harmion / write / /to/filer\n");
+        assert_eq!(format!("{:?}", topic), "harmion / write / /to/file\n");
 
         Ok(())
     }
