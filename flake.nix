@@ -47,6 +47,17 @@
             ];
           };
 
+          packages.${system} = {
+            ci = pkgs.buildEnv {
+              name = "ci";
+              paths = with pkgs; [
+                rust-bin
+
+                cargo-nextest
+              ];
+            };
+          };
+
           treefmt = {
             programs = {
               rustfmt = {
