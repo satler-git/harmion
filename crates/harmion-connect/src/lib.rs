@@ -1,6 +1,7 @@
 // Topic, Connectionなどいろいろ考えれてないことばかり
 
 mod topic;
+mod webrtc;
 
 use topic::TopicTree;
 
@@ -32,19 +33,19 @@ pub trait Connection
 where
     Self: Subscriber + Sender,
 {
-    type NodeInfo: Serialize + DeserializeOwned; // SDP
-    type NodeID: Serialize + DeserializeOwned; // Node Ident
+    type PeerInfo: Serialize + DeserializeOwned; // SDP
+    type PeerID: Serialize + DeserializeOwned; // Node Ident
 
     type E: std::error::Error;
 
-    fn node_info(&self) -> &(Self::NodeInfo, Self::NodeInfo);
-    fn node_list(&self) -> &[(Self::NodeInfo, Self::NodeInfo)];
+    fn node_info(&self) -> &(Self::PeerID, Self::PeerInfo);
+    fn node_list(&self) -> &[(Self::PeerID, Self::PeerInfo)];
 
     fn receiver(&self, topic: &TopicTree) -> impl Receiver;
 
     async fn connect(
         &mut self,
-        node: Self::NodeInfo,
-        node_id: Option<Self::NodeID>,
-    ) -> Result<Self::NodeID, <Self as Connection>::E>;
+        node: Self::PeerInfo,
+        node_id: Option<Self::PeerID>,
+    ) -> Result<Self::PeerID, <Self as Connection>::E>;
 }
