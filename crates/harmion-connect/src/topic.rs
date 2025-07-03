@@ -11,6 +11,24 @@ impl<T: AsRef<str>> Topic for T {
 // child, parent
 pub struct TopicTree(pub Vec<Box<dyn Topic>>);
 
+use std::fmt;
+
+impl fmt::Debug for TopicTree {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(
+            f,
+            "{}",
+            self.0
+                .iter()
+                .rev()
+                .map(|i| i.value())
+                .collect::<Vec<_>>()
+                .join(" / ")
+        )?; // TODO: Itertools
+        Ok(())
+    }
+}
+
 // topic!("/to/file" / harmion::channel::builtin::Write)
 // Write -> harmion/ ...
 // parent: None
@@ -39,6 +57,17 @@ mod tests {
 
         assert_eq!(tt.len(), 2);
         assert_eq!(tt.pop().unwrap().value(), "harmion");
+        Ok(())
+    }
+
+    #[test]
+    fn debug_topic_tree() -> Result<(), Box<dyn std::error::Error>> {
+        let topic = crate::topic!("harmion", "write");
+        assert_eq!(format!("{:?}", topic), "harmion / write\n");
+
+        let topic = crate::topic!("harmion", "write", "/to/file");
+        assert_eq!(format!("{:?}", topic), "harmion / write / /to/filer\n");
+
         Ok(())
     }
 }
