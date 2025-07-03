@@ -47,7 +47,7 @@
             ];
           };
 
-          packages.${system} = {
+          packages = {
             ci = pkgs.buildEnv {
               name = "ci";
               paths = with pkgs; [
