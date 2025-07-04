@@ -1,10 +1,11 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::peer_connection::RTCPeerConnection;
 
 use thiserror::Error;
+
+use dashmap::DashMap;
 
 const STUN_LIST: [&str; 10] = [
     "stun:stun.1.google.com:19302",
@@ -20,7 +21,7 @@ const STUN_LIST: [&str; 10] = [
 ];
 
 pub(super) struct SimpleConn {
-    peers: HashMap<PeerID, Peer>, // TODO:  dashmap
+    peers: DashMap<PeerID, Peer>,
 }
 
 struct Config {
