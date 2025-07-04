@@ -12,22 +12,40 @@ pub trait Subscriber {
     fn un_subscribe(&self, topic: &TopicTree) -> Result<(), Self::E>;
 }
 
-pub trait Message {}
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub content: String,
+    pub timestamp: u64,
+}
+
+impl Message {
+    pub fn new(content: String) -> Self {
+        Self {
+            content,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        }
+    }
+}
 
 pub trait Sender {
     type E: std::error::Error;
 
-    async fn send(&mut self, topic: &TopicTree, message: impl Message) -> Result<(), Self::E>;
+    async fn send(&mut self, topic: &TopicTree, message: String) -> Result<(), Self::E>; // Messageを作る
 }
 
 pub trait Receiver {
     type E: std::error::Error;
 
     fn topic(&self) -> &TopicTree;
-    async fn recv(&mut self) -> Result<impl Message, Self::E>;
+    async fn recv(&mut self) -> Result<Message, Self::E>;
 }
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
 
 pub trait Connection
 where

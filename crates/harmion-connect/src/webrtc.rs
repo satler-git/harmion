@@ -8,8 +8,6 @@ mod error {
     pub(crate) enum WebRTCError {}
 }
 
-use error::WebRTCError;
-
 pub(crate) struct Config {}
 
 pub(crate) struct WebRTCConn {
@@ -18,7 +16,7 @@ pub(crate) struct WebRTCConn {
 
 #[cfg(test)]
 mod tests {
-    use crate::Connection;
+    // use crate::Connection;
 
     // #[test]
     // fn webrtc_conn() -> Result<(), Box<dyn std::error::Error>> {
