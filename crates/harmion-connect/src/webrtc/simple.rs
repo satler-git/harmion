@@ -1,22 +1,23 @@
 // TODO: ICE交換
+// TODO: ICE Stateの監視
+// TODO: gathering_complete_promise
+// TODO: on_ice_connection_state_change
 // TODO: refactor
 // TODO: rewrite && learning WebRTC
 
-use std::sync::Arc;
+use crate::Message;
+use tokio::sync::RwLock;
 
-use tracing::info_span;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::peer_connection::RTCPeerConnection;
 
 use thiserror::Error;
 
 use dashmap::DashMap;
-
-use crate::Message;
-
+use std::{cell::LazyCell, sync::Arc};
 use tokio::sync::mpsc;
 
-use std::cell::LazyCell;
+use tracing::{error, info_span, warn};
 
 pub const GOOGLE_STUN_LIST: LazyCell<Vec<String>> = LazyCell::new(|| {
     vec![
@@ -85,7 +86,7 @@ pub(super) enum PeerState {
 struct Peer {
     pc: Arc<RTCPeerConnection>,
     dc: Arc<RTCDataChannel>,
-    state: PeerState,
+    state: Arc<PeerState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -126,6 +127,7 @@ pub(super) enum SimpleError {
 #[derive(Debug)]
 pub(super) struct Connecter {
     peer_id: PeerID,
+    peer_state: Arc<RwLock<PeerState>>,
     pc: Arc<RTCPeerConnection>,
 }
 
@@ -203,30 +205,80 @@ impl SimpleConn {
 
         let pc = Arc::new(api.new_peer_connection(config).await?);
 
-        let dc = pc.create_data_channel("data", None).await?;
+        let state = Arc::new(RwLock::new(PeerState::Connecting));
 
         {
             let peer_id_clone = peer_id.clone();
+            let state_clone = state.clone();
+
             pc.on_peer_connection_state_change(Box::new(move |state| {
                 info_span!(
                     "Peer connection state changed",
                     peer_id = peer_id_clone.as_ref(),
                     %state
                 );
-                Box::pin(async move {})
+
+
+                if state == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed {
+                    warn!("Peer Connection has gone to failed exiting");
+                }
+
+                let state_clone = state_clone.clone();
+
+                Box::pin(async move {
+                    if state == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed {
+                        warn!("Peer Connection has gone to failed exiting");
+                        *state_clone.write().await = PeerState::Failed;
+                    }
+                })
             }));
         }
 
+        let dc = pc.create_data_channel("data", None).await?;
+
         {
             let peer_id_clone = peer_id.clone();
+            let state_clone = state.clone();
 
             dc.on_open(Box::new(move || {
                 info_span!(
                     "Data channel opened for peer",
                     peer_id = peer_id_clone.as_ref()
                 );
-                Box::pin(async move {})
+
+                let state_clone = state_clone.clone();
+                Box::pin(async move {
+                    *state_clone.write().await = PeerState::Connected;
+                })
             }));
+        }
+        {
+            let peer_id_clone = peer_id.clone();
+            let state_clone = state.clone();
+
+            dc.on_close(Box::new(move || {
+                info_span!(
+                    "Data channel closed for peer",
+                    peer_id = peer_id_clone.as_ref()
+                );
+                let state_clone = state_clone.clone();
+                Box::pin(async move {
+                    *state_clone.write().await = PeerState::Disconnected;
+                })
+            }))
+        }
+
+        {
+            let peer_id_clone = peer_id.clone();
+
+            dc.on_error(Box::new(move |error| {
+                error!(
+                    "error has occurred in the datachannel {}: {:?}",
+                    peer_id_clone.as_ref(),
+                    error
+                );
+                Box::pin(async move {})
+            }))
         }
 
         {
@@ -249,12 +301,16 @@ impl SimpleConn {
         let peer = Peer {
             pc: pc.clone(),
             dc,
-            state: PeerState::Connecting,
+            state: Arc::new(PeerState::Connecting),
         };
 
         self.peers.insert(peer_id.clone(), peer);
 
-        Ok(Connecter { peer_id, pc })
+        Ok(Connecter {
+            peer_id,
+            pc,
+            peer_state: state,
+        })
     }
 
     pub async fn send<T: serde::Serialize>(
@@ -295,7 +351,7 @@ impl SimpleConn {
         Ok(())
     }
 
-    pub async fn get_peer_states(&self, peer_id: &PeerID) -> Result<PeerState, SimpleError> {
+    pub async fn get_peer_states(&self, peer_id: &PeerID) -> Result<Arc<PeerState>, SimpleError> {
         self.peers
             .get(&peer_id)
             .ok_or_else(|| SimpleError::PeerNotFound(peer_id.to_string()))
