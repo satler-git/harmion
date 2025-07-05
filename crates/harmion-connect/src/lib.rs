@@ -1,6 +1,7 @@
 // Topic, Connectionなどいろいろ考えれてないことばかり
 
 mod topic;
+mod webrtc;
 
 use topic::TopicTree;
 
@@ -11,40 +12,58 @@ pub trait Subscriber {
     fn un_subscribe(&self, topic: &TopicTree) -> Result<(), Self::E>;
 }
 
-pub trait Message {}
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub content: String,
+    pub timestamp: u64,
+}
+
+impl Message {
+    pub fn new(content: String) -> Self {
+        Self {
+            content,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        }
+    }
+}
 
 pub trait Sender {
     type E: std::error::Error;
 
-    async fn send(&mut self, topic: &TopicTree, message: impl Message) -> Result<(), Self::E>;
+    async fn send(&mut self, topic: &TopicTree, message: String) -> Result<(), Self::E>; // Messageを作る
 }
 
 pub trait Receiver {
     type E: std::error::Error;
 
     fn topic(&self) -> &TopicTree;
-    async fn recv(&mut self) -> Result<impl Message, Self::E>;
+    async fn recv(&mut self) -> Result<Message, Self::E>;
 }
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
 
 pub trait Connection
 where
     Self: Subscriber + Sender,
 {
-    type NodeInfo: Serialize + DeserializeOwned; // SDP
-    type NodeID: Serialize + DeserializeOwned; // Node Ident
+    type PeerInfo: Serialize + DeserializeOwned; // SDP
+    type PeerID: Serialize + DeserializeOwned; // Node Ident
 
     type E: std::error::Error;
 
-    fn node_info(&self) -> &(Self::NodeInfo, Self::NodeInfo);
-    fn node_list(&self) -> &[(Self::NodeInfo, Self::NodeInfo)];
+    fn node_info(&self) -> &(Self::PeerID, Self::PeerInfo);
+    fn node_list(&self) -> &[(Self::PeerID, Self::PeerInfo)];
 
     fn receiver(&self, topic: &TopicTree) -> impl Receiver;
 
     async fn connect(
         &mut self,
-        node: Self::NodeInfo,
-        node_id: Option<Self::NodeID>,
-    ) -> Result<Self::NodeID, <Self as Connection>::E>;
+        node: Self::PeerInfo,
+        node_id: Option<Self::PeerID>,
+    ) -> Result<Self::PeerID, <Self as Connection>::E>;
 }
