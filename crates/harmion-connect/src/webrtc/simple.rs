@@ -41,7 +41,7 @@ pub(super) struct SimpleConn {
     peers: DashMap<PeerID, Peer>,
     config: Config,
 
-    rx: mpsc::UnboundedReceiver<(PeerID, Message)>,
+    rx: Arc<RwLock<mpsc::UnboundedReceiver<(PeerID, Message)>>>,
     tx: mpsc::UnboundedSender<(PeerID, Message)>,
 }
 
@@ -65,7 +65,7 @@ impl SimpleConn {
             peers: DashMap::new(),
             config,
 
-            rx,
+            rx: Arc::new(RwLock::new(rx)),
             tx,
         }
     }
@@ -314,7 +314,7 @@ impl SimpleConn {
     }
 
     pub async fn send<T: serde::Serialize>(
-        &mut self,
+        &self,
         id: PeerID,
         message: T,
     ) -> Result<(), SimpleError> {
@@ -337,8 +337,8 @@ impl SimpleConn {
         Ok(())
     }
 
-    pub async fn recv(&mut self) -> Result<(PeerID, Message), SimpleError> {
-        self.rx
+    pub async fn recv(&self) -> Result<(PeerID, Message), SimpleError> {
+        (*self.rx.write().await)
             .recv()
             .await
             .ok_or_else(|| SimpleError::ConnectionFailed("Message channel closed".to_string()))
