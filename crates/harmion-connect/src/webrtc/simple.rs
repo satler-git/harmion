@@ -409,9 +409,9 @@ mod tests {
         let test_message = Message::new("Hello, WebRTC!".to_string());
         conn1.send(peer_id2.clone(), &test_message).await.unwrap();
 
-        if let Ok((from_id, received_message)) = conn2.recv().await {
-            assert_eq!(from_id, peer_id1);
-            assert_eq!(received_message.content, "Hello, WebRTC!");
-        }
+        let (from_id, received_message) = conn2.recv().await.expect("Failed to receive message");
+
+        assert_eq!(from_id, peer_id1);
+        assert_eq!(received_message.content, "Hello, WebRTC!");
     }
 }
