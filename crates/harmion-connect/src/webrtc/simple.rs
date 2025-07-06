@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // TODO: ICE交換
 // TODO: ICE Stateの監視
 // TODO: gathering_complete_promise
@@ -8,9 +9,6 @@
 use crate::Message;
 use tokio::sync::RwLock;
 
-use webrtc::data_channel::RTCDataChannel;
-use webrtc::peer_connection::RTCPeerConnection;
-
 use thiserror::Error;
 
 use dashmap::DashMap;
@@ -18,6 +16,15 @@ use std::{cell::LazyCell, sync::Arc};
 use tokio::sync::mpsc;
 
 use tracing::{error, info_span, warn};
+
+use webrtc::{
+    api::{
+        interceptor_registry::register_default_interceptors, media_engine::MediaEngine, APIBuilder,
+    },
+    data_channel::RTCDataChannel,
+    ice_transport::ice_server::RTCIceServer,
+    peer_connection::{configuration::RTCConfiguration, RTCPeerConnection},
+};
 
 pub const GOOGLE_STUN_LIST: LazyCell<Vec<String>> = LazyCell::new(|| {
     vec![
@@ -37,14 +44,6 @@ pub const GOOGLE_STUN_LIST: LazyCell<Vec<String>> = LazyCell::new(|| {
     .collect()
 });
 
-pub(super) struct SimpleConn {
-    peers: DashMap<PeerID, Peer>,
-    config: Config,
-
-    rx: Arc<RwLock<mpsc::UnboundedReceiver<(PeerID, Message)>>>,
-    tx: mpsc::UnboundedSender<(PeerID, Message)>,
-}
-
 pub(super) struct Config {
     pub stun: Vec<String>,
 }
@@ -57,22 +56,24 @@ impl Default for Config {
     }
 }
 
-impl SimpleConn {
-    fn new(config: Config) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+#[derive(Error, Debug)]
+pub(super) enum PeerError {
+    #[error("WebRTC error: {0}")]
+    WebRTC(#[from] webrtc::Error),
+    #[error("Peer not connected")]
+    PeerNotConnected,
+    #[error("Serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("Data channel not available")]
+    DataChannelNotAvailable,
+    #[error("Connection failed")]
+    ConnectionFailed,
+}
 
-        Self {
-            peers: DashMap::new(),
-            config,
-
-            rx: Arc::new(RwLock::new(rx)),
-            tx,
-        }
-    }
-
-    fn new_with_default() -> Self {
-        Self::new(Config::default())
-    }
+struct Peer {
+    pc: Arc<RTCPeerConnection>,
+    dc: Arc<RTCDataChannel>,
+    state: Arc<RwLock<PeerState>>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,100 +84,14 @@ pub(super) enum PeerState {
     Failed,
 }
 
-struct Peer {
-    pc: Arc<RTCPeerConnection>,
-    dc: Arc<RTCDataChannel>,
-    state: Arc<PeerState>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct PeerID(String);
-
-impl PeerID {
-    pub fn new(id: String) -> Self {
-        Self(id)
-    }
-
-    pub fn to_string(&self) -> String {
-        self.0.clone()
-    }
-}
-
-impl AsRef<str> for PeerID {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-#[derive(Error, Debug)]
-pub(super) enum SimpleError {
-    #[error("WebRTC error: {0}")]
-    WebRTC(#[from] webrtc::Error),
-    #[error("Peer not found: {0}")]
-    PeerNotFound(String),
-    #[error("Peer not connected: {0}")]
-    PeerNotConnected(String),
-    #[error("Serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
-    #[error("Data channel not available")]
-    DataChannelNotAvailable,
-    #[error("Connection failed: {0}")]
-    ConnectionFailed(String),
-}
-
-#[derive(Debug)]
-pub(super) struct Connecter {
-    peer_id: PeerID,
-    peer_state: Arc<RwLock<PeerState>>,
-    pc: Arc<RTCPeerConnection>,
-}
-
-impl Connecter {
-    pub async fn create_offer(&self) -> Result<String, SimpleError> {
-        let offer = self.pc.create_offer(None).await?;
-        self.pc.set_local_description(offer.clone()).await?;
-
-        // SDP を JSON 形式で返す
-        Ok(serde_json::to_string(&offer)?)
-    }
-
-    pub async fn set_remote_answer(&self, answer_sdp: &str) -> Result<(), SimpleError> {
-        let answer: webrtc::peer_connection::sdp::session_description::RTCSessionDescription =
-            serde_json::from_str(answer_sdp)?;
-        self.pc.set_remote_description(answer).await?;
-        Ok(())
-    }
-
-    pub async fn create_answer(&self, offer_sdp: &str) -> Result<String, SimpleError> {
-        let offer: webrtc::peer_connection::sdp::session_description::RTCSessionDescription =
-            serde_json::from_str(offer_sdp)?;
-        self.pc.set_remote_description(offer).await?;
-
-        let answer = self.pc.create_answer(None).await?;
-        self.pc.set_local_description(answer.clone()).await?;
-
-        Ok(serde_json::to_string(&answer)?)
-    }
-
-    pub fn peer_id(&self) -> &PeerID {
-        &self.peer_id
-    }
-}
-
-use webrtc::{
-    api::{
-        interceptor_registry::register_default_interceptors, media_engine::MediaEngine, APIBuilder,
-    },
-    ice_transport::ice_server::RTCIceServer,
-    peer_connection::configuration::RTCConfiguration,
-};
-
-// 複数のNodeとコネクションを保持しつつ、1:1の通信をするStruct
-impl SimpleConn {
+impl Peer {
+    // PeerA
     pub(super) async fn prepare_connect(
         &mut self,
-        peer_id: PeerID,
-    ) -> Result<Connecter, SimpleError> {
+        on_message: webrtc::data_channel::OnMessageHdlrFn,
+        config: Config,
+        peer_id: PeerID, // only for logging
+    ) -> Result<(Self, Connecter), PeerError> {
         let mut m = MediaEngine::default();
         m.register_default_codecs()?;
 
@@ -188,8 +103,7 @@ impl SimpleConn {
             .with_interceptor_registry(registry)
             .build();
 
-        let ice_servers = self
-            .config
+        let ice_servers = config
             .stun
             .iter()
             .map(|url| RTCIceServer {
@@ -281,137 +195,168 @@ impl SimpleConn {
             }))
         }
 
-        {
-            let message_tx = self.tx.clone();
-            let peer_id_clone = peer_id.clone();
-            dc.on_message(Box::new(move |msg| {
-                let tx = message_tx.clone();
-                let peer_id = peer_id_clone.clone();
-
-                Box::pin(async move {
-                    if let Ok(message_str) = String::from_utf8(msg.data.to_vec()) {
-                        if let Ok(message) = serde_json::from_str::<Message>(&message_str) {
-                            let _ = tx.send((peer_id, message));
-                        }
-                    }
-                })
-            }));
-        }
+        dc.on_message(on_message);
 
         let peer = Peer {
             pc: pc.clone(),
             dc,
-            state: Arc::new(PeerState::Connecting),
+            state: state.clone(),
         };
 
-        self.peers.insert(peer_id.clone(), peer);
-
-        Ok(Connecter {
-            peer_id,
-            pc,
-            peer_state: state,
-        })
+        Ok((peer, Connecter { pc, state }))
     }
 
-    pub async fn send<T: serde::Serialize>(
-        &self,
-        id: PeerID,
-        message: T,
-    ) -> Result<(), SimpleError> {
-        let peer = self
-            .peers
-            .get(&id)
-            .ok_or_else(|| SimpleError::PeerNotFound(id.as_ref().to_string()))?;
+    // TODO: PeerB(受け)
+    // Connecterも変えると分かりやすい
 
+    pub async fn send<T: serde::Serialize>(&self, message: T) -> Result<(), PeerError> {
         let message_json = serde_json::to_string(&message)?;
         let message_bytes = message_json.into_bytes();
 
-        if peer.dc.ready_state()
+        if self.dc.ready_state()
             != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
         {
-            return Err(SimpleError::PeerNotConnected(id.as_ref().to_string()));
+            return Err(PeerError::PeerNotConnected);
         }
 
-        peer.dc.send(&message_bytes.into()).await?;
+        self.dc.send(&message_bytes.into()).await?;
 
         Ok(())
     }
 
-    pub async fn recv(&self) -> Result<(PeerID, Message), SimpleError> {
-        (*self.rx.write().await)
-            .recv()
-            .await
-            .ok_or_else(|| SimpleError::ConnectionFailed("Message channel closed".to_string()))
-    }
-
-    pub async fn disconnect(&mut self, peer_id: &PeerID) -> Result<(), SimpleError> {
-        if let Some(peer) = self.peers.remove(peer_id) {
-            peer.1.pc.close().await?;
-        }
+    pub async fn disconnect(&mut self) -> Result<(), PeerError> {
+        self.pc.close().await?;
         Ok(())
     }
 
-    pub async fn get_peer_states(&self, peer_id: &PeerID) -> Result<Arc<PeerState>, SimpleError> {
-        self.peers
-            .get(&peer_id)
-            .ok_or_else(|| SimpleError::PeerNotFound(peer_id.to_string()))
-            .map(|state| state.value().state.clone())
+    pub async fn get_peer_states(&self) -> PeerState {
+        self.state.read().await.clone()
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct Connecter {
+    state: Arc<RwLock<PeerState>>,
+    pc: Arc<RTCPeerConnection>,
+}
+
+impl Connecter {
+    // 1. PeerA
+    pub async fn create_offer(&self) -> Result<String, PeerError> {
+        let offer = self.pc.create_offer(None).await?;
+        self.pc.set_local_description(offer.clone()).await?;
+
+        // SDP を JSON 形式で返す
+        Ok(serde_json::to_string(&offer)?)
     }
 
-    pub async fn wait_for_connection(&self, peer_id: &PeerID) -> Result<(), SimpleError> {
-        let mut attempts = 0;
-        const MAX_ATTEMPTS: u32 = 50; // * 100ms
+    // 2. PeerB
+    pub async fn create_answer(&self, offer_sdp: &str) -> Result<String, PeerError> {
+        let offer: webrtc::peer_connection::sdp::session_description::RTCSessionDescription =
+            serde_json::from_str(offer_sdp)?;
+        self.pc.set_remote_description(offer).await?;
 
-        loop {
-            if let Some(peer) = self.peers.get(peer_id) {
-                if peer.dc.ready_state()
-                    == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
-                {
-                    return Ok(());
-                }
-            }
+        let answer = self.pc.create_answer(None).await?;
+        self.pc.set_local_description(answer.clone()).await?;
 
-            attempts += 1;
-            if attempts >= MAX_ATTEMPTS {
-                return Err(SimpleError::ConnectionFailed(format!(
-                    "Connection timeout for peer: {}",
-                    peer_id.as_ref()
-                )));
-            }
+        Ok(serde_json::to_string(&answer)?)
+    }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // 3. PeerA
+    pub async fn set_remote_answer(&self, answer_sdp: &str) -> Result<(), PeerError> {
+        let answer: webrtc::peer_connection::sdp::session_description::RTCSessionDescription =
+            serde_json::from_str(answer_sdp)?;
+        self.pc.set_remote_description(answer).await?;
+        Ok(())
+    }
+
+    // 4. TODO: ICE
+    // 最初だけConnecterを通す。それ以降はDataChannelで送る
+    // -> どこで?
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct PeerID(String);
+
+impl PeerID {
+    pub fn new(id: String) -> Self {
+        Self(id)
+    }
+
+    pub fn to_string(&self) -> String {
+        self.0.clone()
+    }
+}
+
+impl AsRef<str> for PeerID {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Error, Debug)]
+pub(super) enum SimpleError {
+    #[error("{0}: {1:?}")]
+    Peer(#[source] PeerError, PeerID),
+}
+
+pub(super) struct SimpleConn {
+    peers: DashMap<PeerID, Peer>,
+    config: Config,
+
+    rx: Arc<RwLock<mpsc::UnboundedReceiver<(PeerID, Message)>>>,
+    tx: mpsc::UnboundedSender<(PeerID, Message)>,
+}
+
+impl SimpleConn {
+    fn new(config: Config) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        Self {
+            peers: DashMap::new(),
+            config,
+
+            rx: Arc::new(RwLock::new(rx)),
+            tx,
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_simple_conn() {
-        let mut conn1 = SimpleConn::new_with_default();
-        let mut conn2 = SimpleConn::new_with_default();
-
-        let peer_id1 = PeerID::new("peer1".to_string());
-        let peer_id2 = PeerID::new("peer2".to_string());
-
-        let connecter1 = conn1.prepare_connect(peer_id2.clone()).await.unwrap();
-        let connecter2 = conn2.prepare_connect(peer_id1.clone()).await.unwrap();
-
-        let offer = connecter1.create_offer().await.unwrap();
-        let answer = connecter2.create_answer(&offer).await.unwrap();
-        connecter1.set_remote_answer(&answer).await.unwrap();
-
-        conn1.wait_for_connection(&peer_id2).await.unwrap();
-        conn2.wait_for_connection(&peer_id1).await.unwrap();
-
-        let test_message = Message::new("Hello, WebRTC!".to_string());
-        conn1.send(peer_id2.clone(), &test_message).await.unwrap();
-
-        let (from_id, received_message) = conn2.recv().await.expect("Failed to receive message");
-
-        assert_eq!(from_id, peer_id1);
-        assert_eq!(received_message.content, "Hello, WebRTC!");
+    fn new_with_default() -> Self {
+        Self::new(Config::default())
     }
 }
+
+// 複数のNodeとコネクションを保持しつつ、1:1の通信をするStruct
+impl SimpleConn {}
+
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//
+//     #[tokio::test]
+//     async fn test_simple_conn() {
+//         let mut conn1 = SimpleConn::new_with_default();
+//         let mut conn2 = SimpleConn::new_with_default();
+//
+//         let peer_id1 = PeerID::new("peer1".to_string());
+//         let peer_id2 = PeerID::new("peer2".to_string());
+//
+//         let connecter1 = conn1.prepare_connect(peer_id2.clone()).await.unwrap();
+//         let connecter2 = conn2.prepare_connect(peer_id1.clone()).await.unwrap();
+//
+//         let offer = connecter1.create_offer().await.unwrap();
+//         let answer = connecter2.create_answer(&offer).await.unwrap();
+//         connecter1.set_remote_answer(&answer).await.unwrap();
+//
+//         conn1.wait_for_connection(&peer_id2).await.unwrap();
+//         conn2.wait_for_connection(&peer_id1).await.unwrap();
+//
+//         let test_message = Message::new("Hello, WebRTC!".to_string());
+//         conn1.send(peer_id2.clone(), &test_message).await.unwrap();
+//
+//         let (from_id, received_message) = conn2.recv().await.expect("Failed to receive message");
+//
+//         assert_eq!(from_id, peer_id1);
+//         assert_eq!(received_message.content, "Hello, WebRTC!");
+//     }
+// }
