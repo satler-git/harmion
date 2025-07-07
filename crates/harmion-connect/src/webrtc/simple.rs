@@ -414,21 +414,17 @@ impl<S: PeerConnectingState> Peer<S> {
             // 他でCloneしていないはず
             let mut handler = on_message.lock().await;
 
-            loop {
-                let msg: Option<InnerMessage> = rx.recv().await;
-
+            while let Some(msg) = rx.recv().await {
                 match msg {
-                    Some(msg) => match msg {
-                        InnerMessage::Ice(ice) => {
-                            if let Err(e) = pc.add_ice_candidate(ice).await {
-                                warn!("Failed to add ice candidate: {e}")
-                            }
+                    InnerMessage::Ice(ice) => {
+                        if let Err(e) = pc.add_ice_candidate(ice).await {
+                            warn!("Failed to add ice candidate: {e}")
                         }
-                        InnerMessage::Message(msg) => handler(msg).await,
-                    },
-                    _ => warn!("OnMessage Channel has closed"),
+                    }
+                    InnerMessage::Message(msg) => handler(msg).await,
                 }
             }
+            warn!("OnMessage Channel has closed");
         });
 
         dc.on_message(Box::new(move |msg| {
