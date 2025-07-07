@@ -227,8 +227,7 @@ impl<S: PeerConnectingState> Peer<S> {
             return Err(PeerError::PeerNotConnected);
         }
 
-        let bytes = &message_bytes.into();
-        (*dc).send(bytes).await?;
+        dc.send(&message_bytes.into()).await?;
 
         Ok(())
     }
