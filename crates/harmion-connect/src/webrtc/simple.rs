@@ -581,6 +581,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn offer_answer_connects_peers() {
         let (peer_a_wa, offer_sdp) = Peer::<WaitingAnswer>::new(
             Box::new(|_| Box::pin(async {})),
@@ -607,6 +608,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn send_and_receive_message() {
         // Offer/Answer のセットアップ（省略可：先のテストを呼び出しても OK）
         let (peer_a_wa, offer_sdp) = Peer::<WaitingAnswer>::new(

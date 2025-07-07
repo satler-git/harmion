@@ -17,7 +17,6 @@ jobs:
         with:
           package: .#ci
 
-
       - run: nix profile install .#ci
 
       - uses: Swatinem/rust-cache@v2
@@ -39,5 +38,5 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo nextest run --all
+      - run: cargo nextest run --all --run-ignored all
       - run: cargo test --doc --all-features -- --nocapture
