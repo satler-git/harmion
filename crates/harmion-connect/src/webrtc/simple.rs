@@ -437,7 +437,10 @@ impl Peer<Connected> {
         let message_bytes = message_json.into_bytes();
 
         let dc_guard = self.dc.read().await;
-        let dc = dc_guard.as_ref().ok_or(PeerError::PeerNotConnected)?;
+        let dc = dc_guard
+            .as_ref()
+            .cloned()
+            .ok_or(PeerError::PeerNotConnected)?;
 
         if dc.ready_state() != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
             return Err(PeerError::PeerNotConnected);
