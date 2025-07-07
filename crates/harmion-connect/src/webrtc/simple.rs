@@ -76,6 +76,8 @@ pub(super) struct Peer<S: PeerConnectingState> {
     pc: Arc<RTCPeerConnection>,
     dc: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     state: Arc<RwLock<PeerState>>,
+
+    ready: Option<mpsc::Receiver<()>>, // from_offerから作ったときに、DataChannelが出来たことの通知用
     _state: PhantomData<S>,
 }
 
@@ -135,6 +137,7 @@ impl<S: PeerConnectingState> Peer<S> {
             pc: pc.clone(),
             dc: Arc::new(RwLock::new(Some(dc))),
             state: state.clone(),
+            ready: None,
             _state: PhantomData,
         };
 
@@ -163,6 +166,8 @@ impl<S: PeerConnectingState> Peer<S> {
 
         let dc = Arc::new(RwLock::new(None));
 
+        let (tx, ready) = mpsc::channel(1);
+
         {
             let dc_clone = dc.clone();
             let state_clone = state.clone();
@@ -175,8 +180,10 @@ impl<S: PeerConnectingState> Peer<S> {
                 let on_message = on_message.clone();
                 let peer_id = peer_id_clone.clone();
                 let pc_clone = pc_clone.clone();
+                let tx = tx.clone();
 
                 Box::pin(async move {
+                    let _ = tx.send(()).await;
                     *dc_clone.write().await = Some(dc.clone());
 
                     Self::set_data_channel_callbacks(
@@ -210,6 +217,7 @@ impl<S: PeerConnectingState> Peer<S> {
             pc: pc.clone(),
             dc,
             state,
+            ready: Some(ready),
             _state: PhantomData,
         };
 
@@ -466,12 +474,13 @@ impl Peer<WaitingAnswer> {
         }
 
         rx.await.map_err(|_| PeerError::Other)?;
-        *(self.state.write().await) = PeerState::Connected;
+        *self.state.write().await = PeerState::Connected;
 
         Ok(Peer {
             pc: self.pc,
             dc: self.dc,
             state: self.state,
+            ready: self.ready,
             _state: PhantomData,
         })
     }
@@ -479,11 +488,14 @@ impl Peer<WaitingAnswer> {
 
 impl Peer<WaitingICE> {
     pub(super) async fn wait(self) -> Result<Peer<Connected>, PeerError> {
-        let dc = loop {
+        let dc = {
+            let _ = self.ready.unwrap().recv().await;
+
             if let Some(dc) = &*self.dc.read().await {
-                break dc.clone();
+                dc.clone()
+            } else {
+                return Err(PeerError::DataChannelNotAvailable);
             }
-            tokio::task::yield_now().await;
         };
 
         let (tx, rx) = oneshot::channel();
@@ -502,6 +514,7 @@ impl Peer<WaitingICE> {
             pc: self.pc,
             dc: self.dc,
             state: self.state,
+            ready: None,
             _state: PhantomData,
         })
     }
