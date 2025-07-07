@@ -34,16 +34,12 @@ impl fmt::Debug for TopicTree {
 // parent: None
 #[macro_export]
 macro_rules! topic {
-    ( $single:expr ) => {{
-        let mut v = Vec::new();
-        v.push(Box::new($single) as Box<dyn Topic>);
-        TopicTree(v)
-    }};
-    // 再帰ケース
-    ( $head:expr , $($rest:expr),+ ) => {{
-        let mut tree = $crate::topic!($($rest),+).0;
-        tree.push(Box::new($head) as Box<dyn Topic>);
-        TopicTree(tree)
+    ( $($item:expr),+ ) => {{
+        TopicTree({
+            let mut v = vec![$(Box::new($item) as Box<dyn Topic>),+];
+            v.reverse();
+            v
+        })
     }};
 }
 
