@@ -1,7 +1,7 @@
-#![allow(dead_code)]
-// TODO: ICE Stateの監視
-// TODO: refactor
-// TODO: rewrite && learning WebRTC
+#![allow(dead_code)] // TODO: remove this
+                     // TODO: ICE Stateの監視
+                     // TODO: refactor
+                     // TODO: rewrite && learning WebRTC
 
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +12,7 @@ use crate::Message;
 
 use thiserror::Error;
 
-use std::{cell::LazyCell, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 use tracing::{error, info_span, warn};
@@ -26,23 +26,18 @@ use webrtc::{
     peer_connection::{configuration::RTCConfiguration, RTCPeerConnection},
 };
 
-pub const GOOGLE_STUN_LIST: LazyCell<Vec<String>> = LazyCell::new(|| {
-    vec![
-        "stun:stun.1.google.com:19302",
-        "stun:stun.1.google.com:5349",
-        "stun:stun1.1.google.com:3478",
-        "stun:stun1.1.google.com:5349",
-        "stun:stun2.1.google.com:19302",
-        "stun:stun2.1.google.com:5349",
-        "stun:stun3.1.google.com:3478",
-        "stun:stun3.1.google.com:5349",
-        "stun:stun4.1.google.com:19302",
-        "stun:stun4.1.google.com:5349",
-    ]
-    .iter()
-    .map(|&s| s.into())
-    .collect()
-});
+pub const GOOGLE_STUN_LIST: [&str; 10] = [
+    "stun:stun.1.google.com:19302",
+    "stun:stun.1.google.com:5349",
+    "stun:stun1.1.google.com:3478",
+    "stun:stun1.1.google.com:5349",
+    "stun:stun2.1.google.com:19302",
+    "stun:stun2.1.google.com:5349",
+    "stun:stun3.1.google.com:3478",
+    "stun:stun3.1.google.com:5349",
+    "stun:stun4.1.google.com:19302",
+    "stun:stun4.1.google.com:5349",
+];
 
 pub(super) struct Config {
     pub stun: Vec<String>,
@@ -51,7 +46,7 @@ pub(super) struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            stun: GOOGLE_STUN_LIST.to_vec(),
+            stun: GOOGLE_STUN_LIST.iter().map(|&s| s.into()).collect(),
         }
     }
 }
@@ -73,27 +68,28 @@ pub(super) enum PeerError {
 }
 
 pub(crate) mod private {
+    #![allow(dead_code)]
     pub trait Sealed {}
 }
 
-pub struct Peer<S: PeerConnectingState> {
+pub(super) struct Peer<S: PeerConnectingState> {
     pc: Arc<RTCPeerConnection>,
     dc: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     state: Arc<RwLock<PeerState>>,
     _state: PhantomData<S>,
 }
 
-pub trait PeerConnectingState: private::Sealed {}
+pub(super) trait PeerConnectingState: private::Sealed {}
 
-pub struct WaitingAnswer;
+pub(super) struct WaitingAnswer;
 impl private::Sealed for WaitingAnswer {}
 impl PeerConnectingState for WaitingAnswer {}
 
-pub struct WaitingICE;
+pub(super) struct WaitingICE;
 impl private::Sealed for WaitingICE {}
 impl PeerConnectingState for WaitingICE {}
 
-pub struct Connected;
+pub(super) struct Connected;
 impl private::Sealed for Connected {}
 impl PeerConnectingState for Connected {}
 
@@ -108,10 +104,10 @@ pub(super) enum PeerState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum InnerMessage {
     Message(Message),
-    ICE(webrtc::ice_transport::ice_candidate::RTCIceCandidateInit), // 接続確立以降は
+    Ice(webrtc::ice_transport::ice_candidate::RTCIceCandidateInit), // 接続確立以降は
 }
 
-type OnMessageHdlrFn =
+pub(super) type OnMessageHdlrFn =
     Box<dyn FnMut(Message) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
 
 impl<S: PeerConnectingState> Peer<S> {
@@ -155,7 +151,7 @@ impl<S: PeerConnectingState> Peer<S> {
         Ok((peer, serde_json::to_string(&local)?))
     }
 
-    pub async fn from_offer(
+    pub(super) async fn from_offer(
         offer: &str,
         on_message: OnMessageHdlrFn,
         config: Config,
@@ -220,7 +216,7 @@ impl<S: PeerConnectingState> Peer<S> {
         Ok((peer, serde_json::to_string(&local)?))
     }
 
-    pub async fn send(&self, message: String) -> Result<(), PeerError> {
+    pub(super) async fn send(&self, message: String) -> Result<(), PeerError> {
         let message_json = serde_json::to_string(&InnerMessage::Message(Message::new(message)))?;
         let message_bytes = message_json.into_bytes();
 
@@ -243,12 +239,12 @@ impl<S: PeerConnectingState> Peer<S> {
         Ok(())
     }
 
-    pub async fn disconnect(&mut self) -> Result<(), PeerError> {
+    pub(super) async fn disconnect(&mut self) -> Result<(), PeerError> {
         self.pc.close().await?;
         Ok(())
     }
 
-    pub async fn get_peer_states(&self) -> PeerState {
+    pub(super) async fn get_peer_states(&self) -> PeerState {
         self.state.read().await.clone()
     }
 
@@ -380,7 +376,7 @@ impl<S: PeerConnectingState> Peer<S> {
 
                 let msg = msg.unwrap();
 
-                match serde_json::to_string(&InnerMessage::ICE(msg)) {
+                match serde_json::to_string(&InnerMessage::Ice(msg)) {
                     Ok(message_json) => {
                         let message_bytes = message_json.into_bytes();
 
@@ -392,9 +388,8 @@ impl<S: PeerConnectingState> Peer<S> {
 
                         let bytes = &message_bytes.into();
 
-                        match dc.send(bytes).await {
-                            Err(e) => error!("failed to send ice data to the another peer: {e}"),
-                            _ => (),
+                        if let Err(e) = dc.send(bytes).await {
+                            error!("failed to send ice data to the another peer: {e}")
                         }
                     }
                     Err(e) => warn!("failed to convert ice to json string: {e}"),
@@ -403,10 +398,11 @@ impl<S: PeerConnectingState> Peer<S> {
         });
         pc.on_ice_candidate(Box::new(move |ice| {
             match ice.map(|i| i.to_json()) {
-                Some(Ok(ice)) => match tx.send(ice) {
-                    Err(e) => warn!("ICE Channel has closed: {e}"),
-                    _ => (),
-                },
+                Some(Ok(ice)) => {
+                    if let Err(e) = tx.send(ice) {
+                        warn!("ICE Channel has closed: {e}")
+                    }
+                }
                 Some(Err(e)) => warn!("failed to convert ice candidate to json: {e}"),
                 _ => warn!("ice is none"),
             }
@@ -423,10 +419,11 @@ impl<S: PeerConnectingState> Peer<S> {
 
                 match msg {
                     Some(msg) => match msg {
-                        InnerMessage::ICE(ice) => match pc.add_ice_candidate(ice).await {
-                            Err(e) => warn!("Failed to add ice candidate: {e}"),
-                            _ => (),
-                        },
+                        InnerMessage::Ice(ice) => {
+                            if let Err(e) = pc.add_ice_candidate(ice).await {
+                                warn!("Failed to add ice candidate: {e}")
+                            }
+                        }
                         InnerMessage::Message(msg) => handler(msg).await,
                     },
                     _ => warn!("OnMessage Channel has closed"),
@@ -439,10 +436,11 @@ impl<S: PeerConnectingState> Peer<S> {
 
             match String::from_utf8(data) {
                 Ok(text) => match serde_json::from_str::<InnerMessage>(&text) {
-                    Ok(msg) => match tx.send(msg) {
-                        Err(e) => warn!("OnMessage Channel has closed: {e}"),
-                        _ => (),
-                    },
+                    Ok(msg) => {
+                        if let Err(e) = tx.send(msg) {
+                            warn!("OnMessage Channel has closed: {e}")
+                        }
+                    }
                     Err(e) => {
                         warn!("JSON deserialize error: {}", e);
                     }
@@ -458,7 +456,10 @@ impl<S: PeerConnectingState> Peer<S> {
 }
 
 impl Peer<WaitingAnswer> {
-    pub async fn set_remote_answer(self, answer_sdp: &str) -> Result<Peer<Connected>, PeerError> {
+    pub(super) async fn set_remote_answer(
+        self,
+        answer_sdp: &str,
+    ) -> Result<Peer<Connected>, PeerError> {
         let answer: webrtc::peer_connection::sdp::session_description::RTCSessionDescription =
             serde_json::from_str(answer_sdp)?;
         self.pc.set_remote_description(answer).await?;
@@ -467,7 +468,7 @@ impl Peer<WaitingAnswer> {
         {
             let dc = self.dc.clone();
             let dc = dc.read().await;
-            let dc = dc.as_ref().take().unwrap(); // こっち常にある
+            let dc = dc.as_ref().unwrap(); // こっち常にある
 
             dc.on_open(Box::new(move || {
                 let _ = tx.send(());
@@ -488,7 +489,7 @@ impl Peer<WaitingAnswer> {
 }
 
 impl Peer<WaitingICE> {
-    pub async fn wait(self) -> Result<Peer<Connected>, PeerError> {
+    pub(super) async fn wait(self) -> Result<Peer<Connected>, PeerError> {
         let dc = loop {
             if let Some(dc) = &*self.dc.read().await {
                 break dc.clone();
@@ -521,7 +522,7 @@ impl Peer<WaitingICE> {
 pub(super) struct PeerID(String);
 
 impl PeerID {
-    pub fn new(id: String) -> Self {
+    pub(super) fn new(id: String) -> Self {
         Self(id)
     }
 }

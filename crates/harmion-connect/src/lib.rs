@@ -8,8 +8,14 @@ use topic::TopicTree;
 pub trait Subscriber {
     type E: std::error::Error;
 
-    fn subscribe(&self, topic: &TopicTree) -> Result<(), Self::E>;
-    fn un_subscribe(&self, topic: &TopicTree) -> Result<(), Self::E>;
+    fn subscribe(
+        &self,
+        topic: &TopicTree,
+    ) -> impl std::future::Future<Output = Result<(), Self::E>> + Send;
+    fn un_subscribe(
+        &self,
+        topic: &TopicTree,
+    ) -> impl std::future::Future<Output = Result<(), Self::E>> + Send;
 }
 
 use serde::{Deserialize, Serialize};
@@ -35,14 +41,18 @@ impl Message {
 pub trait Sender {
     type E: std::error::Error;
 
-    async fn send(&mut self, topic: &TopicTree, message: String) -> Result<(), Self::E>; // Messageを作る
+    fn send(
+        &mut self,
+        topic: &TopicTree,
+        message: String,
+    ) -> impl std::future::Future<Output = Result<(), Self::E>> + Send; // Messageを作る
 }
 
 pub trait Receiver {
     type E: std::error::Error;
 
     fn topic(&self) -> &TopicTree;
-    async fn recv(&mut self) -> Result<Message, Self::E>;
+    fn recv(&mut self) -> impl std::future::Future<Output = Result<Message, Self::E>> + Send;
 }
 
 use serde::de::DeserializeOwned;
@@ -56,14 +66,21 @@ where
 
     type E: std::error::Error;
 
-    fn node_info(&self) -> &(Self::PeerID, Self::PeerInfo);
-    fn node_list(&self) -> &[(Self::PeerID, Self::PeerInfo)];
+    fn node_info(
+        &self,
+    ) -> impl std::future::Future<Output = &(Self::PeerID, Self::PeerInfo)> + Send;
+    fn node_list(
+        &self,
+    ) -> impl std::future::Future<Output = &[(Self::PeerID, Self::PeerInfo)]> + Send;
 
-    fn receiver(&self, topic: &TopicTree) -> impl Receiver;
+    fn receiver(
+        &self,
+        topic: &TopicTree,
+    ) -> impl std::future::Future<Output = impl Receiver> + Send;
 
-    async fn connect(
+    fn connect(
         &mut self,
         node: Self::PeerInfo,
         node_id: Option<Self::PeerID>,
-    ) -> Result<Self::PeerID, <Self as Connection>::E>;
+    ) -> impl std::future::Future<Output = Result<Self::PeerID, <Self as Connection>::E>> + Send;
 }
