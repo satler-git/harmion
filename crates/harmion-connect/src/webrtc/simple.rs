@@ -202,7 +202,7 @@ impl<S: PeerConnectingState> Peer<S> {
 
         pc.set_local_description(answer.clone()).await?;
 
-        let local = pc.local_description().await.unwrap(); // TODO: Error handling
+        let local = pc.local_description().await.ok_or(PeerError::Other)?; // Or a more specific error
 
         let _ = gather_complete.recv().await;
 
