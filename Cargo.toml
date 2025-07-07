@@ -12,3 +12,7 @@ repository   = "https://github.com/satler-git/harmion"
 rust-version = "1.86.0"
 
 [workspace.dependencies]
+thiserror = "2.0.12"
+tracing   = "0.1.41"
+
+tokio = { version = "1.46.0", features = ["full"] }
