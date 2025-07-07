@@ -86,8 +86,7 @@ pub(super) enum PeerState {
 
 impl Peer {
     // PeerA
-    pub(super) async fn prepare_connect(
-        &mut self,
+    pub(super) async fn new(
         on_message: webrtc::data_channel::OnMessageHdlrFn,
         config: Config,
         peer_id: PeerID, // only for logging
@@ -141,7 +140,6 @@ impl Peer {
 
                 Box::pin(async move {
                     if state == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed {
-                        warn!("Peer Connection has gone to failed exiting");
                         *state_clone.write().await = PeerState::Failed;
                     }
                 })
