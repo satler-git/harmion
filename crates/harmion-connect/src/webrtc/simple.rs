@@ -97,7 +97,7 @@ pub struct Connected;
 impl private::Sealed for Connected {}
 impl PeerConnectingState for Connected {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PeerState {
     Connecting,
     Connected,
@@ -157,10 +157,12 @@ impl<S: PeerConnectingState> Peer<S> {
 
     pub async fn from_offer(
         offer: &str,
-        on_message: Arc<Mutex<OnMessageHdlrFn>>,
+        on_message: OnMessageHdlrFn,
         config: Config,
         peer_id: &PeerID, // only for logging
     ) -> Result<(Peer<WaitingICE>, String), PeerError> {
+        let on_message = Arc::new(Mutex::new(on_message));
+
         let (pc, state) = Self::new_peer_connection_with_state(config, peer_id).await?;
 
         let dc = Arc::new(RwLock::new(None));
@@ -474,6 +476,7 @@ impl Peer<WaitingAnswer> {
         }
 
         rx.await.map_err(|_| PeerError::Other)?;
+        *(self.state.write().await) = PeerState::Connected;
 
         Ok(Peer {
             pc: self.pc,
@@ -502,6 +505,8 @@ impl Peer<WaitingICE> {
         }
 
         rx.await.map_err(|_| PeerError::Other)?;
+
+        *(self.state.write().await) = PeerState::Connected;
 
         Ok(Peer {
             pc: self.pc,
@@ -568,34 +573,84 @@ pub(super) enum SimpleError {
 // 複数のNodeとコネクションを保持しつつ、1:1の通信をするStruct
 // impl SimpleConn
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//
-//     #[tokio::test]
-//     async fn test_simple_conn() {
-//         let mut conn1 = SimpleConn::new_with_default();
-//         let mut conn2 = SimpleConn::new_with_default();
-//
-//         let peer_id1 = PeerID::new("peer1".to_string());
-//         let peer_id2 = PeerID::new("peer2".to_string());
-//
-//         let connecter1 = conn1.prepare_connect(peer_id2.clone()).await.unwrap();
-//         let connecter2 = conn2.prepare_connect(peer_id1.clone()).await.unwrap();
-//
-//         let offer = connecter1.create_offer().await.unwrap();
-//         let answer = connecter2.create_answer(&offer).await.unwrap();
-//         connecter1.set_remote_answer(&answer).await.unwrap();
-//
-//         conn1.wait_for_connection(&peer_id2).await.unwrap();
-//         conn2.wait_for_connection(&peer_id1).await.unwrap();
-//
-//         let test_message = Message::new("Hello, WebRTC!".to_string());
-//         conn1.send(peer_id2.clone(), &test_message).await.unwrap();
-//
-//         let (from_id, received_message) = conn2.recv().await.expect("Failed to receive message");
-//
-//         assert_eq!(from_id, peer_id1);
-//         assert_eq!(received_message.content, "Hello, WebRTC!");
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::oneshot;
+
+    // ダミー on_message ハンドラ。受信したメッセージを oneshot で返す。
+    fn make_on_message_handler(mut tx: Option<oneshot::Sender<String>>) -> OnMessageHdlrFn {
+        Box::new(move |msg: Message| {
+            let tx = tx.take();
+
+            Box::pin(async move {
+                let _ = tx.unwrap().send(msg.content.to_owned());
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn offer_answer_connects_peers() {
+        let (peer_a_wa, offer_sdp) = Peer::<WaitingAnswer>::new(
+            Box::new(|_| Box::pin(async {})),
+            Config::default(),
+            &PeerID::new("A".into()),
+        )
+        .await
+        .expect("failed to create peer A");
+
+        let (peer_b_wi, answer_sdp) = Peer::<WaitingICE>::from_offer(
+            &offer_sdp,
+            Box::new(|_| Box::pin(async {})),
+            Config::default(),
+            &PeerID::new("B".into()),
+        )
+        .await
+        .expect("failed to create peer B");
+
+        let peer_a_c = peer_a_wa.set_remote_answer(&answer_sdp).await.unwrap();
+        let peer_b_c = peer_b_wi.wait().await.unwrap();
+
+        assert_eq!(peer_a_c.get_peer_states().await, PeerState::Connected);
+        assert_eq!(peer_b_c.get_peer_states().await, PeerState::Connected);
+    }
+
+    #[tokio::test]
+    async fn send_and_receive_message() {
+        // Offer/Answer のセットアップ（省略可：先のテストを呼び出しても OK）
+        let (peer_a_wa, offer_sdp) = Peer::<WaitingAnswer>::new(
+            Box::new(|_| Box::pin(async {})),
+            Config::default(),
+            &PeerID::new("A".into()),
+        )
+        .await
+        .unwrap();
+
+        let (tx, rx) = oneshot::channel();
+        let on_msg_handler = make_on_message_handler(Some(tx));
+
+        let (peer_b_wi, answer_sdp) = Peer::<WaitingICE>::from_offer(
+            &offer_sdp,
+            on_msg_handler,
+            Config::default(),
+            &PeerID::new("B".into()),
+        )
+        .await
+        .unwrap();
+
+        let peer_a_c = peer_a_wa.set_remote_answer(&answer_sdp).await.unwrap();
+        let _peer_b_c = peer_b_wi.wait().await.unwrap();
+
+        let payload = "hello from A".to_string();
+        peer_a_c
+            .send(payload.clone())
+            .await
+            .expect("failed to send");
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(100), rx)
+            .await
+            .expect("timeout waiting for message")
+            .expect("receiver dropped");
+        assert_eq!(received, payload);
+    }
+}
