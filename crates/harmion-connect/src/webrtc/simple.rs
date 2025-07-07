@@ -6,14 +6,15 @@
 // TODO: refactor
 // TODO: rewrite && learning WebRTC
 
+use std::marker::PhantomData;
+
 use crate::Message;
-use tokio::sync::RwLock;
 
 use thiserror::Error;
 
 use dashmap::DashMap;
 use std::{cell::LazyCell, sync::Arc};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, RwLock};
 
 use tracing::{error, info_span, warn};
 
@@ -70,11 +71,20 @@ pub(super) enum PeerError {
     ConnectionFailed,
 }
 
-struct Peer {
+pub struct Peer<S: PeerConnectingState> {
     pc: Arc<RTCPeerConnection>,
-    dc: Arc<RTCDataChannel>,
+    dc: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     state: Arc<RwLock<PeerState>>,
+    _state: PhantomData<S>,
 }
+
+trait PeerConnectingState {}
+
+pub struct WaitingAnswer;
+impl PeerConnectingState for WaitingAnswer {}
+
+pub struct WaitingICE;
+impl PeerConnectingState for WaitingICE {}
 
 #[derive(Debug, Clone)]
 pub(super) enum PeerState {
@@ -84,13 +94,84 @@ pub(super) enum PeerState {
     Failed,
 }
 
-impl Peer {
+impl<S: PeerConnectingState> Peer<S> {
     // PeerA
     pub(super) async fn new(
         on_message: webrtc::data_channel::OnMessageHdlrFn,
         config: Config,
-        peer_id: PeerID, // only for logging
-    ) -> Result<(Self, Connecter), PeerError> {
+        peer_id: &PeerID, // only for logging
+    ) -> Result<(Peer<WaitingAnswer>, String), PeerError> {
+        let (pc, state) = Self::new_peer_connection_with_state(config, peer_id).await?;
+
+        let dc = pc.create_data_channel("data", None).await?;
+
+        let on_message = Arc::new(Mutex::new(on_message));
+        Self::set_data_channel_callbacks(dc.clone(), state.clone(), on_message, peer_id).await;
+
+        let peer = Peer {
+            pc: pc.clone(),
+            dc: Arc::new(RwLock::new(Some(dc))),
+            state: state.clone(),
+            _state: PhantomData,
+        };
+
+        let offer = pc.create_offer(None).await?;
+        pc.set_local_description(offer.clone()).await?;
+
+        Ok((peer, serde_json::to_string(&offer)?))
+    }
+
+    pub async fn from_offer(
+        offer: &str,
+        on_message: Arc<Mutex<webrtc::data_channel::OnMessageHdlrFn>>,
+        config: Config,
+        peer_id: &PeerID, // only for logging
+    ) -> Result<(Peer<WaitingICE>, String), PeerError> {
+        let (pc, state) = Self::new_peer_connection_with_state(config, peer_id).await?;
+
+        let dc = Arc::new(RwLock::new(None));
+
+        {
+            let dc_clone = dc.clone();
+            let state_clone = state.clone();
+            let peer_id_clone = peer_id.clone();
+
+            pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
+                let dc_clone = dc_clone.clone();
+                let state_clone = state_clone.clone();
+                let on_message = on_message.clone();
+                let peer_id = peer_id_clone.clone();
+
+                Box::pin(async move {
+                    *dc_clone.write().await = Some(dc.clone());
+
+                    Self::set_data_channel_callbacks(dc, state_clone, on_message, &peer_id).await;
+                })
+            }))
+        }
+
+        let offer: webrtc::peer_connection::sdp::session_description::RTCSessionDescription =
+            serde_json::from_str(offer)?;
+
+        pc.set_remote_description(offer).await?;
+
+        let answer = pc.create_answer(None).await?;
+        pc.set_local_description(answer.clone()).await?;
+
+        let peer = Peer {
+            pc: pc.clone(),
+            dc,
+            state,
+            _state: PhantomData,
+        };
+
+        Ok((peer, serde_json::to_string(&answer)?))
+    }
+
+    async fn new_peer_connection_with_state(
+        config: Config,
+        peer_id: &PeerID, // only for logging
+    ) -> Result<(Arc<RTCPeerConnection>, Arc<RwLock<PeerState>>), PeerError> {
         let mut m = MediaEngine::default();
         m.register_default_codecs()?;
 
@@ -146,8 +227,15 @@ impl Peer {
             }));
         }
 
-        let dc = pc.create_data_channel("data", None).await?;
+        Ok((pc, state))
+    }
 
+    async fn set_data_channel_callbacks(
+        dc: Arc<RTCDataChannel>,
+        state: Arc<RwLock<PeerState>>,
+        on_message: Arc<Mutex<webrtc::data_channel::OnMessageHdlrFn>>,
+        peer_id: &PeerID,
+    ) {
         {
             let peer_id_clone = peer_id.clone();
             let state_clone = state.clone();
@@ -193,31 +281,33 @@ impl Peer {
             }))
         }
 
-        dc.on_message(on_message);
-
-        let peer = Peer {
-            pc: pc.clone(),
-            dc,
-            state: state.clone(),
-        };
-
-        Ok((peer, Connecter { pc, state }))
+        let handler = on_message.clone();
+        dc.on_message(Box::new(move |msg| {
+            let handler = handler.clone();
+            Box::pin(async move {
+                let mut h = handler.lock().await;
+                (h)(msg).await;
+            })
+        }));
     }
-
-    // TODO: PeerB(受け)
-    // Connecterも変えると分かりやすい
 
     pub async fn send<T: serde::Serialize>(&self, message: T) -> Result<(), PeerError> {
         let message_json = serde_json::to_string(&message)?;
         let message_bytes = message_json.into_bytes();
 
-        if self.dc.ready_state()
-            != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+        let dc = self.dc.write().await;
+
+        assert!(dc.is_some());
+
+        if (*dc).as_ref().map(|dc| dc.ready_state())
+            != Some(webrtc::data_channel::data_channel_state::RTCDataChannelState::Open)
         {
             return Err(PeerError::PeerNotConnected);
         }
 
-        self.dc.send(&message_bytes.into()).await?;
+        let bytes = &message_bytes.into();
+
+        (*dc).as_ref().map(|dc| dc.send(bytes)).unwrap().await?;
 
         Ok(())
     }
@@ -232,45 +322,13 @@ impl Peer {
     }
 }
 
-#[derive(Debug)]
-pub(super) struct Connecter {
-    state: Arc<RwLock<PeerState>>,
-    pc: Arc<RTCPeerConnection>,
-}
-
-impl Connecter {
-    // 1. PeerA
-    pub async fn create_offer(&self) -> Result<String, PeerError> {
-        let offer = self.pc.create_offer(None).await?;
-        self.pc.set_local_description(offer.clone()).await?;
-
-        // SDP を JSON 形式で返す
-        Ok(serde_json::to_string(&offer)?)
-    }
-
-    // 2. PeerB
-    pub async fn create_answer(&self, offer_sdp: &str) -> Result<String, PeerError> {
-        let offer: webrtc::peer_connection::sdp::session_description::RTCSessionDescription =
-            serde_json::from_str(offer_sdp)?;
-        self.pc.set_remote_description(offer).await?;
-
-        let answer = self.pc.create_answer(None).await?;
-        self.pc.set_local_description(answer.clone()).await?;
-
-        Ok(serde_json::to_string(&answer)?)
-    }
-
-    // 3. PeerA
-    pub async fn set_remote_answer(&self, answer_sdp: &str) -> Result<(), PeerError> {
+impl Peer<WaitingAnswer> {
+    pub async fn set_remote_answer(self, answer_sdp: &str) -> Result<(), PeerError> {
         let answer: webrtc::peer_connection::sdp::session_description::RTCSessionDescription =
             serde_json::from_str(answer_sdp)?;
         self.pc.set_remote_description(answer).await?;
-        Ok(())
+        Ok(()) // TODO: WaitingGatheringICE?
     }
-
-    // 4. TODO: ICE
-    // 最初だけConnecterを通す。それ以降はDataChannelで送る
-    // -> どこで?
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -298,34 +356,34 @@ pub(super) enum SimpleError {
     Peer(#[source] PeerError, PeerID),
 }
 
-pub(super) struct SimpleConn {
-    peers: DashMap<PeerID, Peer>,
-    config: Config,
-
-    rx: Arc<RwLock<mpsc::UnboundedReceiver<(PeerID, Message)>>>,
-    tx: mpsc::UnboundedSender<(PeerID, Message)>,
-}
-
-impl SimpleConn {
-    fn new(config: Config) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-
-        Self {
-            peers: DashMap::new(),
-            config,
-
-            rx: Arc::new(RwLock::new(rx)),
-            tx,
-        }
-    }
-
-    fn new_with_default() -> Self {
-        Self::new(Config::default())
-    }
-}
+// pub(super) struct SimpleConn {
+//     peers: DashMap<PeerID, Peer>,
+//     config: Config,
+//
+//     rx: Arc<RwLock<mpsc::UnboundedReceiver<(PeerID, Message)>>>,
+//     tx: mpsc::UnboundedSender<(PeerID, Message)>,
+// }
+//
+// impl SimpleConn {
+//     fn new(config: Config) -> Self {
+//         let (tx, rx) = mpsc::unbounded_channel();
+//
+//         Self {
+//             peers: DashMap::new(),
+//             config,
+//
+//             rx: Arc::new(RwLock::new(rx)),
+//             tx,
+//         }
+//     }
+//
+//     fn new_with_default() -> Self {
+//         Self::new(Config::default())
+//     }
+// }
 
 // 複数のNodeとコネクションを保持しつつ、1:1の通信をするStruct
-impl SimpleConn {}
+// impl SimpleConn
 
 // #[cfg(test)]
 // mod tests {
