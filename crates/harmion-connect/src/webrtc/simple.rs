@@ -6,15 +6,17 @@
 // TODO: refactor
 // TODO: rewrite && learning WebRTC
 
+use serde::{Deserialize, Serialize};
+
 use std::marker::PhantomData;
+use std::pin::Pin;
 
 use crate::Message;
 
 use thiserror::Error;
 
-use dashmap::DashMap;
 use std::{cell::LazyCell, sync::Arc};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 use tracing::{error, info_span, warn};
 
@@ -94,10 +96,18 @@ pub(super) enum PeerState {
     Failed,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum InnerMessage {
+    Message(Message),
+}
+
+type OnMessageHdlrFn =
+    Box<dyn FnMut(Message) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
+
 impl<S: PeerConnectingState> Peer<S> {
     // PeerA
     pub(super) async fn new(
-        on_message: webrtc::data_channel::OnMessageHdlrFn,
+        on_message: OnMessageHdlrFn,
         config: Config,
         peer_id: &PeerID, // only for logging
     ) -> Result<(Peer<WaitingAnswer>, String), PeerError> {
@@ -123,7 +133,7 @@ impl<S: PeerConnectingState> Peer<S> {
 
     pub async fn from_offer(
         offer: &str,
-        on_message: Arc<Mutex<webrtc::data_channel::OnMessageHdlrFn>>,
+        on_message: Arc<Mutex<OnMessageHdlrFn>>,
         config: Config,
         peer_id: &PeerID, // only for logging
     ) -> Result<(Peer<WaitingICE>, String), PeerError> {
@@ -166,6 +176,38 @@ impl<S: PeerConnectingState> Peer<S> {
         };
 
         Ok((peer, serde_json::to_string(&answer)?))
+    }
+
+    pub async fn send(&self, message: String) -> Result<(), PeerError> {
+        let message_json = serde_json::to_string(&InnerMessage::Message(Message::new(message)))?;
+        let message_bytes = message_json.into_bytes();
+
+        let dc = self.dc.write().await;
+
+        if dc.is_none() {
+            return Err(PeerError::PeerNotConnected);
+        }
+
+        if (*dc).as_ref().map(|dc| dc.ready_state())
+            != Some(webrtc::data_channel::data_channel_state::RTCDataChannelState::Open)
+        {
+            return Err(PeerError::PeerNotConnected);
+        }
+
+        let bytes = &message_bytes.into();
+
+        (*dc).as_ref().map(|dc| dc.send(bytes)).unwrap().await?;
+
+        Ok(())
+    }
+
+    pub async fn disconnect(&mut self) -> Result<(), PeerError> {
+        self.pc.close().await?;
+        Ok(())
+    }
+
+    pub async fn get_peer_states(&self) -> PeerState {
+        self.state.read().await.clone()
     }
 
     async fn new_peer_connection_with_state(
@@ -233,7 +275,7 @@ impl<S: PeerConnectingState> Peer<S> {
     async fn set_data_channel_callbacks(
         dc: Arc<RTCDataChannel>,
         state: Arc<RwLock<PeerState>>,
-        on_message: Arc<Mutex<webrtc::data_channel::OnMessageHdlrFn>>,
+        on_message: Arc<Mutex<OnMessageHdlrFn>>,
         peer_id: &PeerID,
     ) {
         {
@@ -281,44 +323,42 @@ impl<S: PeerConnectingState> Peer<S> {
             }))
         }
 
-        let handler = on_message.clone();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            // 他でCloneしていないはず
+            let mut handler = on_message.lock().await;
+
+            loop {
+                let msg: Option<Message> = rx.recv().await;
+
+                match msg {
+                    Some(msg) => {
+                        handler(msg).await;
+                    }
+                    _ => warn!("OnMessage Channel has closed."),
+                }
+            }
+        });
+
         dc.on_message(Box::new(move |msg| {
-            let handler = handler.clone();
-            Box::pin(async move {
-                let mut h = handler.lock().await;
-                (h)(msg).await;
-            })
+            let data = msg.data.to_vec();
+
+            match String::from_utf8(data) {
+                Ok(text) => match serde_json::from_str::<InnerMessage>(&text) {
+                    Ok(InnerMessage::Message(msg)) => {
+                        let _ = tx.send(msg);
+                    }
+                    Err(e) => {
+                        warn!("JSON deserialize error: {}", e);
+                    }
+                },
+                Err(e) => {
+                    warn!("Invalid UTF-8 sequence: {}", e);
+                }
+            }
+
+            Box::pin(async move {})
         }));
-    }
-
-    pub async fn send<T: serde::Serialize>(&self, message: T) -> Result<(), PeerError> {
-        let message_json = serde_json::to_string(&message)?;
-        let message_bytes = message_json.into_bytes();
-
-        let dc = self.dc.write().await;
-
-        assert!(dc.is_some());
-
-        if (*dc).as_ref().map(|dc| dc.ready_state())
-            != Some(webrtc::data_channel::data_channel_state::RTCDataChannelState::Open)
-        {
-            return Err(PeerError::PeerNotConnected);
-        }
-
-        let bytes = &message_bytes.into();
-
-        (*dc).as_ref().map(|dc| dc.send(bytes)).unwrap().await?;
-
-        Ok(())
-    }
-
-    pub async fn disconnect(&mut self) -> Result<(), PeerError> {
-        self.pc.close().await?;
-        Ok(())
-    }
-
-    pub async fn get_peer_states(&self) -> PeerState {
-        self.state.read().await.clone()
     }
 }
 
@@ -338,9 +378,11 @@ impl PeerID {
     pub fn new(id: String) -> Self {
         Self(id)
     }
+}
 
-    pub fn to_string(&self) -> String {
-        self.0.clone()
+impl std::fmt::Display for PeerID {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
