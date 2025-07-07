@@ -15,7 +15,7 @@ use std::fmt;
 
 impl fmt::Debug for TopicTree {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(
+        write!(
             f,
             "{}",
             self.0
@@ -24,7 +24,7 @@ impl fmt::Debug for TopicTree {
                 .map(|i| i.value())
                 .collect::<Vec<_>>()
                 .join(" / ")
-        )?; // TODO: Itertools
+        )?;
         Ok(())
     }
 }
@@ -59,10 +59,10 @@ mod tests {
     #[test]
     fn debug_topic_tree() -> Result<(), Box<dyn std::error::Error>> {
         let topic = crate::topic!("harmion", "write");
-        assert_eq!(format!("{:?}", topic), "harmion / write\n");
+        assert_eq!(format!("{:?}", topic), "harmion / write");
 
         let topic = crate::topic!("harmion", "write", "/to/file");
-        assert_eq!(format!("{:?}", topic), "harmion / write / /to/file\n");
+        assert_eq!(format!("{:?}", topic), "harmion / write / /to/file");
 
         Ok(())
     }
