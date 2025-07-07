@@ -216,25 +216,19 @@ impl<S: PeerConnectingState> Peer<S> {
         Ok((peer, serde_json::to_string(&local)?))
     }
 
-    pub(super) async fn send(&self, message: String) -> Result<(), PeerError> {
+    pub async fn send(&self, message: String) -> Result<(), PeerError> {
         let message_json = serde_json::to_string(&InnerMessage::Message(Message::new(message)))?;
         let message_bytes = message_json.into_bytes();
 
-        let dc = self.dc.write().await;
+        let dc_guard = self.dc.read().await;
+        let dc = dc_guard.as_ref().ok_or(PeerError::PeerNotConnected)?;
 
-        if dc.is_none() {
-            return Err(PeerError::PeerNotConnected);
-        }
-
-        if (*dc).as_ref().map(|dc| dc.ready_state())
-            != Some(webrtc::data_channel::data_channel_state::RTCDataChannelState::Open)
-        {
+        if dc.ready_state() != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
             return Err(PeerError::PeerNotConnected);
         }
 
         let bytes = &message_bytes.into();
-
-        (*dc).as_ref().map(|dc| dc.send(bytes)).unwrap().await?;
+        (*dc).send(bytes).await?;
 
         Ok(())
     }
