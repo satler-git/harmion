@@ -16,8 +16,8 @@ webrtc = "0.13.0"
 thiserror = { workspace = true }
 tracing   = { workspace = true }
 
-tokio = { workspace = true }
-
-warp    = "0.3"
-dashmap = "6.0.1"
+tokio      = { workspace = true }
 tokio-util = "0.7.16"
+
+ntex = "2.15.1"
+rmp-serde = "1.3.0"

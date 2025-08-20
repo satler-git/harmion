@@ -56,8 +56,10 @@ pub(super) enum PeerError {
     WebRTC(#[from] webrtc::Error),
     #[error("Peer not connected")]
     PeerNotConnected,
-    #[error("Serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
+    #[error("Serialization error(Message): {0}")]
+    MessageSerialize(#[from] rmp_serde::encode::Error),
+    #[error("(De)Serialization error(SDP): {0}")]
+    SDPSerialize(#[from] serde_json::Error),
     #[error("Data channel not available")]
     DataChannelNotAvailable,
     #[error("Connection failed")]
@@ -466,19 +468,14 @@ impl<S: PeerConnectingState> Peer<S> {
             let tx = tx.clone();
 
             Box::pin(async move {
-                match String::from_utf8(data) {
-                    Ok(text) => match serde_json::from_str::<InnerMessage>(&text) {
-                        Ok(msg) => {
-                            if let Err(e) = tx.send(msg).await {
-                                warn!("OnMessage Channel has closed: {e}")
-                            }
+                match rmp_serde::from_slice::<InnerMessage>(&data) {
+                    Ok(msg) => {
+                        if let Err(e) = tx.send(msg).await {
+                            warn!("OnMessage Channel has closed: {e}")
                         }
-                        Err(e) => {
-                            warn!("JSON deserialize error: {}", e);
-                        }
-                    },
+                    }
                     Err(e) => {
-                        warn!("Invalid UTF-8 sequence: {}", e);
+                        warn!("MessagePack deserialize error: {}", e);
                     }
                 }
             })
@@ -487,9 +484,8 @@ impl<S: PeerConnectingState> Peer<S> {
 }
 
 impl Peer<Connected> {
-    pub async fn send(&self, message: String) -> Result<(), PeerError> {
-        let message_json = serde_json::to_string(&InnerMessage::Message(Message::new(message)))?;
-        let message_bytes = message_json.into_bytes();
+    pub async fn send(&self, message: Message) -> Result<(), PeerError> {
+        let message = rmp_serde::to_vec(&InnerMessage::Message(message))?; // rmp?
 
         let dc_guard = self.dc.read().await;
         let dc = dc_guard
@@ -501,7 +497,7 @@ impl Peer<Connected> {
             return Err(PeerError::PeerNotConnected);
         }
 
-        dc.send(&message_bytes.into()).await?;
+        dc.send(&message.into()).await?;
 
         Ok(())
     }
@@ -653,7 +649,7 @@ mod tests {
 
         let payload = "hello from A".to_string();
         peer_a_c
-            .send(payload.clone())
+            .send(Message::new(payload.clone()))
             .await
             .expect("failed to send");
 
