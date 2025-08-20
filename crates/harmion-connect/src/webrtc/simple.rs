@@ -452,6 +452,7 @@ impl<S: PeerConnectingState> Peer<S> {
                             InnerMessage::Message(msg) => {
                                 if let Err(e) = message_tx.send(msg).await {
                                     error!("failed to send message to message_tx: {e}");
+                                    break;
                                 }
                             }
                         }
@@ -505,7 +506,7 @@ impl Peer<Connected> {
         Ok(())
     }
 
-    pub async fn receiver(&mut self) -> &mut mpsc::Receiver<Message> {
+    pub fn receiver(&mut self) -> &mut mpsc::Receiver<Message> {
         &mut self.recv
     }
 
