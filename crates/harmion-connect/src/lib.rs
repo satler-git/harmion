@@ -20,7 +20,7 @@ pub trait Subscriber {
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Message {
     pub content: String,
     pub timestamp: u64,

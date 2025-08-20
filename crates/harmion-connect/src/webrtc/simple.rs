@@ -1,21 +1,19 @@
-#![allow(dead_code)] // TODO: remove this
-                     // TODO: ICE Stateの監視
-                     // TODO: refactor
-                     // TODO: rewrite && learning WebRTC
-
 use serde::{Deserialize, Serialize};
 
 use std::marker::PhantomData;
-use std::pin::Pin;
 
 use crate::Message;
 
 use thiserror::Error;
 
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::{
+    select,
+    sync::{mpsc, oneshot, RwLock},
+};
+use tokio_util::sync::CancellationToken;
 
-use tracing::{error, info_span, warn};
+use tracing::{error, info, info_span, warn};
 
 use webrtc::{
     api::{
@@ -38,6 +36,7 @@ pub const GOOGLE_STUN_LIST: [&str; 10] = [
     "stun:stun4.1.google.com:19302",
     "stun:stun4.1.google.com:5349",
 ];
+const BUFFER_SIZE: usize = 256;
 
 pub(super) struct Config {
     pub stun: Vec<String>,
@@ -68,7 +67,6 @@ pub(super) enum PeerError {
 }
 
 pub(crate) mod private {
-    #![allow(dead_code)]
     pub trait Sealed {}
 }
 
@@ -76,6 +74,10 @@ pub(super) struct Peer<S: PeerConnectingState> {
     pc: Arc<RTCPeerConnection>,
     dc: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     state: Arc<RwLock<PeerState>>,
+
+    recv: mpsc::Receiver<Message>,
+
+    cancel: CancellationToken,
 
     ready: Option<mpsc::Receiver<()>>, // from_offerから作ったときに、DataChannelが出来たことの通知用
     _state: PhantomData<S>,
@@ -109,13 +111,9 @@ enum InnerMessage {
     Ice(webrtc::ice_transport::ice_candidate::RTCIceCandidateInit), // 接続確立以降は
 }
 
-pub(super) type OnMessageHdlrFn =
-    Box<dyn FnMut(Message) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
-
 impl<S: PeerConnectingState> Peer<S> {
     // PeerA
     pub(super) async fn new(
-        on_message: OnMessageHdlrFn,
         config: Config,
         peer_id: &PeerID, // only for logging
     ) -> Result<(Peer<WaitingAnswer>, String), PeerError> {
@@ -123,13 +121,17 @@ impl<S: PeerConnectingState> Peer<S> {
 
         let dc = pc.create_data_channel("data", None).await?;
 
-        let on_message = Arc::new(Mutex::new(on_message));
+        let cancel = CancellationToken::new();
+
+        let (tx, recv) = mpsc::channel(BUFFER_SIZE);
+
         Self::set_data_channel_callbacks(
             pc.clone(),
             dc.clone(),
             state.clone(),
-            on_message,
             peer_id,
+            tx,
+            cancel.clone(),
         )
         .await;
 
@@ -139,6 +141,8 @@ impl<S: PeerConnectingState> Peer<S> {
             state: state.clone(),
             ready: None,
             _state: PhantomData,
+            recv,
+            cancel,
         };
 
         let offer = pc.create_offer(None).await?;
@@ -156,31 +160,33 @@ impl<S: PeerConnectingState> Peer<S> {
 
     pub(super) async fn from_offer(
         offer: &str,
-        on_message: OnMessageHdlrFn,
         config: Config,
         peer_id: &PeerID, // only for logging
     ) -> Result<(Peer<WaitingICE>, String), PeerError> {
-        let on_message = Arc::new(Mutex::new(on_message));
-
         let (pc, state) = Self::new_peer_connection_with_state(config, peer_id).await?;
 
         let dc = Arc::new(RwLock::new(None));
 
         let (tx, ready) = mpsc::channel(1);
+        let (message_tx, recv) = mpsc::channel(BUFFER_SIZE);
+
+        let cancel = CancellationToken::new();
 
         {
             let dc_clone = dc.clone();
             let state_clone = state.clone();
             let peer_id_clone = peer_id.clone();
             let pc_clone = pc.clone();
+            let cancel_clone = cancel.clone();
 
             pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
                 let dc_clone = dc_clone.clone();
                 let state_clone = state_clone.clone();
-                let on_message = on_message.clone();
                 let peer_id = peer_id_clone.clone();
                 let pc_clone = pc_clone.clone();
                 let tx = tx.clone();
+                let message_tx = message_tx.clone();
+                let cancel = cancel_clone.clone();
 
                 Box::pin(async move {
                     let _ = tx.send(()).await;
@@ -190,8 +196,9 @@ impl<S: PeerConnectingState> Peer<S> {
                         pc_clone,
                         dc,
                         state_clone,
-                        on_message,
                         &peer_id,
+                        message_tx,
+                        cancel,
                     )
                     .await;
                 })
@@ -219,6 +226,8 @@ impl<S: PeerConnectingState> Peer<S> {
             state,
             ready: Some(ready),
             _state: PhantomData,
+            recv,
+            cancel,
         };
 
         Ok((peer, serde_json::to_string(&local)?))
@@ -262,14 +271,14 @@ impl<S: PeerConnectingState> Peer<S> {
         let state = Arc::new(RwLock::new(PeerState::Connecting));
 
         {
-            let peer_id_clone = peer_id.clone();
+            let peer_id = peer_id.clone();
             let state_clone = state.clone();
 
             pc.on_peer_connection_state_change(Box::new(move |state| {
-                info_span!(
-                    "Peer connection state changed",
-                    peer_id = peer_id_clone.as_ref(),
-                    %state
+                info!(
+                    "{}: Peer connection state changed: {:?}",
+                    peer_id,
+                    state
                 );
 
 
@@ -287,6 +296,34 @@ impl<S: PeerConnectingState> Peer<S> {
             }));
         }
 
+        {
+            let peer_id = peer_id.clone();
+
+            pc.on_ice_gathering_state_change(Box::new(move |new_state| {
+                info!(
+                    "{}: ice gathering state was changed: {:?}",
+                    peer_id.as_ref(),
+                    new_state
+                );
+
+                Box::pin(async move {})
+            }))
+        }
+
+        {
+            let peer_id = peer_id.clone();
+
+            pc.on_ice_connection_state_change(Box::new(move |new_state| {
+                info!(
+                    "{}: ice connection state was changed: {:?}",
+                    peer_id.as_ref(),
+                    new_state
+                );
+
+                Box::pin(async move {})
+            }))
+        }
+
         Ok((pc, state))
     }
 
@@ -294,8 +331,9 @@ impl<S: PeerConnectingState> Peer<S> {
         pc: Arc<RTCPeerConnection>,
         dc: Arc<RTCDataChannel>,
         state: Arc<RwLock<PeerState>>,
-        on_message: Arc<Mutex<OnMessageHdlrFn>>,
         peer_id: &PeerID,
+        message_tx: mpsc::Sender<Message>,
+        cancel: CancellationToken,
     ) {
         {
             let peer_id_clone = peer_id.clone();
@@ -342,91 +380,108 @@ impl<S: PeerConnectingState> Peer<S> {
             }))
         }
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(BUFFER_SIZE);
         let dc_clone = dc.clone();
+
+        let cancel_c = cancel.clone();
         tokio::spawn(async move {
             loop {
-                let msg = rx.recv().await;
-                let dc = dc_clone.clone();
+                select! {
+                    _ = cancel_c.cancelled() => {
+                        break;
+                    }
+                    Some(msg) = rx.recv() => {
+                        let dc = dc_clone.clone();
 
-                if msg.is_none() {
-                    warn!("ICE Channel has closed");
-                    break;
-                }
+                        match serde_json::to_string(&InnerMessage::Ice(msg)) {
+                            // TODO: via Signal?
+                            Ok(message_json) => {
+                                let message_bytes = message_json.into_bytes();
 
-                let msg = msg.unwrap();
+                                if dc.ready_state()
+                                    != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+                                {
+                                    warn!("{}", PeerError::PeerNotConnected);
+                                }
 
-                match serde_json::to_string(&InnerMessage::Ice(msg)) {
-                    Ok(message_json) => {
-                        let message_bytes = message_json.into_bytes();
+                                let bytes = &message_bytes.into();
 
-                        if dc.ready_state()
-                            != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
-                        {
-                            warn!("{}", PeerError::PeerNotConnected);
-                        }
-
-                        let bytes = &message_bytes.into();
-
-                        if let Err(e) = dc.send(bytes).await {
-                            error!("failed to send ice data to the another peer: {e}")
+                                if let Err(e) = dc.send(bytes).await {
+                                    error!("failed to send ice data to the another peer: {e}")
+                                }
+                            }
+                            Err(e) => warn!("failed to convert ice to json string: {e}"),
                         }
                     }
-                    Err(e) => warn!("failed to convert ice to json string: {e}"),
                 }
             }
         });
+
         pc.on_ice_candidate(Box::new(move |ice| {
-            match ice.map(|i| i.to_json()) {
-                Some(Ok(ice)) => {
-                    if let Err(e) = tx.send(ice) {
-                        warn!("ICE Channel has closed: {e}")
-                    }
-                }
-                Some(Err(e)) => warn!("failed to convert ice candidate to json: {e}"),
-                _ => warn!("ice is none"),
-            }
-            Box::pin(async {})
-        }));
+            let tx = tx.clone();
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            // 他でCloneしていないはず
-            let mut handler = on_message.lock().await;
-
-            while let Some(msg) = rx.recv().await {
-                match msg {
-                    InnerMessage::Ice(ice) => {
-                        if let Err(e) = pc.add_ice_candidate(ice).await {
-                            warn!("Failed to add ice candidate: {e}")
+            Box::pin(async move {
+                match ice.map(|i| i.to_json()) {
+                    Some(Ok(ice)) => {
+                        if let Err(e) = tx.send(ice).await {
+                            warn!("ICE Channel has closed: {e}")
                         }
                     }
-                    InnerMessage::Message(msg) => handler(msg).await,
+                    Some(Err(e)) => error!("failed to convert ice candidate to json: {e}"),
+                    _ => warn!("ice is none"),
+                }
+            })
+        }));
+
+        let (tx, mut rx) = mpsc::channel(BUFFER_SIZE);
+        let cancel_c = cancel.clone();
+        tokio::spawn(async move {
+            // 他でCloneしていないはず
+            loop {
+                select! {
+                    _ = cancel_c.cancelled() => {
+                        break;
+                    }
+                    Some(msg) = rx.recv() => {
+                        match msg {
+                            InnerMessage::Ice(ice) => {
+                                if let Err(e) = pc.add_ice_candidate(ice).await {
+                                    error!("Failed to add ice candidate: {e}")
+                                }
+                            }
+                            InnerMessage::Message(msg) => {
+                                if let Err(e) = message_tx.send(msg).await {
+                                    error!("failed to send message to message_tx: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            warn!("OnMessage Channel has closed");
         });
 
         dc.on_message(Box::new(move |msg| {
             let data = msg.data.to_vec();
+            let tx = tx.clone();
 
-            match String::from_utf8(data) {
-                Ok(text) => match serde_json::from_str::<InnerMessage>(&text) {
-                    Ok(msg) => {
-                        if let Err(e) = tx.send(msg) {
-                            warn!("OnMessage Channel has closed: {e}")
+            Box::pin(async move {
+                match String::from_utf8(data) {
+                    Ok(text) => match serde_json::from_str::<InnerMessage>(&text) {
+                        Ok(msg) => {
+                            if let Err(e) = tx.send(msg).await {
+                                warn!("OnMessage Channel has closed: {e}")
+                            }
                         }
-                    }
+                        Err(e) => {
+                            warn!("JSON deserialize error: {}", e);
+                        }
+                    },
                     Err(e) => {
-                        warn!("JSON deserialize error: {}", e);
+                        warn!("Invalid UTF-8 sequence: {}", e);
                     }
-                },
-                Err(e) => {
-                    warn!("Invalid UTF-8 sequence: {}", e);
                 }
-            }
-
-            Box::pin(async move {})
+            })
         }));
     }
 }
@@ -451,8 +506,13 @@ impl Peer<Connected> {
         Ok(())
     }
 
+    pub fn receiver(&mut self) -> &mut mpsc::Receiver<Message> {
+        &mut self.recv
+    }
+
     pub(super) async fn disconnect(self) -> Result<(), PeerError> {
         self.pc.close().await?;
+        self.cancel.cancel();
         Ok(())
     }
 }
@@ -486,6 +546,8 @@ impl Peer<WaitingAnswer> {
             dc: self.dc,
             state: self.state,
             ready: self.ready,
+            recv: self.recv,
+            cancel: self.cancel,
             _state: PhantomData,
         })
     }
@@ -520,6 +582,8 @@ impl Peer<WaitingICE> {
             dc: self.dc,
             state: self.state,
             ready: None,
+            recv: self.recv,
+            cancel: self.cancel,
             _state: PhantomData,
         })
     }
@@ -546,76 +610,22 @@ impl AsRef<str> for PeerID {
     }
 }
 
-#[derive(Error, Debug)]
-pub(super) enum SimpleError {
-    #[error("{0}: {1:?}")]
-    Peer(#[source] PeerError, PeerID),
-}
-
-// pub(super) struct SimpleConn {
-//     peers: DashMap<PeerID, Peer>,
-//     config: Config,
-//
-//     rx: Arc<RwLock<mpsc::UnboundedReceiver<(PeerID, Message)>>>,
-//     tx: mpsc::UnboundedSender<(PeerID, Message)>,
-// }
-//
-// impl SimpleConn {
-//     fn new(config: Config) -> Self {
-//         let (tx, rx) = mpsc::unbounded_channel();
-//
-//         Self {
-//             peers: DashMap::new(),
-//             config,
-//
-//             rx: Arc::new(RwLock::new(rx)),
-//             tx,
-//         }
-//     }
-//
-//     fn new_with_default() -> Self {
-//         Self::new(Config::default())
-//     }
-// }
-
-// 複数のNodeとコネクションを保持しつつ、1:1の通信をするStruct
-// impl SimpleConn
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::oneshot;
-
-    // ダミー on_message ハンドラ。受信したメッセージを oneshot で返す。
-    fn make_on_message_handler(mut tx: Option<oneshot::Sender<String>>) -> OnMessageHdlrFn {
-        Box::new(move |msg: Message| {
-            let tx = tx.take();
-
-            Box::pin(async move {
-                let _ = tx.unwrap().send(msg.content.to_owned());
-            })
-        })
-    }
 
     #[tokio::test]
     #[ignore]
     async fn offer_answer_connects_peers() {
-        let (peer_a_wa, offer_sdp) = Peer::<WaitingAnswer>::new(
-            Box::new(|_| Box::pin(async {})),
-            Config::default(),
-            &PeerID::new("A".into()),
-        )
-        .await
-        .expect("failed to create peer A");
+        let (peer_a_wa, offer_sdp) =
+            Peer::<WaitingAnswer>::new(Config::default(), &PeerID::new("A".into()))
+                .await
+                .expect("failed to create peer A");
 
-        let (peer_b_wi, answer_sdp) = Peer::<WaitingICE>::from_offer(
-            &offer_sdp,
-            Box::new(|_| Box::pin(async {})),
-            Config::default(),
-            &PeerID::new("B".into()),
-        )
-        .await
-        .expect("failed to create peer B");
+        let (peer_b_wi, answer_sdp) =
+            Peer::<WaitingICE>::from_offer(&offer_sdp, Config::default(), &PeerID::new("B".into()))
+                .await
+                .expect("failed to create peer B");
 
         let peer_a_c = peer_a_wa.set_remote_answer(&answer_sdp).await.unwrap();
         let peer_b_c = peer_b_wi.wait().await.unwrap();
@@ -628,28 +638,18 @@ mod tests {
     #[ignore]
     async fn send_and_receive_message() {
         // Offer/Answer のセットアップ（省略可：先のテストを呼び出しても OK）
-        let (peer_a_wa, offer_sdp) = Peer::<WaitingAnswer>::new(
-            Box::new(|_| Box::pin(async {})),
-            Config::default(),
-            &PeerID::new("A".into()),
-        )
-        .await
-        .unwrap();
+        let (peer_a_wa, offer_sdp) =
+            Peer::<WaitingAnswer>::new(Config::default(), &PeerID::new("A".into()))
+                .await
+                .unwrap();
 
-        let (tx, rx) = oneshot::channel();
-        let on_msg_handler = make_on_message_handler(Some(tx));
-
-        let (peer_b_wi, answer_sdp) = Peer::<WaitingICE>::from_offer(
-            &offer_sdp,
-            on_msg_handler,
-            Config::default(),
-            &PeerID::new("B".into()),
-        )
-        .await
-        .unwrap();
+        let (peer_b_wi, answer_sdp) =
+            Peer::<WaitingICE>::from_offer(&offer_sdp, Config::default(), &PeerID::new("B".into()))
+                .await
+                .unwrap();
 
         let peer_a_c = peer_a_wa.set_remote_answer(&answer_sdp).await.unwrap();
-        let _peer_b_c = peer_b_wi.wait().await.unwrap();
+        let mut peer_b_c = peer_b_wi.wait().await.unwrap();
 
         let payload = "hello from A".to_string();
         peer_a_c
@@ -657,10 +657,12 @@ mod tests {
             .await
             .expect("failed to send");
 
-        let received = tokio::time::timeout(std::time::Duration::from_secs(100), rx)
-            .await
-            .expect("timeout waiting for message")
-            .expect("receiver dropped");
-        assert_eq!(received, payload);
+        let received =
+            tokio::time::timeout(std::time::Duration::from_secs(100), peer_b_c.recv.recv())
+                .await
+                .expect("timeout waiting for message")
+                .expect("receiver dropped");
+
+        assert_eq!(received.content, payload);
     }
 }
