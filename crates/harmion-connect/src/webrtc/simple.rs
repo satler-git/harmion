@@ -481,7 +481,7 @@ impl<S: PeerConnectingState> Peer<S> {
 
 impl Peer<Connected> {
     pub async fn send(&self, message: Message) -> Result<(), PeerError> {
-        let message = rmp_serde::to_vec(&InnerMessage::Message(message))?; // rmp?
+        let message = rmp_serde::to_vec(&InnerMessage::Message(message))?;
 
         let dc_guard = self.dc.read().await;
         let dc = dc_guard
