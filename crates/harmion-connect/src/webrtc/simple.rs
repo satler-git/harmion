@@ -395,24 +395,20 @@ impl<S: PeerConnectingState> Peer<S> {
                     Some(msg) = rx.recv() => {
                         let dc = dc_clone.clone();
 
-                        match serde_json::to_string(&InnerMessage::Ice(msg)) {
+                        match rmp_serde::to_vec(&InnerMessage::Ice(msg)) {
                             // TODO: via Signal?
-                            Ok(message_json) => {
-                                let message_bytes = message_json.into_bytes();
-
+                            Ok(data) => {
                                 if dc.ready_state()
                                     != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
                                 {
                                     warn!("{}", PeerError::PeerNotConnected);
                                 }
 
-                                let bytes = &message_bytes.into();
-
-                                if let Err(e) = dc.send(bytes).await {
+                                if let Err(e) = dc.send(&data.into()).await {
                                     error!("failed to send ice data to the another peer: {e}")
                                 }
                             }
-                            Err(e) => warn!("failed to convert ice to json string: {e}"),
+                            Err(e) => warn!("failed to convert ice to MessagePack: {e}"),
                         }
                     }
                 }
