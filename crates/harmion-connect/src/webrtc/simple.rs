@@ -58,8 +58,8 @@ pub(super) enum PeerError {
     PeerNotConnected,
     #[error("Serialization error(Message): {0}")]
     MessageSerialize(#[from] rmp_serde::encode::Error),
-    #[error("(De)Serialization error(SDP): {0}")]
-    SDPSerialize(#[from] serde_json::Error),
+    #[error("SDP JSON serialization/deserialization error: {0}")]
+    SDPJson(#[from] serde_json::Error),
     #[error("Data channel not available")]
     DataChannelNotAvailable,
     #[error("Connection failed")]
