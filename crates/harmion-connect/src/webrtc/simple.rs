@@ -109,7 +109,7 @@ pub(super) enum PeerState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum InnerMessage {
-    Message(Message),
+    Message(Box<Message>),
     Ice(webrtc::ice_transport::ice_candidate::RTCIceCandidateInit), // 接続確立以降は
 }
 
@@ -448,7 +448,7 @@ impl<S: PeerConnectingState> Peer<S> {
                                 }
                             }
                             InnerMessage::Message(msg) => {
-                                if let Err(e) = message_tx.send(msg).await {
+                                if let Err(e) = message_tx.send(*msg).await {
                                     error!("failed to send message to message_tx: {e}");
                                     break;
                                 }
@@ -481,7 +481,7 @@ impl<S: PeerConnectingState> Peer<S> {
 
 impl Peer<Connected> {
     pub async fn send(&self, message: Message) -> Result<(), PeerError> {
-        let message = rmp_serde::to_vec(&InnerMessage::Message(message))?;
+        let message = rmp_serde::to_vec(&InnerMessage::Message(Box::new(message)))?;
 
         let dc_guard = self.dc.read().await;
         let dc = dc_guard
