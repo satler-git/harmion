@@ -18,23 +18,41 @@ pub trait Subscriber {
     ) -> impl std::future::Future<Output = Result<(), Self::E>> + Send;
 }
 
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Message {
-    pub content: String,
+    pub content: Vec<u8>,
     pub timestamp: u64,
+
+    pub origin: VerifyingKey,
+    pub sig: Signature,
 }
 
 impl Message {
-    pub fn new(content: String) -> Self {
+    pub fn new(content: Vec<u8>, key: &SigningKey) -> Self {
         Self {
+            sig: key.sign(&content),
+            origin: key.verifying_key(),
+
             content,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("System time is before the UNIX epoch")
                 .as_secs(),
         }
+    }
+
+    pub fn from<T: Serialize>(
+        value: &T,
+        key: &SigningKey,
+    ) -> Result<Self, rmp_serde::encode::Error> {
+        Ok(Self::new(rmp_serde::to_vec(value)?, key))
+    }
+
+    pub fn verify(&self) -> bool {
+        (self.origin).verify(&self.content, &self.sig).is_ok()
     }
 }
 

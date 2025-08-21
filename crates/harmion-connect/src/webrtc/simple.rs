@@ -644,8 +644,14 @@ mod tests {
         let mut peer_b_c = peer_b_wi.wait().await.unwrap();
 
         let payload = "hello from A".to_string();
+
+        let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
+
         peer_a_c
-            .send(Message::new(payload.clone()))
+            .send(Message::new(
+                payload.clone().into(),
+                &ed25519_dalek::SigningKey::generate(&mut rng),
+            ))
             .await
             .expect("failed to send");
 
@@ -655,6 +661,8 @@ mod tests {
                 .expect("timeout waiting for message")
                 .expect("receiver dropped");
 
-        assert_eq!(received.content, payload);
+        assert!(received.verify());
+
+        assert_eq!(String::from_utf8(received.content).unwrap(), payload);
     }
 }
