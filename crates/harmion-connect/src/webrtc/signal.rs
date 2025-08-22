@@ -129,16 +129,19 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat() -> Result<(), Box<dyn std::error::Error>> {
-        let mut sig = super::Signal::new(5728);
+        let mut sig = super::Signal::new(0);
 
         println!("starting the server");
 
         sig.run("test").await?;
 
+        let port = sig.info().unwrap().addr.1;
+        let url = format!("http://0.0.0.0:{port}/heartbeat");
+
         let client = reqwest::Client::new();
 
         println!("first request");
-        let response = client.get("http://0.0.0.0:5728/heartbeat").send().await?;
+        let response = client.get(&url).send().await?;
 
         let body = response.text().await?;
         dbg!(body);
@@ -147,7 +150,7 @@ mod tests {
         sig.shutdown();
 
         println!("second request");
-        let response = client.get("http://0.0.0.0:5728/heartbeat").send().await;
+        let response = client.get(&url).send().await;
         assert!(response.is_err());
 
         Ok(())
