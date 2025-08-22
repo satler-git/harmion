@@ -356,12 +356,16 @@ impl<S: PeerConnectingState> Peer<S> {
         {
             let peer_id_clone = peer_id.clone();
             let state_clone = state.clone();
+            let cancel = cancel.clone();
 
             dc.on_close(Box::new(move || {
                 info_span!(
                     "Data channel closed for peer",
                     peer_id = peer_id_clone.as_ref()
                 );
+
+                cancel.cancel();
+
                 let state_clone = state_clone.clone();
                 Box::pin(async move {
                     *state_clone.write().await = PeerState::Disconnected;
