@@ -21,7 +21,7 @@ pub(super) struct SignalInfo {
 
 #[derive(Debug, Clone)]
 pub(super) struct Signal {
-    port: u16,
+    port: u16, // sig.port /= info.port の場合あり
     info: Option<ServerInfo>,
 }
 
@@ -41,23 +41,29 @@ impl Signal {
             return Err(SignalError::ServerRunning);
         }
 
+        let listener =
+            tokio::net::TcpListener::bind::<std::net::SocketAddr>(([0, 0, 0, 0], self.port).into())
+                .await?;
+
+        let port = listener.local_addr()?.port();
+
         let token = CancellationToken::new();
 
-        self.info = Some(ServerInfo {
-            shutdown_token: token.clone(),
-            signal_info: SignalInfo {
-                addr: (host.into(), self.port),
-            },
-        });
-
+        let token_c = token.clone();
         let srv = warp::serve(route())
-            .bind(([0, 0, 0, 0], self.port))
-            .await
+            .incoming(listener)
             .graceful(async move {
-                token.cancelled().await;
+                token_c.cancelled().await;
             });
 
         tokio::spawn(srv.run());
+
+        self.info = Some(ServerInfo {
+            shutdown_token: token,
+            signal_info: SignalInfo {
+                addr: (host.into(), port),
+            },
+        });
 
         Ok(())
     }
