@@ -23,18 +23,26 @@ use serde::{Deserialize, Serialize};
 
 const NONCE_LEN: usize = 12;
 
+#[derive(Copy, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct PeerIndex(VerifyingKey);
+
+impl<T: Into<VerifyingKey>> From<T> for PeerIndex {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Message {
     pub content: Vec<u8>,
     pub timestamp: u64,
 
-    pub origin: VerifyingKey,
+    pub origin: PeerIndex,
     pub sig: Signature,
 
     pub nonce: [u8; NONCE_LEN],
 }
 
-// TODO: replay-cache(3~10m)
 use rand::{rngs::ThreadRng, RngCore}; // TODO: Reseed?
 
 impl Message {
@@ -58,7 +66,7 @@ impl Message {
 
         Self {
             sig: key.sign(&data_to_sign),
-            origin: key.verifying_key(),
+            origin: PeerIndex(key.verifying_key()),
             nonce,
 
             content,
@@ -75,6 +83,7 @@ impl Message {
 
     pub fn verify(&self) -> bool {
         (self.origin)
+            .0
             .verify(
                 &{
                     let mut data = Vec::with_capacity(
@@ -93,3 +102,60 @@ impl Message {
             .is_ok()
     }
 }
+
+use serde::de::DeserializeOwned;
+
+pub struct MessageT<T: DeserializeOwned> {
+    pub content: T,
+    pub timestamp: u64,
+
+    pub origin: PeerIndex,
+    pub sig: Signature,
+
+    pub nonce: [u8; NONCE_LEN],
+
+    pub verify_result: bool,
+}
+
+impl<T: DeserializeOwned> TryFrom<Message> for MessageT<T> {
+    type Error = rmp_serde::decode::Error;
+
+    fn try_from(value: Message) -> Result<Self, rmp_serde::decode::Error> {
+        let verify_res = value.verify();
+        let content: T = rmp_serde::from_slice(&value.content)?;
+
+        Ok(Self {
+            content,
+            timestamp: value.timestamp,
+            origin: value.origin,
+            sig: value.sig,
+            nonce: value.nonce,
+            verify_result: verify_res,
+        })
+    }
+}
+
+trait Connection<T, R> {
+    type Error: std::error::Error;
+
+    async fn send(&mut self, value: T) -> Result<(), Self::Error>;
+    async fn recv(&mut self) -> Result<Option<R>, Self::Error>;
+}
+
+use tokio::sync::mpsc;
+
+impl<T, R> Connection<T, R> for (mpsc::Sender<T>, mpsc::Receiver<R>) {
+    type Error = mpsc::error::SendError<T>;
+
+    async fn send(&mut self, value: T) -> Result<(), Self::Error> {
+        self.0.send(value).await
+    }
+
+    async fn recv(&mut self) -> Result<Option<R>, Self::Error> {
+        Ok(self.1.recv().await)
+    }
+}
+
+// Encrypt<T: Connection<Message, Message>>: Connection<T, MessageT<Decrypted<T>>>
+// or Messageにもっと組み込む
+// Handshakeする
