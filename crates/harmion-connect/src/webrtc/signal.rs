@@ -111,7 +111,11 @@ fn heartbeat(on: Instant) -> impl Filter<Extract = (String,), Error = warp::Reje
             r += &format!("{}ms", millis);
         }
 
-        r
+        if r.is_empty() {
+            "0s".to_string()
+        } else {
+            r
+        }
     }
 
     warp::get().map(move || format_duration_human(Instant::now().saturating_duration_since(on)))
