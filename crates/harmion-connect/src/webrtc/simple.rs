@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use std::marker::PhantomData;
 
-use crate::Message;
+use crate::{webrtc::BUFFER_SIZE, Message};
 
 use thiserror::Error;
 
@@ -36,7 +36,6 @@ pub const GOOGLE_STUN_LIST: [&str; 10] = [
     "stun:stun4.1.google.com:19302",
     "stun:stun4.1.google.com:5349",
 ];
-const BUFFER_SIZE: usize = 256;
 
 pub(super) struct Config {
     pub stun: Vec<String>,
@@ -117,7 +116,7 @@ impl<S: PeerConnectingState> Peer<S> {
     // PeerA
     pub(super) async fn new(
         config: Config,
-        peer_id: &PeerID, // only for logging
+        peer_id: &PeerAlias, // only for logging
     ) -> Result<(Peer<WaitingAnswer>, String), PeerError> {
         let (pc, state) = Self::new_peer_connection_with_state(config, peer_id).await?;
 
@@ -163,7 +162,7 @@ impl<S: PeerConnectingState> Peer<S> {
     pub(super) async fn from_offer(
         offer: &str,
         config: Config,
-        peer_id: &PeerID, // only for logging
+        peer_id: &PeerAlias, // only for logging
     ) -> Result<(Peer<WaitingICE>, String), PeerError> {
         let (pc, state) = Self::new_peer_connection_with_state(config, peer_id).await?;
 
@@ -241,7 +240,7 @@ impl<S: PeerConnectingState> Peer<S> {
 
     async fn new_peer_connection_with_state(
         config: Config,
-        peer_id: &PeerID, // only for logging
+        peer_id: &PeerAlias, // only for logging
     ) -> Result<(Arc<RTCPeerConnection>, Arc<RwLock<PeerState>>), PeerError> {
         let mut m = MediaEngine::default();
         m.register_default_codecs()?;
@@ -323,7 +322,7 @@ impl<S: PeerConnectingState> Peer<S> {
         pc: Arc<RTCPeerConnection>,
         dc: Arc<RTCDataChannel>,
         state: Arc<RwLock<PeerState>>,
-        peer_id: &PeerID,
+        peer_id: &PeerAlias,
         message_tx: mpsc::Sender<Message>,
         cancel: CancellationToken,
     ) {
@@ -400,6 +399,8 @@ impl<S: PeerConnectingState> Peer<S> {
                         }
                     }
                 }
+
+                cancel_c.cancel();
             });
         }
 
@@ -455,6 +456,8 @@ impl<S: PeerConnectingState> Peer<S> {
                         }
                     }
                 }
+
+                cancel_c.cancel();
             });
         }
 
@@ -505,10 +508,23 @@ impl Peer<Connected> {
         &mut self.recv
     }
 
-    pub(super) async fn disconnect(self) -> Result<(), PeerError> {
+    pub(super) async fn disconnect(mut self) -> Result<(), PeerError> {
         self.pc.close().await?;
         self.cancel.cancel();
+        self.recv.close();
         Ok(())
+    }
+}
+
+impl crate::Connection<Message, Message> for Peer<Connected> {
+    type Error = PeerError;
+
+    async fn send(&mut self, value: Message) -> Result<(), Self::Error> {
+        Self::send(self, value).await
+    }
+
+    async fn recv(&mut self) -> Result<Option<Message>, Self::Error> {
+        Ok(self.receiver().recv().await)
     }
 }
 
@@ -585,21 +601,30 @@ impl Peer<WaitingICE> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct PeerID(String);
+pub(super) struct PeerAlias(String);
 
-impl PeerID {
+impl PeerAlias {
     pub(super) fn new(id: String) -> Self {
         Self(id)
     }
+
+    pub(super) fn from_key(key: ed25519_dalek::VerifyingKey) -> Self {
+        use sha2::Digest;
+
+        let digest = sha2::Sha256::digest(key);
+        let s = bs58::encode(&digest[..6]).into_string();
+
+        Self::new(s.chars().take(8).collect())
+    }
 }
 
-impl std::fmt::Display for PeerID {
+impl std::fmt::Display for PeerAlias {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-impl AsRef<str> for PeerID {
+impl AsRef<str> for PeerAlias {
     fn as_ref(&self) -> &str {
         &self.0
     }
@@ -613,14 +638,17 @@ mod tests {
     #[ignore]
     async fn offer_answer_connects_peers() {
         let (peer_a_wa, offer_sdp) =
-            Peer::<WaitingAnswer>::new(Config::default(), &PeerID::new("A".into()))
+            Peer::<WaitingAnswer>::new(Config::default(), &PeerAlias::new("A".into()))
                 .await
                 .expect("failed to create peer A");
 
-        let (peer_b_wi, answer_sdp) =
-            Peer::<WaitingICE>::from_offer(&offer_sdp, Config::default(), &PeerID::new("B".into()))
-                .await
-                .expect("failed to create peer B");
+        let (peer_b_wi, answer_sdp) = Peer::<WaitingICE>::from_offer(
+            &offer_sdp,
+            Config::default(),
+            &PeerAlias::new("B".into()),
+        )
+        .await
+        .expect("failed to create peer B");
 
         let peer_a_c = peer_a_wa.set_remote_answer(&answer_sdp).await.unwrap();
         let peer_b_c = peer_b_wi.wait().await.unwrap();
@@ -634,14 +662,17 @@ mod tests {
     async fn send_and_receive_message() {
         // Offer/Answer のセットアップ（省略可：先のテストを呼び出しても OK）
         let (peer_a_wa, offer_sdp) =
-            Peer::<WaitingAnswer>::new(Config::default(), &PeerID::new("A".into()))
+            Peer::<WaitingAnswer>::new(Config::default(), &PeerAlias::new("A".into()))
                 .await
                 .unwrap();
 
-        let (peer_b_wi, answer_sdp) =
-            Peer::<WaitingICE>::from_offer(&offer_sdp, Config::default(), &PeerID::new("B".into()))
-                .await
-                .unwrap();
+        let (peer_b_wi, answer_sdp) = Peer::<WaitingICE>::from_offer(
+            &offer_sdp,
+            Config::default(),
+            &PeerAlias::new("B".into()),
+        )
+        .await
+        .unwrap();
 
         let peer_a_c = peer_a_wa.set_remote_answer(&answer_sdp).await.unwrap();
         let mut peer_b_c = peer_b_wi.wait().await.unwrap();
