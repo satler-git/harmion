@@ -13,7 +13,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use tracing::{error, info, info_span, warn};
+use tracing::{error, info, warn};
 
 use webrtc::{
     api::{
@@ -278,14 +278,12 @@ impl<S: PeerConnectingState> Peer<S> {
 
             pc.on_peer_connection_state_change(Box::new(move |state| {
                 info!(
-                    "{}: Peer connection state changed: {:?}",
-                    peer_id,
-                    state
+                    "{peer_id}: Peer connection state changed: {state:?}",
                 );
 
 
                 if state == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Failed {
-                    warn!("Peer Connection has gone to failed exiting");
+                    warn!("{peer_id}: Peer Connection has gone to failed exiting");
                 }
 
                 let state_clone = state_clone.clone();
@@ -302,11 +300,7 @@ impl<S: PeerConnectingState> Peer<S> {
             let peer_id = peer_id.clone();
 
             pc.on_ice_gathering_state_change(Box::new(move |new_state| {
-                info!(
-                    "{}: ice gathering state was changed: {:?}",
-                    peer_id.as_ref(),
-                    new_state
-                );
+                info!("{peer_id}: ice gathering state was changed: {new_state:?}",);
 
                 Box::pin(async move {})
             }))
@@ -316,11 +310,7 @@ impl<S: PeerConnectingState> Peer<S> {
             let peer_id = peer_id.clone();
 
             pc.on_ice_connection_state_change(Box::new(move |new_state| {
-                info!(
-                    "{}: ice connection state was changed: {:?}",
-                    peer_id.as_ref(),
-                    new_state
-                );
+                info!("{peer_id}: ice connection state was changed: {new_state:?}",);
 
                 Box::pin(async move {})
             }))
@@ -338,14 +328,11 @@ impl<S: PeerConnectingState> Peer<S> {
         cancel: CancellationToken,
     ) {
         {
-            let peer_id_clone = peer_id.clone();
+            let peer_id = peer_id.clone();
             let state_clone = state.clone();
 
             dc.on_open(Box::new(move || {
-                info_span!(
-                    "Data channel opened for peer",
-                    peer_id = peer_id_clone.as_ref()
-                );
+                info!("{peer_id}: Data channel opened for peer");
 
                 let state_clone = state_clone.clone();
                 Box::pin(async move {
@@ -354,14 +341,15 @@ impl<S: PeerConnectingState> Peer<S> {
             }));
         }
         {
-            let peer_id_clone = peer_id.clone();
+            let peer_id = peer_id.clone();
             let state_clone = state.clone();
+            let cancel = cancel.clone();
 
             dc.on_close(Box::new(move || {
-                info_span!(
-                    "Data channel closed for peer",
-                    peer_id = peer_id_clone.as_ref()
-                );
+                info!("{peer_id}: Data channel closed for peer");
+
+                cancel.cancel();
+
                 let state_clone = state_clone.clone();
                 Box::pin(async move {
                     *state_clone.write().await = PeerState::Disconnected;
@@ -370,112 +358,127 @@ impl<S: PeerConnectingState> Peer<S> {
         }
 
         {
-            let peer_id_clone = peer_id.clone();
+            let peer_id = peer_id.clone();
 
             dc.on_error(Box::new(move |error| {
-                error!(
-                    "error has occurred in the datachannel {}: {:?}",
-                    peer_id_clone.as_ref(),
-                    error
-                );
+                error!("{peer_id}: error has occurred in the datachannel: {error:?}",);
                 Box::pin(async move {})
             }))
         }
 
         let (tx, mut rx) = mpsc::channel(BUFFER_SIZE);
-        let dc_clone = dc.clone();
 
-        let cancel_c = cancel.clone();
-        tokio::spawn(async move {
-            loop {
-                select! {
-                    _ = cancel_c.cancelled() => {
-                        break;
-                    }
-                    Some(msg) = rx.recv() => {
-                        let dc = dc_clone.clone();
+        {
+            let cancel_c = cancel.clone();
+            let peer_id = peer_id.clone();
+            let dc_clone = dc.clone();
 
-                        match rmp_serde::to_vec(&InnerMessage::Ice(msg)) {
-                            // TODO: via Signal?
-                            Ok(data) => {
-                                if dc.ready_state()
-                                    != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
-                                {
-                                    warn!("{}", PeerError::PeerNotConnected);
+            tokio::spawn(async move {
+                loop {
+                    select! {
+                        _ = cancel_c.cancelled() => {
+                            break;
+                        }
+                        Some(msg) = rx.recv() => {
+                            let dc = dc_clone.clone();
+
+                            match rmp_serde::to_vec(&InnerMessage::Ice(msg)) {
+                                // TODO: via Signal?
+                                Ok(data) => {
+                                    if dc.ready_state()
+                                        != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+                                    {
+                                        warn!("{peer_id}: {}", PeerError::PeerNotConnected);
+                                    }
+
+                                    if let Err(e) = dc.send(&data.into()).await {
+                                        error!("{peer_id}: failed to send ice data to the another peer: {e}")
+                                    }
                                 }
-
-                                if let Err(e) = dc.send(&data.into()).await {
-                                    error!("failed to send ice data to the another peer: {e}")
-                                }
+                                Err(e) => warn!("{peer_id}: failed to convert ice to MessagePack: {e}"),
                             }
-                            Err(e) => warn!("failed to convert ice to MessagePack: {e}"),
                         }
                     }
                 }
-            }
-        });
+            });
+        }
 
-        pc.on_ice_candidate(Box::new(move |ice| {
-            let tx = tx.clone();
+        {
+            let peer_id = peer_id.clone();
+            pc.on_ice_candidate(Box::new(move |ice| {
+                let tx = tx.clone();
+                let peer_id = peer_id.clone();
 
-            Box::pin(async move {
-                match ice.map(|i| i.to_json()) {
-                    Some(Ok(ice)) => {
-                        if let Err(e) = tx.send(ice).await {
-                            warn!("ICE Channel has closed: {e}")
+                Box::pin(async move {
+                    match ice.map(|i| i.to_json()) {
+                        Some(Ok(ice)) => {
+                            if let Err(e) = tx.send(ice).await {
+                                warn!("{peer_id}: ICE Channel has closed: {e}")
+                            }
                         }
+                        Some(Err(e)) => {
+                            error!("{peer_id}: failed to convert ice candidate to json: {e}")
+                        }
+                        _ => warn!("{peer_id}: ice is none"),
                     }
-                    Some(Err(e)) => error!("failed to convert ice candidate to json: {e}"),
-                    _ => warn!("ice is none"),
-                }
-            })
-        }));
+                })
+            }));
+        }
 
         let (tx, mut rx) = mpsc::channel(BUFFER_SIZE);
-        let cancel_c = cancel.clone();
-        tokio::spawn(async move {
-            // 他でCloneしていないはず
-            loop {
-                select! {
-                    _ = cancel_c.cancelled() => {
-                        break;
-                    }
-                    Some(msg) = rx.recv() => {
-                        match msg {
-                            InnerMessage::Ice(ice) => {
-                                if let Err(e) = pc.add_ice_candidate(ice).await {
-                                    error!("Failed to add ice candidate: {e}")
+
+        {
+            let cancel_c = cancel.clone();
+            let peer_id = peer_id.clone();
+
+            tokio::spawn(async move {
+                // 他でCloneしていないはず
+                loop {
+                    select! {
+                        _ = cancel_c.cancelled() => {
+                            break;
+                        }
+                        Some(msg) = rx.recv() => {
+                            match msg {
+                                InnerMessage::Ice(ice) => {
+                                    if let Err(e) = pc.add_ice_candidate(ice).await {
+                                        error!("{peer_id}: Failed to add ice candidate: {e}")
+                                    }
                                 }
-                            }
-                            InnerMessage::Message(msg) => {
-                                if let Err(e) = message_tx.send(*msg).await {
-                                    error!("failed to send message to message_tx: {e}");
-                                    break;
+                                InnerMessage::Message(msg) => {
+                                    if let Err(e) = message_tx.send(*msg).await {
+                                        error!("{peer_id}: failed to send message to message_tx: {e}");
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-        });
+            });
+        }
 
-        dc.on_message(Box::new(move |msg| {
-            let data = msg.data.to_vec();
-            let tx = tx.clone();
+        {
+            let peer_id = peer_id.clone();
+            dc.on_message(Box::new(move |msg| {
+                let data = msg.data.to_vec();
+                let tx = tx.clone();
+                let peer_id = peer_id.clone();
 
-            Box::pin(async move {
-                match rmp_serde::from_slice::<InnerMessage>(&data) {
-                    Ok(msg) => {
-                        if let Err(e) = tx.send(msg).await {
-                            warn!("OnMessage Channel has closed: {e}")
+                Box::pin(async move {
+                    match rmp_serde::from_slice::<InnerMessage>(&data) {
+                        Ok(msg) => {
+                            if let Err(e) = tx.send(msg).await {
+                                warn!("{peer_id}: OnMessage Channel has closed: {e}")
+                            }
+                        }
+                        Err(e) => {
+                            warn!("{peer_id}: MessagePack deserialize error: {}", e);
                         }
                     }
-                    Err(e) => {
-                        warn!("MessagePack deserialize error: {}", e);
-                    }
-                }
-            })
-        }));
+                })
+            }));
+        }
     }
 }
 
