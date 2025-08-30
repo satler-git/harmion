@@ -7,6 +7,8 @@
 // ===========================
 
 use std::time::Duration;
+use webrtc::mux::Config;
+use harmion_connect::Message;
 
 #[test]
 fn google_stun_list_has_expected_length_and_contents() {
@@ -122,7 +124,6 @@ async fn peer_state_transitions_to_connected_on_channel_open_waiting_paths() {
 async fn connected_peer_send_and_recv_happy_path() {
     // Focus: Peer<Connected>::send, receiver, and Connection impl send/recv
     // Establish a loopback pair and exchange a message.
-    use super::Message;
 
     // Build peers
     let cfg_a = Config { stun: vec![] };
@@ -155,7 +156,7 @@ async fn connected_peer_send_and_recv_happy_path() {
 async fn send_fails_if_data_channel_not_ready_or_closed() {
     // Focus: Peer<Connected>::send error path when dc is None or not Open
     // Strategy: Connect peers, then close dc on receiver side and attempt send to trigger PeerNotConnected.
-    // Note: ReadyState transitions are event-driven; we simulate by closing pc, which triggers dc close.
+    // Note: ReadyState transitions are event-driven; we simulate by closing pc, which triggers dc close callback.
     let cfg_a = Config { stun: vec![] };
     let peer_id_a = PeerAlias::new("peerA3".to_string());
     let (peer_a_waiting_answer, offer) = Peer::<WaitingAnswer>::new(cfg_a, &peer_id_a).await.expect("A new");
@@ -175,7 +176,7 @@ async fn send_fails_if_data_channel_not_ready_or_closed() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Expect PeerNotConnected on send
-    let res = a.send(super::Message::Pong(321)).await;
+    let res = a.send(Message::Pong(321)).await;
     assert!(matches!(res, Err(PeerError::PeerNotConnected) | Err(PeerError::WebRTC(_))));
 }
 
@@ -185,11 +186,11 @@ async fn inner_message_pack_roundtrip_and_corrupt_payload_handling() {
     // Validate that InnerMessage encodes/decodes and that corrupted payload doesn't panic.
 
     // Encode a valid InnerMessage and decode it back
-    let original = InnerMessage::Message(Box::new(super::Message::Ping(7)));
+    let original = InnerMessage::Message(Box::new(Message::Ping(7)));
     let packed = rmp_serde::to_vec(&original).expect("pack");
     let decoded: InnerMessage = rmp_serde::from_slice(&packed).expect("unpack");
     match decoded {
-        InnerMessage::Message(b) => assert_eq!(*b, super::Message::Ping(7)),
+        InnerMessage::Message(b) => assert_eq!(*b, Message::Ping(7)),
         _ => panic!("unexpected variant"),
     }
 
