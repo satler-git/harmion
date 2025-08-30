@@ -949,3 +949,268 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::RwLock;
+    use tokio_util::sync::CancellationToken;
+    use warp::Filter;
+
+    // Test framework note:
+    // - Using Rust's built-in test harness
+    // - Async tests via Tokio's #[tokio::test]
+    // - Warp's test utilities (warp::test) for filter-level testing
+
+    // Local helpers (separate from existing tests module helpers)
+    fn gen_id2() -> PeerIndex {
+        let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
+        (&ed25519_dalek::SigningKey::generate(&mut rng)).into()
+    }
+
+    fn gen_sig2() -> SignalInfo {
+        SignalInfo {
+            addr: ("A".into(), 65535),
+            id: gen_id2(),
+        }
+    }
+
+    #[test]
+    fn signal_info_to_http_ws() {
+        let s = SignalInfo {
+            addr: ("example.com".into(), 8080),
+            id: gen_id2(),
+        };
+        assert_eq!(s.to_http(), "http://example.com:8080");
+        assert_eq!(s.to_ws(), "ws://example.com:8080");
+    }
+
+    #[tokio::test]
+    async fn handle_peer_state_changes_connect_disconnect() {
+        let sig_a = gen_sig2();
+        let sig_b = gen_sig2();
+        let p1 = gen_id2();
+        let p2 = gen_id2();
+
+        let sigs_peers = {
+            let sig_to_peer: HashMap<SignalInfo, HashSet<PeerIndex>> = HashMap::new();
+            let peer_to_sig: HashMap<PeerIndex, SignalInfo> = HashMap::new();
+            Arc::new(RwLock::new((sig_to_peer, peer_to_sig)))
+        };
+
+        // Connect p1,p2 -> A
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::Connect(p1, sig_a.clone()),
+            &sigs_peers,
+        )
+        .await;
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::Connect(p2, sig_a.clone()),
+            &sigs_peers,
+        )
+        .await;
+
+        {
+            let lock = sigs_peers.read().await;
+            let (sigs, peers) = &*lock;
+            assert_eq!(peers.get(&p1), Some(&sig_a));
+            assert_eq!(peers.get(&p2), Some(&sig_a));
+            let set_a = sigs.get(&sig_a).expect("sig_a should exist");
+            assert!(set_a.contains(&p1) && set_a.contains(&p2));
+        }
+
+        // Move p1 -> B (should be removed from A)
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::Connect(p1, sig_b.clone()),
+            &sigs_peers,
+        )
+        .await;
+
+        {
+            let lock = sigs_peers.read().await;
+            let (sigs, peers) = &*lock;
+            assert_eq!(peers.get(&p1), Some(&sig_b));
+            let set_a = sigs.get(&sig_a).expect("sig_a should still exist with p2");
+            assert!(!set_a.contains(&p1));
+            let set_b = sigs.get(&sig_b).expect("sig_b should exist");
+            assert!(set_b.contains(&p1));
+        }
+
+        // Disconnect p2 with wrong sig (no effect)
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::DisConnect(p2, sig_b.clone()),
+            &sigs_peers,
+        )
+        .await;
+        {
+            let lock = sigs_peers.read().await;
+            let (sigs, peers) = &*lock;
+            assert_eq!(peers.get(&p2), Some(&sig_a));
+            assert!(sigs.get(&sig_a).unwrap().contains(&p2));
+        }
+
+        // Correct disconnect p2 from A. Since p1 moved, A should become empty and be removed.
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::DisConnect(p2, sig_a.clone()),
+            &sigs_peers,
+        )
+        .await;
+
+        {
+            let lock = sigs_peers.read().await;
+            let (sigs, peers) = &*lock;
+            assert!(peers.get(&p2).is_none());
+            assert!(sigs.get(&sig_a).is_none(), "sig_a should be removed when empty");
+            assert!(sigs.get(&sig_b).unwrap().contains(&p1));
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_peer_state_changes_all_reconcile() {
+        let sig_a = gen_sig2();
+        let sig_b = gen_sig2();
+        let p1 = gen_id2();
+        let p2 = gen_id2();
+        let p3 = gen_id2();
+
+        let sigs_peers = {
+            let sig_to_peer: HashMap<SignalInfo, HashSet<PeerIndex>> = HashMap::new();
+            let peer_to_sig: HashMap<PeerIndex, SignalInfo> = HashMap::new();
+            Arc::new(RwLock::new((sig_to_peer, peer_to_sig)))
+        };
+
+        // Initial: p1,p2 -> A; p3 -> B
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::Connect(p1, sig_a.clone()),
+            &sigs_peers,
+        )
+        .await;
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::Connect(p2, sig_a.clone()),
+            &sigs_peers,
+        )
+        .await;
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::Connect(p3, sig_b.clone()),
+            &sigs_peers,
+        )
+        .await;
+
+        // Reconcile: A now has exactly {p1, p3}. p2 removed, p3 moved from B -> A (B should be removed if empty).
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::All(vec![p1, p3], sig_a.clone()),
+            &sigs_peers,
+        )
+        .await;
+
+        {
+            let lock = sigs_peers.read().await;
+            let (sigs, peers) = &*lock;
+
+            assert_eq!(peers.get(&p1), Some(&sig_a));
+            assert_eq!(peers.get(&p3), Some(&sig_a));
+            assert!(peers.get(&p2).is_none(), "p2 should be removed from peers");
+
+            let set_a = sigs.get(&sig_a).expect("sig_a must exist");
+            assert!(set_a.contains(&p1) && set_a.contains(&p3) && set_a.len() == 2);
+
+            // B removed if it became empty
+            assert!(sigs.get(&sig_b).is_none(), "sig_b should be removed when empty");
+        }
+    }
+
+    #[tokio::test]
+    async fn signal_run_twice_returns_error() -> Result<(), Box<dyn std::error::Error>> {
+        let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
+        let key = ed25519_dalek::SigningKey::generate(&mut rng);
+
+        let mut sig = Signal::new(0, (&key).into(), key);
+        sig.run("test").await?;
+        let err = sig.run("test").await.unwrap_err();
+        match err {
+            SignalError::ServerRunning => (),
+            e => panic!("expected ServerRunning, got {e:?}"),
+        }
+        sig.shutdown();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn heartbeat_filter_formats_basic() {
+        // 1s
+        let s: String = warp::test::request()
+            .method("GET")
+            .filter(&heartbeat(Instant::now() - Duration::from_secs(1)))
+            .await
+            .unwrap();
+        assert!(s.starts_with("1s"));
+
+        // 1m1s
+        let s: String = warp::test::request()
+            .method("GET")
+            .filter(&heartbeat(Instant::now() - Duration::from_secs(61)))
+            .await
+            .unwrap();
+        assert!(s.starts_with("1m1s"));
+
+        // 1h
+        let s: String = warp::test::request()
+            .method("GET")
+            .filter(&heartbeat(Instant::now() - Duration::from_secs(3600)))
+            .await
+            .unwrap();
+        assert!(s.starts_with("1h"));
+
+        // 1h1m1s
+        let s: String = warp::test::request()
+            .method("GET")
+            .filter(&heartbeat(Instant::now() - Duration::from_secs(3661)))
+            .await
+            .unwrap();
+        assert!(s.starts_with("1h1m1s"));
+    }
+
+    #[tokio::test]
+    async fn signal_client_connect_no_signals() {
+        let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
+        let key = ed25519_dalek::SigningKey::generate(&mut rng);
+
+        let mut client = SignalClient {
+            sigs: HashSet::new(),
+            connection: None,
+            connected_to: None,
+            id: (&key).into(),
+            key,
+            token: None,
+        };
+
+        let res = client.connect().await;
+        assert!(matches!(res, Err(SignalCError::NoSignalAvailable)));
+    }
+
+    #[test]
+    fn signal_client_disconnect_resets_state_and_cancels() {
+        let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
+        let key = ed25519_dalek::SigningKey::generate(&mut rng);
+
+        let mut client = SignalClient {
+            sigs: HashSet::new(),
+            connection: None,
+            connected_to: Some(gen_sig2()),
+            id: (&key).into(),
+            key,
+            token: Some(CancellationToken::new()),
+        };
+
+        let token_clone = client.token.as_ref().unwrap().clone();
+
+        client.disconnect();
+
+        assert!(client.connection.is_none());
+        assert!(client.connected_to.is_none());
+        assert!(token_clone.is_cancelled(), "cancellation token should be cancelled on disconnect");
+    }
+}

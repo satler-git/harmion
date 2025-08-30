@@ -700,3 +700,106 @@ mod tests {
         assert_eq!(String::from_utf8(received.content).unwrap(), payload);
     }
 }
+
+#[cfg(test)]
+mod more_unit_tests_for_simple {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use ed25519_dalek::{SigningKey, VerifyingKey};
+
+    // Helper to build a deterministic signing key from a fixed 32-byte seed.
+    fn signing_key_from_seed(seed: [u8; 32]) -> SigningKey {
+        SigningKey::from_bytes(&seed)
+    }
+
+    // Helper that mirrors the PeerAlias::from_key behavior to compute the expected alias.
+    fn compute_expected_alias_from_key(vk: &VerifyingKey) -> String {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(vk);
+        let s = bs58::encode(&digest[..6]).into_string();
+        s.chars().take(8).collect::<String>()
+    }
+
+    #[test]
+    fn peer_alias_new_keeps_string_and_display_matches() {
+        let alias = PeerAlias::new("ABCDEFGH".to_string());
+        assert_eq!(alias.as_ref(), "ABCDEFGH");
+        assert_eq!(format!("{}", alias), "ABCDEFGH");
+        // Clone/Eq
+        let alias2 = alias.clone();
+        assert_eq!(alias, alias2);
+    }
+
+    #[test]
+    fn peer_alias_from_key_has_length_8_and_valid_base58_chars() {
+        // Fixed deterministic key
+        let sk = signing_key_from_seed([0x11; 32]);
+        let vk = sk.verifying_key();
+        let alias = PeerAlias::from_key(vk);
+
+        // Length should be exactly 8 as implementation takes first 8 chars.
+        assert_eq!(alias.as_ref().len(), 8, "alias must be 8 chars long");
+
+        // Base58 alphabet (Bitcoin), the alias is a prefix so characters must belong to this set.
+        let b58_chars = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        assert!(alias
+            .as_ref()
+            .chars()
+            .all(|c| b58_chars.contains(c)),
+            "alias contains only base58 characters");
+    }
+
+    #[test]
+    fn peer_alias_from_key_is_deterministic_and_matches_internal_logic() {
+        let sk = signing_key_from_seed([0xAB; 32]);
+        let vk = sk.verifying_key();
+        let alias1 = PeerAlias::from_key(vk);
+        let alias2 = PeerAlias::from_key(vk);
+        assert_eq!(alias1, alias2, "same key must produce identical alias");
+
+        // Validate against independently computed expected value
+        let expected = compute_expected_alias_from_key(&vk);
+        assert_eq!(alias1.as_ref(), expected, "alias must match expected computation");
+    }
+
+    #[test]
+    fn peer_alias_from_different_keys_produces_different_aliases_in_general() {
+        // While collisions are theoretically possible, with SHA-256 and different inputs this should differ.
+        let sk1 = signing_key_from_seed([0x01; 32]);
+        let sk2 = signing_key_from_seed([0x02; 32]);
+        let a1 = PeerAlias::from_key(sk1.verifying_key());
+        let a2 = PeerAlias::from_key(sk2.verifying_key());
+
+        // Avoid overly brittle assertion by checking not equal; if equal, print for diagnostics.
+        assert_ne!(a1, a2, "different keys should yield different aliases (got {} and {})", a1, a2);
+    }
+
+    #[test]
+    fn peer_alias_hash_and_eq_work_in_collections() {
+        let mut set = HashSet::new();
+        set.insert(PeerAlias::new("AAAAAAA1".into()));
+        set.insert(PeerAlias::new("AAAAAAA1".into())); // duplicate
+        set.insert(PeerAlias::new("BBBBBBB2".into()));
+        assert_eq!(set.len(), 2, "Hash + Eq should ensure uniqueness");
+
+        let mut map = HashMap::new();
+        map.insert(PeerAlias::new("CCCCCCC3".into()), 10usize);
+        map.insert(PeerAlias::new("CCCCCCC3".into()), 20usize); // overwrite
+        assert_eq!(map.get(&PeerAlias::new("CCCCCCC3".into())), Some(&20usize));
+    }
+
+    #[test]
+    fn peer_state_equality_and_variants() {
+        assert_ne!(PeerState::Connecting, PeerState::Connected);
+        assert_ne!(PeerState::Connected, PeerState::Disconnected);
+        assert_ne!(PeerState::Disconnected, PeerState::Failed);
+        assert_eq!(PeerState::Failed, PeerState::Failed);
+    }
+
+    #[test]
+    fn peer_alias_display_consistency_with_as_ref() {
+        let sk = signing_key_from_seed([0x55; 32]);
+        let alias = PeerAlias::from_key(sk.verifying_key());
+        assert_eq!(alias.as_ref(), format!("{}", alias));
+    }
+}
