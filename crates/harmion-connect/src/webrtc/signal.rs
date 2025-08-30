@@ -406,7 +406,7 @@ fn heartbeat(on: Instant) -> impl warp::Filter<Extract = (String,), Error = warp
 // signals
 // -> client
 //
-// verify, -> もしSignalInfoと違ったらerr
+// verify, -> もしSignalInfoと違ったら err
 
 #[derive(Debug, Serialize, Deserialize)]
 struct InitClientToSig {
@@ -556,7 +556,7 @@ async fn init_client(
                     }
                     _ = token.cancelled() => {
                         if let Err(e) = ws_tx.send(warp::ws::Message::close()).await {
-                             error!("websocket send error: {e}");
+                            error!("websocket send error: {e}");
                         }
 
                         break;
@@ -751,6 +751,4 @@ mod more_tests {
             .unwrap();
         assert!(s.starts_with("1h1m1s"));
     }
-
-    ...
 }
