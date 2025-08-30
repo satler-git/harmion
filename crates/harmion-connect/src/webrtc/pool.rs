@@ -58,7 +58,7 @@ pub(crate) enum PoolError {}
 type PoolResult<T> = Result<T, PoolError>;
 
 impl PeerPool {
-    pub fn add(&self, peer: Peer<Connected>, alias: Option<&str>) -> PoolResult<PeerIndex> {
+    pub fn add(&self, _peer: Peer<Connected>, _alias: Option<&str>) -> PoolResult<PeerIndex> {
         todo!()
     }
 }

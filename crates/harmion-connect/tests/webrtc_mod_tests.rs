@@ -12,7 +12,11 @@ use harmion_connect as _crate_name_probe;
 #[test]
 fn webrtc_buffer_size_is_expected() {
     const EXPECTED: usize = 256;
-    assert_eq!(harmion_connect::webrtc::BUFFER_SIZE, EXPECTED, "webrtc::BUFFER_SIZE changed unexpectedly");
+    assert_eq!(
+        harmion_connect::webrtc::BUFFER_SIZE,
+        EXPECTED,
+        "webrtc::BUFFER_SIZE changed unexpectedly"
+    );
 }
 
 #[test]
@@ -20,4 +24,3 @@ fn webrtc_modules_compile_and_are_linked() {
     let _size = harmion_connect::webrtc::BUFFER_SIZE;
     assert!(_size > 0, "buffer size should be positive");
 }
-/// END: webrtc.rs basic module and const tests
