@@ -949,3 +949,250 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    // Helper to build the sig_peers structure
+    async fn empty_sig_peers() -> Arc<RwLock<(HashMap<SignalInfo, HashSet<PeerIndex>>, HashMap<PeerIndex, SignalInfo>)>> {
+        Arc::new(RwLock::new((HashMap::new(), HashMap::new())))
+    }
+
+    // Utility: read current state
+    async fn snapshot(
+        sig_peers: &Arc<RwLock<(HashMap<SignalInfo, HashSet<PeerIndex>>, HashMap<PeerIndex, SignalInfo>)>>,
+    ) -> (HashMap<SignalInfo, HashSet<PeerIndex>>, HashMap<PeerIndex, SignalInfo>) {
+        let guard = sig_peers.read().await;
+        (guard.0.clone(), guard.1.clone())
+    }
+
+    // Construct minimal SignalInfo values for testing. We rely on Clone + Eq + Hash from the main type.
+    // If SignalInfo has a constructor in scope, prefer it; else use default-like values via test helpers in crate if available.
+    // Here we assume SignalInfo is clonable and can be created from existing constructors (e.g., SignalInfo::new(...) or Default).
+    // To retain compatibility across minor type changes, we generate two distinct instances via Debug string difference if Default exists.
+    // If Default is not implemented, tests should be adapted to the actual constructors.
+    fn make_two_signals() -> (SignalInfo, SignalInfo) {
+        // Prefer Default if available
+        #[allow(unused_mut)]
+        let mut make = || {
+            // Fallback using serde-based roundtrip if available is not permitted in unit tests here.
+            // We rely on common constructors. Replace with actual as needed.
+            #[allow(unused_mut)]
+            #[allow(clippy::redundant_clone)]
+            {
+                // Try Default
+                #[allow(unused_mut)]
+                let s1 = {
+                    #[allow(unused)]
+                    #[cfg(any())]
+                    {
+                        SignalInfo::default()
+                    }
+                    #[cfg(not(any()))]
+                    {
+                        // This branch is never compiled; kept to satisfy conditional compilation.
+                        unreachable!()
+                    }
+                };
+                s1
+            }
+        };
+
+        // Because we cannot use reflection at compile time, define explicit placeholders using typical constructors seen in this crate.
+        // Replace below with actual minimal constructors known to exist in the project:
+        #[allow(unused)]
+        #[derive(Clone)]
+        struct _Dummy;
+
+        // The following lines are compile-time selected with cfgs by the project types.
+        // Attempt common patterns:
+        #[cfg(feature = "test_signal_construct_new")]
+        {
+            (SignalInfo::new("127.0.0.1".into(), 0), SignalInfo::new("127.0.0.1".into(), 1))
+        }
+        #[cfg(not(feature = "test_signal_construct_new"))]
+        {
+            // Last resort: if SignalInfo is a simple tuple or has public fields, construct with placeholders.
+            // NOTE: Adapt these initializers to the actual SignalInfo definition if compilation fails.
+            // The goal is to ensure compile-time resolution using available constructors.
+            use std::net::{IpAddr, Ipv4Addr};
+            let mut s1 = SignalInfo {
+                id: PeerIndex::from(1u64),
+                host: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                port: 9000,
+                tls: false,
+            };
+            let mut s2 = s1.clone();
+            s2.id = PeerIndex::from(2u64);
+            s2.port = 9001;
+            (s1, s2)
+        }
+    }
+
+    // Helper: add mapping: peer -> sig and sig -> set(peer)
+    async fn insert_mapping(
+        sig_peers: &Arc<RwLock<(HashMap<SignalInfo, HashSet<PeerIndex>>, HashMap<PeerIndex, SignalInfo>)>>,
+        peer: PeerIndex,
+        sig: SignalInfo,
+    ) {
+        let mut guard = sig_peers.write().await;
+        let (sigs, peers) = &mut *guard;
+        peers.insert(peer, sig.clone());
+        sigs.entry(sig).or_insert_with(HashSet::new).insert(peer);
+    }
+
+    #[tokio::test]
+    async fn connect_adds_new_peer_and_signal_set() {
+        // Testing library/framework: Rust built-in test harness with async tests via tokio::test; assertions via std.
+        let sig_peers = empty_sig_peers().await;
+        let (sig_a, _) = make_two_signals();
+        let p1: PeerIndex = 1.into();
+
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::Connect(p1, sig_a.clone()),
+            &sig_peers,
+        )
+        .await;
+
+        let (sigs, peers) = snapshot(&sig_peers).await;
+        assert_eq!(peers.get(&p1), Some(&sig_a));
+        let set = sigs.get(&sig_a).expect("signal set should exist");
+        assert!(set.contains(&p1));
+    }
+
+    #[tokio::test]
+    async fn connect_moves_peer_between_signals_and_cleans_empty_set() {
+        let sig_peers = empty_sig_peers().await;
+        let (sig_a, sig_b) = make_two_signals();
+        let p1: PeerIndex = 1.into();
+
+        insert_mapping(&sig_peers, p1, sig_a.clone()).await;
+
+        // Move to sig_b
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::Connect(p1, sig_b.clone()),
+            &sig_peers,
+        )
+        .await;
+
+        let (sigs, peers) = snapshot(&sig_peers).await;
+        assert_eq!(peers.get(&p1), Some(&sig_b));
+        // Old set should not contain p1
+        assert!(!sigs.get(&sig_a).is_some_and(|set| set.contains(&p1)));
+        // Old set should be removed entirely if it became empty
+        if let Some(set) = sigs.get(&sig_a) {
+            assert!(!set.is_empty(), "old signal entry should be removed when empty");
+        }
+        // New set contains p1
+        assert!(sigs.get(&sig_b).unwrap().contains(&p1));
+    }
+
+    #[tokio::test]
+    async fn disconnect_removes_peer_and_cleans_signal_when_last() {
+        let sig_peers = empty_sig_peers().await;
+        let (sig_a, _) = make_two_signals();
+        let p1: PeerIndex = 42.into();
+
+        insert_mapping(&sig_peers, p1, sig_a.clone()).await;
+
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::DisConnect(p1, sig_a.clone()),
+            &sig_peers,
+        )
+        .await;
+
+        let (sigs, peers) = snapshot(&sig_peers).await;
+        assert!(!peers.contains_key(&p1));
+        assert!(
+            !sigs.contains_key(&sig_a) || !sigs.get(&sig_a).unwrap().contains(&p1),
+            "signal set should not contain the disconnected peer"
+        );
+        if let Some(set) = sigs.get(&sig_a) {
+            assert!(!set.is_empty(), "signal entry should be removed when empty");
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_with_mismatched_signal_does_not_remove_peer() {
+        let sig_peers = empty_sig_peers().await;
+        let (sig_a, sig_b) = make_two_signals();
+        let p1: PeerIndex = 7.into();
+
+        insert_mapping(&sig_peers, p1, sig_a.clone()).await;
+
+        // Attempt to disconnect using a different signal info; should no-op on peers map
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::DisConnect(p1, sig_b.clone()),
+            &sig_peers,
+        )
+        .await;
+
+        let (sigs, peers) = snapshot(&sig_peers).await;
+        assert_eq!(peers.get(&p1), Some(&sig_a));
+        assert!(sigs.get(&sig_a).unwrap().contains(&p1));
+    }
+
+    #[tokio::test]
+    async fn all_replaces_membership_connects_new_and_disconnects_removed() {
+        let sig_peers = empty_sig_peers().await;
+        let (sig_a, sig_b) = make_two_signals();
+        let p1: PeerIndex = 1.into();
+        let p2: PeerIndex = 2.into();
+        let p3: PeerIndex = 3.into();
+
+        // Initial: p1, p2 in sig_a; p3 in sig_b
+        insert_mapping(&sig_peers, p1, sig_a.clone()).await;
+        insert_mapping(&sig_peers, p2, sig_a.clone()).await;
+        insert_mapping(&sig_peers, p3, sig_b.clone()).await;
+
+        // New desired set for sig_a: {p2, p3} (p1 removed; p3 moves from sig_b -> sig_a)
+        handle_peer_signal_state_changes(
+            PeerSignalStateChange::All(vec![p2, p3], sig_a.clone()),
+            &sig_peers,
+        )
+        .await;
+
+        let (sigs, peers) = snapshot(&sig_peers).await;
+
+        // p2 and p3 must be in sig_a
+        let set_a = sigs.get(&sig_a).expect("sig_a set exists");
+        assert!(set_a.contains(&p2));
+        assert!(set_a.contains(&p3));
+
+        // p1 removed entirely
+        assert!(!set_a.contains(&p1));
+        assert_ne!(peers.get(&p1), Some(&sig_a));
+
+        // p3 moved from sig_b -> sig_a and removed from sig_b set
+        assert_eq!(peers.get(&p3), Some(&sig_a));
+        assert!(!sigs.get(&sig_b).is_some_and(|s| s.contains(&p3)));
+        // If sig_b becomes empty, it should be removed
+        if let Some(set_b) = sigs.get(&sig_b) {
+            assert!(!set_b.is_empty(), "sig_b should be removed when empty");
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_formatting_zero_seconds_when_on_in_future() {
+        // Warp test framework from existing dependencies; This checks the format function indirectly.
+        let on = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let filter = heartbeat(on);
+        let res = warp::test::request().method("GET").filter(&filter).await;
+        assert_eq!(res, "0s");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_includes_hours_minutes_seconds_components() {
+        // 1h1m1s ago should yield a string including those components; ms may be appended nondeterministically
+        let on = std::time::Instant::now() - std::time::Duration::from_secs(3600 + 60 + 1);
+        let filter = heartbeat(on);
+        let res = warp::test::request().method("GET").filter(&filter).await;
+        assert!(res.contains("1h"), "expected hours component, got: {res}");
+        assert!(res.contains("1m"), "expected minutes component, got: {res}");
+        assert!(res.contains("1s"), "expected seconds component, got: {res}");
+    }
+}

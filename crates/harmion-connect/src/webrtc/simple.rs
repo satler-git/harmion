@@ -700,3 +700,122 @@ mod tests {
         assert_eq!(String::from_utf8(received.content).unwrap(), payload);
     }
 }
+
+#[cfg(test)]
+mod tests_additional {
+    use super::*;
+    use std::collections::HashSet;
+    use ed25519_dalek::SigningKey;
+    use sha2::Digest;
+    use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+
+    fn base58_alphabet() -> &'static str {
+        "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    }
+
+    #[test]
+    fn google_stun_list_has_expected_length_and_no_duplicates() {
+        assert_eq!(GOOGLE_STUN_LIST.len(), 10, "Google STUN list length changed");
+        let set: HashSet<&str> = GOOGLE_STUN_LIST.iter().copied().collect();
+        assert_eq!(set.len(), GOOGLE_STUN_LIST.len(), "STUN list contains duplicates");
+        for s in GOOGLE_STUN_LIST.iter() {
+            assert!(s.starts_with("stun:"), "{s} does not start with 'stun:'");
+        }
+        // Spot-check a couple of entries to guard against accidental edits
+        assert!(GOOGLE_STUN_LIST.contains(&"stun:stun.1.google.com:19302"));
+        assert!(GOOGLE_STUN_LIST.contains(&"stun:stun4.1.google.com:5349"));
+    }
+
+    #[test]
+    fn config_default_clones_google_stun_list() {
+        let mut cfg = Config::default();
+        let expected: Vec<String> = GOOGLE_STUN_LIST.iter().map(|&s| s.to_string()).collect();
+        assert_eq!(cfg.stun, expected, "Config::default STUN list mismatch");
+
+        // Mutating config should not affect the constant (ensures cloning occurred)
+        cfg.stun[0].push_str("-mutated");
+        assert_eq!(GOOGLE_STUN_LIST[0], "stun:stun.1.google.com:19302");
+    }
+
+    #[test]
+    fn peer_alias_new_display_and_asref() {
+        let alias = PeerAlias::new("abc12345".to_string());
+        assert_eq!(alias.as_ref(), "abc12345");
+        assert_eq!(alias.to_string(), "abc12345");
+    }
+
+    #[test]
+    fn peer_alias_from_key_is_deterministic_and_base58() {
+        let sk_bytes = [7u8; 32];
+        let sk = SigningKey::from_bytes(&sk_bytes);
+        let vk = sk.verifying_key();
+
+        let alias = PeerAlias::from_key(vk);
+
+        // Compute expected alias exactly as implementation
+        let digest = sha2::Sha256::digest(vk);
+        let s = bs58::encode(&digest[..6]).into_string();
+        let expected: String = s.chars().take(8).collect();
+
+        assert_eq!(alias.as_ref(), expected, "alias derivation mismatch");
+        assert!(!alias.as_ref().is_empty());
+        assert!(
+            alias.as_ref().chars().all(|c| base58_alphabet().contains(c)),
+            "alias contains non-base58 characters: {}",
+            alias.as_ref()
+        );
+    }
+
+    #[test]
+    fn inner_message_message_roundtrip_via_rmp() {
+        // Deterministic signed message
+        let sk_bytes = [3u8; 32];
+        let sk = SigningKey::from_bytes(&sk_bytes);
+        let payload = b"unit-test-msg".to_vec();
+        let msg = Message::new(payload.clone().into(), &sk);
+
+        let im = InnerMessage::Message(Box::new(msg));
+        let buf = rmp_serde::to_vec(&im).expect("serialize InnerMessage::Message");
+        let decoded: InnerMessage = rmp_serde::from_slice(&buf).expect("deserialize InnerMessage::Message");
+
+        match decoded {
+            InnerMessage::Message(m) => {
+                assert_eq!(m.content, payload);
+                assert!(m.verify(), "decoded message should verify");
+            }
+            _ => panic!("expected InnerMessage::Message"),
+        }
+    }
+
+    #[test]
+    fn inner_message_ice_roundtrip_via_rmp() {
+        let ice = RTCIceCandidateInit {
+            candidate: "candidate:0 1 UDP 2122260223 192.0.2.1 12345 typ host".to_string(),
+            sdp_mid: Some("0".to_string()),
+            sdp_mline_index: Some(0),
+            username_fragment: None,
+            ..Default::default()
+        };
+
+        let im = InnerMessage::Ice(ice.clone());
+        let buf = rmp_serde::to_vec(&im).expect("serialize InnerMessage::Ice");
+        let decoded: InnerMessage = rmp_serde::from_slice(&buf).expect("deserialize InnerMessage::Ice");
+
+        match decoded {
+            InnerMessage::Ice(i) => {
+                assert_eq!(i.candidate, ice.candidate);
+                assert_eq!(i.sdp_mid, ice.sdp_mid);
+                assert_eq!(i.sdp_mline_index, ice.sdp_mline_index);
+            }
+            _ => panic!("expected InnerMessage::Ice"),
+        }
+    }
+
+    #[test]
+    fn peer_error_display_strings() {
+        assert_eq!(format!("{}", PeerError::PeerNotConnected), "Peer not connected");
+        assert_eq!(format!("{}", PeerError::DataChannelNotAvailable), "Data channel not available");
+        assert_eq!(format!("{}", PeerError::ConnectionFailed), "Connection failed");
+        assert_eq!(format!("{}", PeerError::Other), "Something were wrong");
+    }
+}
