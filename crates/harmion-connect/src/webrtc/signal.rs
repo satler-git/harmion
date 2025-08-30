@@ -88,12 +88,12 @@ mod tests {
     }
 
     fn init_log() {
-        tracing_subscriber::fmt()
+        let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
             // .with_max_level(tracing::Level::ERROR)
             .with_file(true)
             .with_line_number(true)
-            .init();
+            .try_init();
     }
 
     async fn sleep() {
