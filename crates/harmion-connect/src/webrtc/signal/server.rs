@@ -701,6 +701,7 @@ async fn init_signal<
     {
         let token = token.clone();
         let info = info.clone();
+        let origin = origin.clone();
 
         let received_connection_state_changes_tx = info.received_connection_state_changes.clone();
 
@@ -749,6 +750,8 @@ async fn init_signal<
             }
 
             token.cancel();
+
+            info.signal_conns.remove(&origin);
         });
     }
 
