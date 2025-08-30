@@ -702,104 +702,120 @@ mod tests {
 }
 
 #[cfg(test)]
-mod more_unit_tests_for_simple {
+mod tests_additional {
     use super::*;
-    use std::collections::{HashMap, HashSet};
-    use ed25519_dalek::{SigningKey, VerifyingKey};
+    use std::collections::HashSet;
+    use ed25519_dalek::SigningKey;
+    use sha2::Digest;
+    use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 
-    // Helper to build a deterministic signing key from a fixed 32-byte seed.
-    fn signing_key_from_seed(seed: [u8; 32]) -> SigningKey {
-        SigningKey::from_bytes(&seed)
-    }
-
-    // Helper that mirrors the PeerAlias::from_key behavior to compute the expected alias.
-    fn compute_expected_alias_from_key(vk: &VerifyingKey) -> String {
-        use sha2::Digest;
-        let digest = sha2::Sha256::digest(vk);
-        let s = bs58::encode(&digest[..6]).into_string();
-        s.chars().take(8).collect::<String>()
+    fn base58_alphabet() -> &'static str {
+        "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
     }
 
     #[test]
-    fn peer_alias_new_keeps_string_and_display_matches() {
-        let alias = PeerAlias::new("ABCDEFGH".to_string());
-        assert_eq!(alias.as_ref(), "ABCDEFGH");
-        assert_eq!(format!("{}", alias), "ABCDEFGH");
-        // Clone/Eq
-        let alias2 = alias.clone();
-        assert_eq!(alias, alias2);
+    fn google_stun_list_has_expected_length_and_no_duplicates() {
+        assert_eq!(GOOGLE_STUN_LIST.len(), 10, "Google STUN list length changed");
+        let set: HashSet<&str> = GOOGLE_STUN_LIST.iter().copied().collect();
+        assert_eq!(set.len(), GOOGLE_STUN_LIST.len(), "STUN list contains duplicates");
+        for s in GOOGLE_STUN_LIST.iter() {
+            assert!(s.starts_with("stun:"), "{s} does not start with 'stun:'");
+        }
+        // Spot-check a couple of entries to guard against accidental edits
+        assert!(GOOGLE_STUN_LIST.contains(&"stun:stun.1.google.com:19302"));
+        assert!(GOOGLE_STUN_LIST.contains(&"stun:stun4.1.google.com:5349"));
     }
 
     #[test]
-    fn peer_alias_from_key_has_length_8_and_valid_base58_chars() {
-        // Fixed deterministic key
-        let sk = signing_key_from_seed([0x11; 32]);
+    fn config_default_clones_google_stun_list() {
+        let mut cfg = Config::default();
+        let expected: Vec<String> = GOOGLE_STUN_LIST.iter().map(|&s| s.to_string()).collect();
+        assert_eq!(cfg.stun, expected, "Config::default STUN list mismatch");
+
+        // Mutating config should not affect the constant (ensures cloning occurred)
+        cfg.stun[0].push_str("-mutated");
+        assert_eq!(GOOGLE_STUN_LIST[0], "stun:stun.1.google.com:19302");
+    }
+
+    #[test]
+    fn peer_alias_new_display_and_asref() {
+        let alias = PeerAlias::new("abc12345".to_string());
+        assert_eq!(alias.as_ref(), "abc12345");
+        assert_eq!(alias.to_string(), "abc12345");
+    }
+
+    #[test]
+    fn peer_alias_from_key_is_deterministic_and_base58() {
+        let sk_bytes = [7u8; 32];
+        let sk = SigningKey::from_bytes(&sk_bytes);
         let vk = sk.verifying_key();
+
         let alias = PeerAlias::from_key(vk);
 
-        // Length should be exactly 8 as implementation takes first 8 chars.
-        assert_eq!(alias.as_ref().len(), 8, "alias must be 8 chars long");
+        // Compute expected alias exactly as implementation
+        let digest = sha2::Sha256::digest(vk);
+        let s = bs58::encode(&digest[..6]).into_string();
+        let expected: String = s.chars().take(8).collect();
 
-        // Base58 alphabet (Bitcoin), the alias is a prefix so characters must belong to this set.
-        let b58_chars = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-        assert!(alias
-            .as_ref()
-            .chars()
-            .all(|c| b58_chars.contains(c)),
-            "alias contains only base58 characters");
+        assert_eq!(alias.as_ref(), expected, "alias derivation mismatch");
+        assert!(!alias.as_ref().is_empty());
+        assert!(
+            alias.as_ref().chars().all(|c| base58_alphabet().contains(c)),
+            "alias contains non-base58 characters: {}",
+            alias.as_ref()
+        );
     }
 
     #[test]
-    fn peer_alias_from_key_is_deterministic_and_matches_internal_logic() {
-        let sk = signing_key_from_seed([0xAB; 32]);
-        let vk = sk.verifying_key();
-        let alias1 = PeerAlias::from_key(vk);
-        let alias2 = PeerAlias::from_key(vk);
-        assert_eq!(alias1, alias2, "same key must produce identical alias");
+    fn inner_message_message_roundtrip_via_rmp() {
+        // Deterministic signed message
+        let sk_bytes = [3u8; 32];
+        let sk = SigningKey::from_bytes(&sk_bytes);
+        let payload = b"unit-test-msg".to_vec();
+        let msg = Message::new(payload.clone().into(), &sk);
 
-        // Validate against independently computed expected value
-        let expected = compute_expected_alias_from_key(&vk);
-        assert_eq!(alias1.as_ref(), expected, "alias must match expected computation");
+        let im = InnerMessage::Message(Box::new(msg));
+        let buf = rmp_serde::to_vec(&im).expect("serialize InnerMessage::Message");
+        let decoded: InnerMessage = rmp_serde::from_slice(&buf).expect("deserialize InnerMessage::Message");
+
+        match decoded {
+            InnerMessage::Message(m) => {
+                assert_eq!(m.content, payload);
+                assert!(m.verify(), "decoded message should verify");
+            }
+            _ => panic!("expected InnerMessage::Message"),
+        }
     }
 
     #[test]
-    fn peer_alias_from_different_keys_produces_different_aliases_in_general() {
-        // While collisions are theoretically possible, with SHA-256 and different inputs this should differ.
-        let sk1 = signing_key_from_seed([0x01; 32]);
-        let sk2 = signing_key_from_seed([0x02; 32]);
-        let a1 = PeerAlias::from_key(sk1.verifying_key());
-        let a2 = PeerAlias::from_key(sk2.verifying_key());
+    fn inner_message_ice_roundtrip_via_rmp() {
+        let ice = RTCIceCandidateInit {
+            candidate: "candidate:0 1 UDP 2122260223 192.0.2.1 12345 typ host".to_string(),
+            sdp_mid: Some("0".to_string()),
+            sdp_mline_index: Some(0),
+            username_fragment: None,
+            ..Default::default()
+        };
 
-        // Avoid overly brittle assertion by checking not equal; if equal, print for diagnostics.
-        assert_ne!(a1, a2, "different keys should yield different aliases (got {} and {})", a1, a2);
+        let im = InnerMessage::Ice(ice.clone());
+        let buf = rmp_serde::to_vec(&im).expect("serialize InnerMessage::Ice");
+        let decoded: InnerMessage = rmp_serde::from_slice(&buf).expect("deserialize InnerMessage::Ice");
+
+        match decoded {
+            InnerMessage::Ice(i) => {
+                assert_eq!(i.candidate, ice.candidate);
+                assert_eq!(i.sdp_mid, ice.sdp_mid);
+                assert_eq!(i.sdp_mline_index, ice.sdp_mline_index);
+            }
+            _ => panic!("expected InnerMessage::Ice"),
+        }
     }
 
     #[test]
-    fn peer_alias_hash_and_eq_work_in_collections() {
-        let mut set = HashSet::new();
-        set.insert(PeerAlias::new("AAAAAAA1".into()));
-        set.insert(PeerAlias::new("AAAAAAA1".into())); // duplicate
-        set.insert(PeerAlias::new("BBBBBBB2".into()));
-        assert_eq!(set.len(), 2, "Hash + Eq should ensure uniqueness");
-
-        let mut map = HashMap::new();
-        map.insert(PeerAlias::new("CCCCCCC3".into()), 10usize);
-        map.insert(PeerAlias::new("CCCCCCC3".into()), 20usize); // overwrite
-        assert_eq!(map.get(&PeerAlias::new("CCCCCCC3".into())), Some(&20usize));
-    }
-
-    #[test]
-    fn peer_state_equality_and_variants() {
-        assert_ne!(PeerState::Connecting, PeerState::Connected);
-        assert_ne!(PeerState::Connected, PeerState::Disconnected);
-        assert_ne!(PeerState::Disconnected, PeerState::Failed);
-        assert_eq!(PeerState::Failed, PeerState::Failed);
-    }
-
-    #[test]
-    fn peer_alias_display_consistency_with_as_ref() {
-        let sk = signing_key_from_seed([0x55; 32]);
-        let alias = PeerAlias::from_key(sk.verifying_key());
-        assert_eq!(alias.as_ref(), format!("{}", alias));
+    fn peer_error_display_strings() {
+        assert_eq!(format!("{}", PeerError::PeerNotConnected), "Peer not connected");
+        assert_eq!(format!("{}", PeerError::DataChannelNotAvailable), "Data channel not available");
+        assert_eq!(format!("{}", PeerError::ConnectionFailed), "Connection failed");
+        assert_eq!(format!("{}", PeerError::Other), "Something were wrong");
     }
 }
