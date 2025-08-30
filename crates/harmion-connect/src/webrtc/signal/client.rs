@@ -32,7 +32,7 @@ pub(super) enum SignalCError {
     Convertfailed(rmp_serde::encode::Error),
     #[error("No handshake or websocket error")]
     NoHandshake,
-    #[error("The sign of message is invailed")]
+    #[error("invalid message signature")]
     Untrust,
 }
 
