@@ -512,8 +512,6 @@ async fn init_client(
                 origin,
                 info.signal_info.clone(),
             )));
-
-            info.peer_conns.remove(&origin);
         });
     }
 
