@@ -1,20 +1,16 @@
 use ed25519_dalek::SigningKey;
 
 use dashmap::DashMap;
-use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _};
+use futures_util::{Sink, Stream, StreamExt as _};
 use tokio::{
     sync::{broadcast, mpsc, RwLock},
-    time::{Duration, Instant},
 };
-use tokio_tungstenite::tungstenite::Message as WSMessage;
 use tokio_util::sync::CancellationToken;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tracing::error;
-use warp::{reply::Reply, Filter};
-
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -90,14 +86,13 @@ async fn init_signal<
     Ok(())
 }
 
-use crate::{Message, MessageT, PeerIndex};
+use crate::{MessageT, PeerIndex};
 
 // ... (SignalClient implementation unchanged)
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[tokio::test]
     async fn heartbeat() -> Result<(), Box<dyn std::error::Error>> {
         let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
