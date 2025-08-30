@@ -538,11 +538,14 @@ async fn init_client(
                             Err(e) => { error!("client connection via ws: {e}"); continue }
                         };
 
-                        let _ = ws_tx.send(ws_message).await;
+                        if let Err(e) = ws_tx.send(ws_message).await{
+                            error!("websocket send error: {e}");
+                            break;
+                        }
                     }
                     _ = token.cancelled() => {
                         if let Err(e) = ws_tx.send(warp::ws::Message::close()).await {
-                             error!("websocket send error: {e}");
+                            error!("websocket send error: {e}");
                         }
 
                         break;
@@ -681,6 +684,7 @@ async fn init_signal<
                     Ok(msg) => {
                         if let Err(e) = ws_tx.send(msg).await {
                             error!("websocket send error: {e}");
+                            break;
                         }
                     }
                     Err(e) => {
