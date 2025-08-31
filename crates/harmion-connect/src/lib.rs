@@ -160,3 +160,16 @@ impl<T, R> Connection<T, R> for (mpsc::Sender<T>, mpsc::Receiver<R>) {
 // Encrypt<T: Connection<Message, Message>>: Connection<T, MessageT<Decrypted<T>>>
 // or Messageにもっと組み込む
 // Handshakeする
+
+#[cfg(test)]
+mod tests {
+    pub(crate) fn init_log() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            // .with_max_level(tracing::Level::ERROR)
+            // .with_max_level(tracing::Level::INFO)
+            .with_file(true)
+            .with_line_number(true)
+            .try_init();
+    }
+}

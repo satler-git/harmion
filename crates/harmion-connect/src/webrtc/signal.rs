@@ -92,15 +92,6 @@ mod tests {
         SignalClient::new((&key).into(), key)
     }
 
-    fn init_log() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            // .with_max_level(tracing::Level::ERROR)
-            .with_file(true)
-            .with_line_number(true)
-            .try_init();
-    }
-
     async fn sleep() {
         use tokio::time;
 
@@ -146,7 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn integrated_signal() -> Result<(), Box<dyn std::error::Error>> {
-        init_log();
+        crate::tests::init_log();
 
         let mut sig_a = signal();
         let mut sig_b = signal();
@@ -237,7 +228,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn peer_to_peer() -> Result<(), Box<dyn std::error::Error>> {
-        init_log();
+        crate::tests::init_log();
 
         let mut sig = signal();
 
