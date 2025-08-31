@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use std::collections::HashSet;
 
 use thiserror::Error;
-use tracing::error;
+use tracing::{debug, error, info, warn};
 
 use crate::{
     webrtc::{
@@ -34,6 +34,10 @@ pub(super) enum SignalCError {
     NoHandshake,
     #[error("invalid message signature")]
     Untrust,
+    #[error("Not connected to a Signalling service")]
+    NotConnected,
+    #[error("fialed to send message: {0}")]
+    Send(#[from] mpsc::error::SendError<SignalMessage>),
 }
 
 pub(super) struct SignalClient {
@@ -51,6 +55,44 @@ pub(super) struct SignalClient {
 }
 
 impl SignalClient {
+    pub(super) fn new(id: PeerIndex, key: SigningKey) -> Self {
+        Self {
+            sigs: HashSet::new(),
+            id,
+            key,
+
+            connection: None,
+            connected_to: None,
+            token: None,
+        }
+    }
+
+    pub(super) fn insert_signal(&mut self, sig: SignalInfo) -> bool {
+        self.sigs.insert(sig)
+    }
+
+    pub(super) async fn send(&self, message: SignalMessage) -> Result<(), SignalCError> {
+        if let Some((tx, _)) = &self.connection {
+            tx.send(message).await?;
+
+            Ok(())
+        } else {
+            Err(SignalCError::NotConnected)
+        }
+    }
+
+    pub(super) async fn recv(&mut self) -> Result<MessageT<SignalMessage>, SignalCError> {
+        if let Some((_, rx)) = &mut self.connection {
+            rx.recv().await.ok_or(SignalCError::NotConnected)
+        } else {
+            Err(SignalCError::NotConnected)
+        }
+    }
+
+    pub(super) fn origin(&self) -> PeerIndex {
+        self.id
+    }
+
     pub(super) async fn connect(&mut self, to: Option<SignalInfo>) -> Result<(), SignalCError> {
         let info = if let Some(info) = to {
             if !self.sigs.contains(&info) {
@@ -112,6 +154,11 @@ impl SignalClient {
 
             match ws_rx.next().await {
                 Some(Ok(msg)) => {
+                    if msg.is_close() {
+                        error!("received close message while waiting for the handshake message");
+                        return Err(SignalCError::NoHandshake)?;
+                    }
+
                     let data = msg.into_data();
 
                     let message: MessageT<InitSigToClient> = {
@@ -151,17 +198,20 @@ impl SignalClient {
                                 {
                                     Ok(ws_message) => if let Err(e) = ws_tx.send(ws_message).await {
                                          error!("websocket send error: {e}");
+                                         break;
                                     },
                                     Err(e) => error!("failed to convert SignalMessage to MessagePack: {e}"),
                                 }
                             }
                             _ = token.cancelled() => {
-                                if let Err(e) = ws_tx.send(WSMessage::Close(None)).await {
-                                     error!("websocket send error: {e}");
-                                }
                                 break;
                             }
                         }
+                    }
+
+                    info!("sending close");
+                    if let Err(e) = ws_tx.send(WSMessage::Close(None)).await {
+                        warn!("websocket send error: {e}");
                     }
 
                     token.cancel();
@@ -183,6 +233,14 @@ impl SignalClient {
                                     }
                                     break
                                 };
+
+                                debug!("received signal to signal message: {msg:?}");
+
+                                if msg.is_close() {
+                                    info!("received close message");
+                                    break;
+                                }
+
 
                                 let data = msg.into_data();
 
@@ -219,12 +277,17 @@ impl SignalClient {
         }
     }
 
-    fn disconnect(&mut self) {
+    pub(super) fn disconnect(&mut self) {
         if let Some(token) = self.token.take() {
             token.cancel();
         }
 
         self.connection = None;
         self.connected_to = None;
+    }
+
+    #[cfg(test)]
+    pub(super) fn signal_count(&self) -> usize {
+        self.sigs.len()
     }
 }

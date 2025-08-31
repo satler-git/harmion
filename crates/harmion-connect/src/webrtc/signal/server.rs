@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 use thiserror::Error;
 
@@ -90,6 +90,8 @@ enum PeerSignalStateChange {
 }
 
 async fn handle_peer_signal_state_changes(msg: Arc<PeerSignalStateChange>, sig_peers: &SigPeers) {
+    debug!("handling PeerSignalStateChange: {msg:?}");
+
     match Arc::<PeerSignalStateChange>::unwrap_or_clone(msg) {
         PeerSignalStateChange::Connect(peer, sig) => {
             let mut lock = sig_peers.write().await;
@@ -316,6 +318,7 @@ impl Signal {
         if let Some(c) = self.info.take() {
             c.shutdown_token.cancel()
         }
+        self.info = None;
     }
 
     pub(super) fn info(&self) -> Option<SignalInfo> {
@@ -412,6 +415,8 @@ async fn init_client(
     // TODO: もうちょっとerror
     let (mut ws_tx, mut ws_rx) = ws.split();
 
+    info!("staring vs client handshake");
+
     let origin = {
         let ws_message = Message::from(
             &InitSigToClient {
@@ -426,6 +431,11 @@ async fn init_client(
 
         match ws_rx.next().await {
             Some(Ok(msg)) => {
+                if msg.is_close() {
+                    error!("received close message while waiting for the handshake message");
+                    return Err(SignalCError::NoHandshake)?;
+                }
+
                 let data = msg.as_bytes();
 
                 let message: MessageT<InitClientToSig> = {
@@ -440,7 +450,7 @@ async fn init_client(
                 let (sig_to_peer, _) = &*info.sigs_peers.read().await;
 
                 for si in message.content.known_signals {
-                    if !sig_to_peer.contains_key(&si) {
+                    if si != info.signal_info && !sig_to_peer.contains_key(&si) {
                         if let Err(e) = info.new_sig_tx.send(si).await {
                             error!("failed to send new signal info, maybe channel has been closed: {e}")
                         }
@@ -454,6 +464,8 @@ async fn init_client(
             }
         }
     };
+
+    info!("connected to {origin:?} (client)");
 
     let token = info.shutdown_token.child_token();
     let connection_state_changes_tx = info.connection_state_changes_tx.clone();
@@ -472,6 +484,14 @@ async fn init_client(
                 tokio::select! {
                     msg = ws_rx.next() => {
                         let Some(Ok(msg)) = msg else { break };
+
+                        debug!("received signal to signal message: {msg:?}");
+
+                        if msg.is_close() {
+                            info!("received close message");
+                            break;
+                        }
+
 
                         let data = msg.as_bytes();
 
@@ -536,13 +556,14 @@ async fn init_client(
                         }
                     }
                     _ = token.cancelled() => {
-                        if let Err(e) = ws_tx.send(warp::ws::Message::close()).await {
-                            error!("websocket send error: {e}");
-                        }
-
                         break;
                     }
                 }
+            }
+
+            info!("Sending close");
+            if let Err(e) = ws_tx.send(warp::ws::Message::close()).await {
+                warn!("websocket send error: {e}");
             }
 
             token.cancel();
@@ -569,7 +590,7 @@ struct InitSignalClientToSignal {
 
 async fn init_signal<
     T: Sized + Stream<Item = Result<M, E>> + Sink<M, Error = E> + Send + 'static,
-    M: messages::WSMessageT + Send + 'static,
+    M: messages::WSMessageT + Send + std::fmt::Debug + 'static,
     E: std::error::Error + 'static,
 >(
     key: SigningKey,
@@ -584,6 +605,8 @@ async fn init_signal<
     let received_connection_state_changes_tx = info.received_connection_state_changes.clone();
 
     let origin = {
+        info!("starting vs signal handshake.");
+
         let known_signals = info.sigs_peers.read().await.0.keys().cloned().collect();
         let connected_nodes = info.peer_conns.iter().map(|e| *e.key()).collect();
 
@@ -606,11 +629,20 @@ async fn init_signal<
 
         ws_tx.send(handshake_message).await?;
 
+        info!("sent handshake message to the other Signalling service");
+
         match ws_rx.next().await {
             Some(Ok(msg)) => {
+                if msg.is_close() {
+                    error!("received close message while waiting for the handshake message");
+                    return Err(SignalCError::NoHandshake)?;
+                }
+
                 let data = msg.into_bytes_t();
 
                 let (verify_result, known_signals, origin, all) = if is_client {
+                    info!("parsing the received handshake message as Signal-Client");
+
                     let to = to.unwrap();
 
                     let message: MessageT<InitSignalToSignalClient> = rmp_serde::from_slice(&data)
@@ -630,6 +662,8 @@ async fn init_signal<
                     let message: MessageT<InitSignalClientToSignal> = rmp_serde::from_slice(&data)
                         .and_then(|msg: Message| MessageT::try_from(msg))?;
 
+                    info!("parsing the received handshake message as Signal-Server");
+
                     (
                         message.verify_result,
                         message.content.known_signals,
@@ -645,7 +679,7 @@ async fn init_signal<
                 let (sig_to_peer, _) = &*info.sigs_peers.read().await;
 
                 for si in known_signals {
-                    if !sig_to_peer.contains_key(&si) {
+                    if si != info.signal_info && !sig_to_peer.contains_key(&si) {
                         if let Err(e) = info.new_sig_tx.send(si).await {
                             error!("failed to send new signal info, maybe channel has been closed: {e}")
                         }
@@ -662,6 +696,8 @@ async fn init_signal<
         }
     };
 
+    info!("connected to {origin:?} (signal)");
+
     let token = info.shutdown_token.child_token();
 
     let (sender, mut rx) = mpsc::channel(BUFFER_SIZE);
@@ -674,14 +710,21 @@ async fn init_signal<
             loop {
                 let message = tokio::select! {
                     msg = rx.recv() => {
-                        let Some(msg) = msg else { break };
+                        let Some(msg) = msg else {
+                            info!("the message from mpsc channel was None, maybe channel(registered in signal_conns) has been closed or dropped?");
+                            break
+                        };
                         SignalToSignal::Signal(Box::new(msg))
                     }
                     msg = our_connection_state_changes_rx.recv() => {
-                        let Ok(msg) = msg else { break };
+                        let Ok(msg) = msg else {
+                            info!("the message from mpsc channel was None, maybe channel(our_connection_state_changes_rx) has been closed?");
+                            break
+                        };
                         SignalToSignal::State(msg)
                     }
                     _ = token.cancelled() => {
+                        info!("vs signal sending thread has been cancelled");
                         break
                     }
                 };
@@ -706,8 +749,11 @@ async fn init_signal<
 
             token.cancel();
 
+            info!("sending close");
             if let Err(e) = ws_tx.send(M::close()).await {
-                error!("websocket send error: {e}");
+                // WebSocket protocol error: Sending after closing is not allowed
+                // は許容
+                warn!("websocket send error: {e}"); // TODO
             }
         });
     }
@@ -721,7 +767,19 @@ async fn init_signal<
             loop {
                 let message = tokio::select! {
                     msg = ws_rx.next() => {
-                        let Some(Ok(msg)) = msg else { break };
+                        let Some(Ok(msg)) = msg else {
+                            info!("message from ws_rx(vs signal) is not vailed. Closing");
+                            debug!("message from ws_rx(vs signal): {msg:?}");
+
+                            break
+                        };
+
+                        debug!("received signal to signal message: {msg:?}");
+
+                        if msg.is_close() {
+                            info!("received close message");
+                            break;
+                        }
 
                         let data = msg.into_bytes_t();
 
@@ -734,6 +792,7 @@ async fn init_signal<
                         message
                     }
                     _ = token.cancelled() => {
+                        info!("vs signal receiving thread has been cancelled");
                         break
                     }
                 };
@@ -763,6 +822,7 @@ async fn init_signal<
 
             token.cancel();
 
+            info!("Closing Channel(vs signal). Removing the connection from signal_conns");
             info.signal_conns.remove(&origin);
         });
     }
@@ -820,8 +880,6 @@ mod messages {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[tokio::test]
     async fn heartbeat() -> Result<(), Box<dyn std::error::Error>> {
         let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
@@ -853,18 +911,5 @@ mod tests {
         assert!(response.is_err());
 
         Ok(())
-    }
-
-    fn gen_id() -> PeerIndex {
-        let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
-
-        (&ed25519_dalek::SigningKey::generate(&mut rng)).into()
-    }
-
-    fn gen_sig() -> SignalInfo {
-        SignalInfo {
-            addr: ("A".into(), 65535),
-            id: gen_id(),
-        }
     }
 }

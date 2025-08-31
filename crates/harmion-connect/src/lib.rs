@@ -105,6 +105,7 @@ impl Message {
 
 use serde::de::DeserializeOwned;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageT<T: DeserializeOwned> {
     pub content: T,
     pub timestamp: u64,
