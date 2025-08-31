@@ -114,7 +114,9 @@ impl SignalClient {
                         let client = client.clone();
                         async move {
                             let res = client.get(url).send().await;
-                            res.ok().map(|_| info)
+                            res.ok()
+                                .filter(|resp| resp.status().is_success())
+                                .map(|_| info)
                         }
                     }),
             )
