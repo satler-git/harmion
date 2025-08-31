@@ -631,7 +631,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore]
     async fn offer_answer_connects_peers() {
         let (peer_a_wa, offer_sdp) =
             Peer::<WaitingAnswer>::new(Config::default(), &PeerAlias::new("A".into()))
@@ -654,7 +653,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn send_and_receive_message() {
         let (peer_a_wa, offer_sdp) =
             Peer::<WaitingAnswer>::new(Config::default(), &PeerAlias::new("A".into()))
@@ -696,7 +694,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn send_and_receive_message_trickle() {
         crate::tests::init_log();
 

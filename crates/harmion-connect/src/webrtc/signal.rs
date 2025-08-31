@@ -226,7 +226,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn peer_to_peer() -> Result<(), Box<dyn std::error::Error>> {
         crate::tests::init_log();
 
