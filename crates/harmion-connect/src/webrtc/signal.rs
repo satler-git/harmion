@@ -61,6 +61,7 @@ impl SignalInfo {
 
 #[cfg(test)]
 mod tests {
+    use tracing::info;
 
     use crate::{
         webrtc::{
@@ -145,7 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn integrated_signal() -> Result<(), Box<dyn std::error::Error>> {
-        // init_log();
+        init_log();
 
         let mut sig_a = signal();
         let mut sig_b = signal();
@@ -236,19 +237,26 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn peer_to_peer() -> Result<(), Box<dyn std::error::Error>> {
-        // init_log();
+        init_log();
 
         let mut sig = signal();
 
         sig.run("127.0.0.1").await?;
 
+        info!("the Signalling service is running");
+
         let mut peer_1_client = client();
         let mut peer_2_client = client();
 
         peer_1_client.connect(sig.info()).await?;
+
+        sleep().await;
+
         peer_2_client.connect(sig.info()).await?;
 
         sleep().await;
+
+        info!("peers are connected to the signal");
 
         use tokio::sync::mpsc;
 
@@ -291,6 +299,8 @@ mod tests {
         )
         .await?;
 
+        info!("spawned peer1's SignalClient Handler");
+
         let (sender, mut rx) = mpsc::channel(BUFFER_SIZE);
         let (tx, receiver) = mpsc::channel(BUFFER_SIZE);
 
@@ -313,6 +323,8 @@ mod tests {
                 }
             }
         });
+
+        info!("spawned peer2's SignalClient Handler");
 
         let (peer_2, answer_sdp) = Peer::<crate::webrtc::simple::WaitingICE>::from_offer(
             sdp,

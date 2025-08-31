@@ -27,17 +27,12 @@ use webrtc::{
     },
 };
 
-pub const GOOGLE_STUN_LIST: [&str; 10] = [
-    "stun:stun.1.google.com:19302",
-    "stun:stun.1.google.com:5349",
-    "stun:stun1.1.google.com:3478",
-    "stun:stun1.1.google.com:5349",
-    "stun:stun2.1.google.com:19302",
-    "stun:stun2.1.google.com:5349",
-    "stun:stun3.1.google.com:3478",
-    "stun:stun3.1.google.com:5349",
-    "stun:stun4.1.google.com:19302",
-    "stun:stun4.1.google.com:5349",
+pub const GOOGLE_STUN_LIST: [&str; 1] = [
+    "stun:stun.l.google.com:19302",
+    // "stun:stun1.l.google.com:19302",
+    // "stun:stun2.l.google.com:19302",
+    // "stun:stun3.l.google.com:19302",
+    // "stun:stun4.l.google.com:19302",
 ];
 
 type SignalConn = Option<(
@@ -134,6 +129,8 @@ impl<S: PeerConnectingState> Peer<S> {
 
         let (tx, recv) = mpsc::channel(BUFFER_SIZE);
 
+        let trickle = config.signal.is_some();
+
         Self::set_data_channel_callbacks(
             pc.clone(),
             dc.clone(),
@@ -156,7 +153,7 @@ impl<S: PeerConnectingState> Peer<S> {
 
         let offer = pc.create_offer(None).await?;
 
-        if config.signal.is_none() {
+        if !trickle {
             let mut gather_complete = pc.gathering_complete_promise().await;
 
             pc.set_local_description(offer.clone()).await?;
@@ -184,6 +181,8 @@ impl<S: PeerConnectingState> Peer<S> {
         let (message_tx, recv) = mpsc::channel(BUFFER_SIZE);
 
         let cancel = CancellationToken::new();
+
+        let trickle = config.signal.is_some();
 
         {
             let dc_clone = dc.clone();
@@ -227,7 +226,7 @@ impl<S: PeerConnectingState> Peer<S> {
 
         let answer = pc.create_answer(None).await?;
 
-        if config.signal.is_none() {
+        if !trickle {
             let mut gather_complete = pc.gathering_complete_promise().await;
 
             pc.set_local_description(answer.clone()).await?;
@@ -385,6 +384,8 @@ impl<S: PeerConnectingState> Peer<S> {
         }
 
         if let Some((tx, mut rx)) = signal {
+            info!("running as trickle");
+
             {
                 let cancel_c = cancel.clone();
                 let peer_id = peer_id.clone();
@@ -433,6 +434,8 @@ impl<S: PeerConnectingState> Peer<S> {
             }
         } else {
             let (tx, mut rx) = mpsc::channel(BUFFER_SIZE);
+
+            info!("running as non-trickle");
 
             {
                 let cancel_c = cancel.clone();
@@ -603,15 +606,22 @@ impl Peer<WaitingAnswer> {
         self.pc.set_remote_description(answer_sdp).await?;
 
         let (tx, rx) = oneshot::channel();
+
         {
             let dc = self.dc.clone();
             let dc = dc.read().await;
             let dc = dc.as_ref().unwrap(); // こっち常にある
 
-            dc.on_open(Box::new(move || {
+            if dc.ready_state()
+                == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+            {
                 let _ = tx.send(());
-                Box::pin(async {})
-            }));
+            } else {
+                dc.on_open(Box::new(move || {
+                    let _ = tx.send(());
+                    Box::pin(async {})
+                }));
+            }
         }
 
         rx.await.map_err(|_| PeerError::Other)?;
@@ -643,10 +653,16 @@ impl Peer<WaitingICE> {
 
         let (tx, rx) = oneshot::channel();
         {
-            dc.on_open(Box::new(move || {
+            if dc.ready_state()
+                == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+            {
                 let _ = tx.send(());
-                Box::pin(async {})
-            }));
+            } else {
+                dc.on_open(Box::new(move || {
+                    let _ = tx.send(());
+                    Box::pin(async {})
+                }));
+            }
         }
 
         rx.await.map_err(|_| PeerError::Other)?;
