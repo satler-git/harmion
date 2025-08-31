@@ -460,7 +460,9 @@ impl<S: PeerConnectingState> Peer<S> {
                             _ = cancel_c.cancelled() => {
                                 break;
                             }
-                            Some(msg) = rx.recv() => {
+                            msg = rx.recv() => {
+                                let Some(msg) = msg else { break };
+
                                 match rmp_serde::to_vec(&InnerMessage::Ice(msg)) {
                                     Ok(data) => {
                                         if dc.ready_state()
@@ -519,7 +521,9 @@ impl<S: PeerConnectingState> Peer<S> {
                         _ = cancel_c.cancelled() => {
                             break;
                         }
-                        Some(msg) = rx.recv() => {
+                        msg = rx.recv() => {
+                            let Some(msg) = msg else { break };
+
                             match msg {
                                 InnerMessage::Ice(ice) => {
                                     if let Err(e) = pc.add_ice_candidate(ice).await {

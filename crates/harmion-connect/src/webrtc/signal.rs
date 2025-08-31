@@ -264,7 +264,9 @@ mod tests {
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    Some(ice) = rx.recv() => {
+                    ice = rx.recv() => {
+                        let Some(ice) = ice else { break };
+
                         let message = SignalMessage {
                             origin: peer_1_origin,
                             to: peer_2_origin,
@@ -298,7 +300,9 @@ mod tests {
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    Some(ice) = rx.recv() => {
+                    ice = rx.recv() => {
+                        let Some(ice) = ice else { break };
+
                         let message = SignalMessage {
                             origin: peer_2_origin,
                             to: peer_1_origin,
