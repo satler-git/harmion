@@ -15,7 +15,7 @@ use crate::{
         signal::{InitClientToSig, InitSigToClient, SignalInfo, SignalMessage},
         BUFFER_SIZE,
     },
-    Message, MessageT, PeerIndex,
+    Connection, Message, MessageT, PeerIndex,
 };
 
 #[derive(Debug, Error)]
@@ -69,24 +69,6 @@ impl SignalClient {
 
     pub(super) fn insert_signal(&mut self, sig: SignalInfo) -> bool {
         self.sigs.insert(sig)
-    }
-
-    pub(super) async fn send(&self, message: SignalMessage) -> Result<(), SignalCError> {
-        if let Some((tx, _)) = &self.connection {
-            tx.send(message).await.map_err(Box::new)?;
-
-            Ok(())
-        } else {
-            Err(SignalCError::NotConnected)
-        }
-    }
-
-    pub(super) async fn recv(&mut self) -> Result<MessageT<SignalMessage>, SignalCError> {
-        if let Some((_, rx)) = &mut self.connection {
-            rx.recv().await.ok_or(SignalCError::NotConnected)
-        } else {
-            Err(SignalCError::NotConnected)
-        }
     }
 
     pub(super) fn origin(&self) -> PeerIndex {
@@ -292,5 +274,30 @@ impl SignalClient {
     #[cfg(test)]
     pub(super) fn signal_count(&self) -> usize {
         self.sigs.len()
+    }
+}
+
+impl Connection<SignalMessage, MessageT<SignalMessage>> for SignalClient {
+    type Error = SignalCError;
+
+    async fn send(&mut self, value: SignalMessage) -> Result<(), Self::Error> {
+        if let Some((tx, _)) = &self.connection {
+            tx.send(value).await.map_err(Box::new)?;
+
+            Ok(())
+        } else {
+            Err(SignalCError::NotConnected)
+        }
+    }
+
+    async fn recv(&mut self) -> Result<Option<MessageT<SignalMessage>>, Self::Error> {
+        if let Some((_, rx)) = &mut self.connection {
+            rx.recv()
+                .await
+                .map(Some)
+                .ok_or(SignalCError::NotConnected)
+        } else {
+            Err(SignalCError::NotConnected)
+        }
     }
 }

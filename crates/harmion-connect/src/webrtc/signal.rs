@@ -126,6 +126,8 @@ mod tests {
         }
     }
 
+    use crate::Connection;
+
     #[tokio::test]
     async fn integrated_signal() -> Result<(), Box<dyn std::error::Error>> {
         // TODO: flaky
@@ -183,7 +185,7 @@ mod tests {
         // exchange
         peer_1.send(to_2.clone()).await?;
 
-        assert_eq!(peer_2.recv().await?.content, to_2);
+        assert_eq!(peer_2.recv().await?.unwrap().content, to_2);
 
         let to_3 = SignalMessage {
             origin: peer_1.origin(),
@@ -194,7 +196,7 @@ mod tests {
         // exchange
         peer_1.send(to_3.clone()).await?;
 
-        assert_eq!(peer_3.recv().await?.content, to_3);
+        assert_eq!(peer_3.recv().await?.unwrap().content, to_3);
 
         let to_2 = SignalMessage {
             origin: peer_3.origin(),
@@ -205,7 +207,7 @@ mod tests {
         // exchange
         peer_3.send(to_2.clone()).await?;
 
-        assert_eq!(peer_2.recv().await?.content, to_2);
+        assert_eq!(peer_2.recv().await?.unwrap().content, to_2);
 
         peer_1.disconnect();
         peer_2.disconnect();
