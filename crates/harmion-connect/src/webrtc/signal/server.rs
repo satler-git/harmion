@@ -309,12 +309,6 @@ impl Signal {
 
         init_signal(key, info, stream, Some(sig)).await.unwrap(); // TODO:
 
-        // 始まったらAllの交換して
-        // received_connection_state_changesを設置(sender)
-        // connection_state_changes_rxも(receiver)
-        // connection_state_changes_rx.subscribe()
-        // 新しくmpscchannelを作ってsignal_connsに登録
-
         Ok(())
     }
 
@@ -563,11 +557,13 @@ async fn init_client(
 #[derive(Debug, Serialize, Deserialize)]
 struct InitSignalToSignalClient {
     known_signals: Vec<SignalInfo>,
+    all: PeerSignalStateChange,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct InitSignalClientToSignal {
     known_signals: Vec<SignalInfo>,
+    all: PeerSignalStateChange,
     me: SignalInfo,
 }
 
@@ -585,17 +581,25 @@ async fn init_signal<
 
     let is_client = to.is_some();
 
+    let received_connection_state_changes_tx = info.received_connection_state_changes.clone();
+
     let origin = {
         let known_signals = info.sigs_peers.read().await.0.keys().cloned().collect();
+        let connected_nodes = info.peer_conns.iter().map(|e| *e.key()).collect();
 
         let handshake_message = if is_client {
             Ok(InitSignalClientToSignal {
                 me: info.signal_info.clone(),
+                all: PeerSignalStateChange::All(connected_nodes, info.signal_info.clone()),
                 known_signals,
             })
             .and_then(|c| Message::from(&c, &key))
         } else {
-            Ok(InitSignalToSignalClient { known_signals }).and_then(|c| Message::from(&c, &key))
+            Ok(InitSignalToSignalClient {
+                known_signals,
+                all: PeerSignalStateChange::All(connected_nodes, info.signal_info.clone()),
+            })
+            .and_then(|c| Message::from(&c, &key))
         }
         .and_then(|c| rmp_serde::to_vec(&c))
         .map(M::binary)?;
@@ -606,7 +610,7 @@ async fn init_signal<
             Some(Ok(msg)) => {
                 let data = msg.into_bytes_t();
 
-                let (verify_result, known_signals, origin) = if is_client {
+                let (verify_result, known_signals, origin, all) = if is_client {
                     let to = to.unwrap();
 
                     let message: MessageT<InitSignalToSignalClient> = rmp_serde::from_slice(&data)
@@ -616,7 +620,12 @@ async fn init_signal<
                         Err(SignalCError::Untrust)?;
                     }
 
-                    (message.verify_result, message.content.known_signals, to)
+                    (
+                        message.verify_result,
+                        message.content.known_signals,
+                        to,
+                        message.content.all,
+                    )
                 } else {
                     let message: MessageT<InitSignalClientToSignal> = rmp_serde::from_slice(&data)
                         .and_then(|msg: Message| MessageT::try_from(msg))?;
@@ -625,6 +634,7 @@ async fn init_signal<
                         message.verify_result,
                         message.content.known_signals,
                         message.content.me,
+                        message.content.all,
                     )
                 };
 
@@ -641,6 +651,8 @@ async fn init_signal<
                         }
                     }
                 }
+
+                let _ = received_connection_state_changes_tx.send(all.into()).await;
 
                 origin
             }
@@ -704,8 +716,6 @@ async fn init_signal<
         let token = token.clone();
         let info = info.clone();
         let origin = origin.clone();
-
-        let received_connection_state_changes_tx = info.received_connection_state_changes.clone();
 
         tokio::spawn(async move {
             loop {
