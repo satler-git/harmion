@@ -37,7 +37,7 @@ pub(super) enum SignalCError {
     #[error("Not connected to a Signalling service")]
     NotConnected,
     #[error("fialed to send message: {0}")]
-    Send(#[from] mpsc::error::SendError<SignalMessage>),
+    Send(#[from] Box<mpsc::error::SendError<SignalMessage>>),
 }
 
 pub(super) struct SignalClient {
@@ -73,7 +73,7 @@ impl SignalClient {
 
     pub(super) async fn send(&self, message: SignalMessage) -> Result<(), SignalCError> {
         if let Some((tx, _)) = &self.connection {
-            tx.send(message).await?;
+            tx.send(message).await.map_err(Box::new)?;
 
             Ok(())
         } else {
