@@ -62,10 +62,14 @@ impl SignalInfo {
 #[cfg(test)]
 mod tests {
 
-    use crate::webrtc::signal::client::SignalClient;
-    use crate::webrtc::signal::server::Signal;
-    use crate::webrtc::signal::{SignalData, SignalMessage};
-    use crate::PeerIndex;
+    use crate::{
+        webrtc::{
+            signal::{client::SignalClient, server::Signal, SignalData, SignalMessage},
+            simple::Peer,
+            BUFFER_SIZE,
+        },
+        Message, PeerIndex,
+    };
 
     fn gen_id() -> PeerIndex {
         let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
@@ -128,9 +132,20 @@ mod tests {
 
     use crate::Connection;
 
+    // signal
+    // - a
+    // - b
+    // peer
+    // - 1
+    //  - know a, b; will connect a
+    // - 2
+    //  - know a; will connect a
+    // - 3
+    //  - know b; will connect b
+
     #[tokio::test]
     async fn integrated_signal() -> Result<(), Box<dyn std::error::Error>> {
-        init_log();
+        // init_log();
 
         let mut sig_a = signal();
         let mut sig_b = signal();
@@ -214,6 +229,122 @@ mod tests {
 
         sig_a.shutdown();
         sig_b.shutdown();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn peer_to_peer() -> Result<(), Box<dyn std::error::Error>> {
+        // init_log();
+
+        let mut sig = signal();
+
+        sig.run("127.0.0.1").await?;
+
+        let mut peer_1_client = client();
+        let mut peer_2_client = client();
+
+        peer_1_client.connect(sig.info()).await?;
+        peer_2_client.connect(sig.info()).await?;
+
+        sleep().await;
+
+        use tokio::sync::mpsc;
+
+        let peer_1_origin = peer_1_client.origin();
+        let peer_2_origin = peer_2_client.origin();
+
+        let peer_1_alias = crate::webrtc::simple::PeerAlias::from_key(peer_1_origin.0);
+        let peer_2_alias = crate::webrtc::simple::PeerAlias::from_key(peer_2_origin.0);
+
+        // 本来、このClientでゴニョゴニョするのはPeerPoolの責任
+        let (sender, mut rx) = mpsc::channel(super::super::BUFFER_SIZE);
+        let (tx, receiver) = mpsc::channel(super::super::BUFFER_SIZE);
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(ice) = rx.recv() => {
+                        let message = SignalMessage {
+                            origin: peer_1_origin,
+                            to: peer_2_origin,
+                            data: SignalData::Ice(ice)
+                        };
+
+                        let _ = peer_1_client.send(message).await;
+                    }
+                    Ok(Some(msg)) = peer_1_client.recv() => {
+                        let SignalData::Ice(ice) = msg.content.data else { continue };
+                        let _ = tx.send(ice).await;
+                    }
+                }
+            }
+        });
+
+        let (peer_1, sdp) = Peer::<crate::webrtc::simple::WaitingAnswer>::new(
+            crate::webrtc::simple::Config {
+                signal: Some((sender, receiver)),
+                ..Default::default()
+            },
+            &peer_1_alias,
+        )
+        .await?;
+
+        let (sender, mut rx) = mpsc::channel(BUFFER_SIZE);
+        let (tx, receiver) = mpsc::channel(BUFFER_SIZE);
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(ice) = rx.recv() => {
+                        let message = SignalMessage {
+                            origin: peer_2_origin,
+                            to: peer_1_origin,
+                            data: SignalData::Ice(ice)
+                        };
+
+                        let _ = peer_2_client.send(message).await;
+                    }
+                    Ok(Some(msg)) = peer_2_client.recv() => {
+                        let SignalData::Ice(ice) = msg.content.data else { continue };
+                        let _ = tx.send(ice).await;
+                    }
+                }
+            }
+        });
+
+        let (peer_2, answer_sdp) = Peer::<crate::webrtc::simple::WaitingICE>::from_offer(
+            sdp,
+            crate::webrtc::simple::Config {
+                signal: Some((sender, receiver)),
+                ..Default::default()
+            },
+            &peer_2_alias,
+        )
+        .await?;
+
+        let peer_1 = peer_1.set_remote_answer(answer_sdp).await?;
+        let mut peer_2 = peer_2.wait().await?;
+
+        let payload = "hello from A".to_string();
+
+        let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
+
+        peer_1
+            .send(Message::new(
+                payload.clone().into(),
+                &ed25519_dalek::SigningKey::generate(&mut rng),
+            ))
+            .await?;
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(100), peer_2.recv())
+            .await??
+            .unwrap();
+
+        assert!(received.verify());
+
+        assert_eq!(String::from_utf8(received.content).unwrap(), payload);
 
         Ok(())
     }
