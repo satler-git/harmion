@@ -51,8 +51,14 @@ pub(super) struct SignalClient {
 }
 
 impl SignalClient {
-    pub(super) async fn connect(&mut self) -> Result<(), SignalCError> {
-        let info = {
+    pub(super) async fn connect(&mut self, to: Option<SignalInfo>) -> Result<(), SignalCError> {
+        let info = if let Some(info) = to {
+            if !self.sigs.contains(&info) {
+                self.sigs.insert(info.clone());
+            }
+
+            Some(info)
+        } else {
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()?;
