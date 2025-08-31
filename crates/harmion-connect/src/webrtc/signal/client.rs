@@ -257,6 +257,7 @@ impl SignalClient {
 
                                 if let Err(e) = tx.send(message.unwrap()).await {
                                     error!("failed to send receiver channel, channel was closed?: {e}");
+                                    break;
                                 }
                             }
                             _ = token.cancelled() => {
