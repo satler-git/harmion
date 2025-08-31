@@ -192,7 +192,7 @@ impl<S: PeerConnectingState> Peer<S> {
             let pc_clone = pc.clone();
             let cancel_clone = cancel.clone();
 
-            let signal = Arc::new(tokio::sync::Mutex::new(Some(config.signal.take().unwrap())));
+            let signal = Arc::new(tokio::sync::Mutex::new(Some(config.signal.take())));
 
             pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
                 let dc_clone = dc_clone.clone();
@@ -217,7 +217,7 @@ impl<S: PeerConnectingState> Peer<S> {
                         &peer_id,
                         message_tx,
                         cancel,
-                        sig,
+                        sig.flatten(),
                     );
                 })
             }))
