@@ -501,7 +501,18 @@ async fn init_client(
                             Err(e) => { error!("client connection via ws: {e}"); continue }
                         };
 
-                        let to = message.content.to; // TODO: verify
+
+                        if  message.content.origin != origin {
+                            error!("the origin of message from the client({origin:?}) does not match the sender");
+                            continue;
+                        }
+
+                        if message.origin != origin || !message.verify_result {
+                            error!("failed to verify the message. signature or origin is incorrect.");
+                            continue;
+                        }
+
+                        let to = message.content.to;
 
                         if let Some(conn) = info.peer_conns.get(&to) {
                             let _ = conn.1.send(message.content).await;
@@ -797,7 +808,10 @@ async fn init_signal<
                     }
                 };
 
-                // TODO: verify
+                if message.origin != origin.id || !message.verify_result {
+                    error!("failed to verify the message. signature or origin is incorrect.");
+                    continue;
+                }
 
                 match message.content {
                     SignalToSignal::Signal(sig) => {

@@ -294,8 +294,14 @@ impl Connection<SignalMessage, MessageT<SignalMessage>> for SignalClient {
         if let Some((_, rx)) = &mut self.connection {
             rx.recv()
                 .await
-                .map(Some)
                 .ok_or(SignalCError::NotConnected)
+                .and_then(|c| {
+                    if c.origin != self.connected_to.as_ref().unwrap().id || !c.verify_result {
+                        Err(SignalCError::Untrust)
+                    } else {
+                        Ok(Some(c))
+                    }
+                })
         } else {
             Err(SignalCError::NotConnected)
         }

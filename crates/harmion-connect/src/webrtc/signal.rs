@@ -130,7 +130,6 @@ mod tests {
 
     #[tokio::test]
     async fn integrated_signal() -> Result<(), Box<dyn std::error::Error>> {
-        // TODO: flaky
         init_log();
 
         let mut sig_a = signal();
