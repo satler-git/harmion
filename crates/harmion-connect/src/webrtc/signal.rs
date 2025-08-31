@@ -339,7 +339,7 @@ mod tests {
         let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
 
         peer_1
-            .send(Message::new(
+            .send(&Message::new(
                 payload.clone().into(),
                 &ed25519_dalek::SigningKey::generate(&mut rng),
             ))
