@@ -14,8 +14,8 @@ struct InitSigToClient {
     known_signals: Vec<SignalInfo>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-enum SignalData {
+#[derive(Debug, Serialize, Deserialize, Clone, strum::EnumIs)]
+pub(super) enum SignalData {
     Sdp(Box<webrtc::peer_connection::sdp::session_description::RTCSessionDescription>),
     Ice(webrtc::ice_transport::ice_candidate::RTCIceCandidateInit),
 }
@@ -37,10 +37,10 @@ impl Eq for SignalData {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct SignalMessage {
-    origin: PeerIndex,
-    to: PeerIndex,
+    pub origin: PeerIndex,
+    pub to: PeerIndex,
 
-    data: SignalData,
+    pub data: SignalData,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -23,6 +23,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 const NONCE_LEN: usize = 12;
+type Nonce = [u8; NONCE_LEN];
 
 #[derive(Copy, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct PeerIndex(VerifyingKey);
@@ -30,6 +31,12 @@ pub struct PeerIndex(VerifyingKey);
 impl<T: Into<VerifyingKey>> From<T> for PeerIndex {
     fn from(value: T) -> Self {
         Self(value.into())
+    }
+}
+
+impl PeerIndex {
+    fn inner(self) -> VerifyingKey {
+        self.0
     }
 }
 
@@ -41,7 +48,7 @@ pub struct Message {
     pub origin: PeerIndex,
     pub sig: Signature,
 
-    pub nonce: [u8; NONCE_LEN],
+    pub nonce: Nonce,
 }
 
 use rand::{rngs::ThreadRng, RngCore}; // TODO: Reseed?
@@ -54,7 +61,7 @@ impl Message {
             .as_secs();
 
         let mut data_to_sign = Vec::with_capacity(
-            content.len() + std::mem::size_of::<u64>() + std::mem::size_of::<[u8; NONCE_LEN]>(),
+            content.len() + std::mem::size_of::<u64>() + std::mem::size_of::<Nonce>(),
         );
         data_to_sign.extend_from_slice(&content);
         data_to_sign.extend_from_slice(&timestamp.to_be_bytes());
@@ -90,7 +97,7 @@ impl Message {
                     let mut data = Vec::with_capacity(
                         self.content.len()
                             + std::mem::size_of::<u64>()
-                            + std::mem::size_of::<[u8; NONCE_LEN]>(),
+                            + std::mem::size_of::<Nonce>(),
                     );
                     data.extend_from_slice(&self.content);
                     data.extend_from_slice(&self.timestamp.to_be_bytes());
@@ -114,7 +121,7 @@ pub struct MessageT<T: DeserializeOwned> {
     pub origin: PeerIndex,
     pub sig: Signature,
 
-    pub nonce: [u8; NONCE_LEN],
+    pub nonce: Nonce,
 
     pub verify_result: bool,
 }
@@ -206,13 +213,29 @@ impl<T, R> Connection<T, R> for (mpsc::Sender<T>, mpsc::Receiver<R>) {
 
 #[cfg(test)]
 mod tests {
+    use sha2::digest::crypto_common::rand_core::RngCore;
+
+    use crate::Message;
+
     pub(crate) fn init_log() {
         let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            // .with_max_level(tracing::Level::ERROR)
+            // .with_max_level(tracing::Level::DEBUG)
+            .with_max_level(tracing::Level::ERROR)
             // .with_max_level(tracing::Level::INFO)
             .with_file(true)
             .with_line_number(true)
             .try_init();
+    }
+
+    #[test]
+    fn signature() -> Result<(), Box<dyn std::error::Error>> {
+        let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
+        let key = ed25519_dalek::SigningKey::generate(&mut rng);
+
+        let msg = Message::from(&rng.next_u64(), &key)?;
+
+        assert!(msg.verify());
+
+        Ok(())
     }
 }

@@ -31,7 +31,7 @@ pub(super) enum SignalError {
 type SigResult<T> = Result<T, SignalError>;
 
 #[derive(Debug)]
-pub(super) struct Signal {
+pub(in crate::webrtc) struct Signal {
     port: u16, // sig.port /= info.port の場合あり
     info: Option<Arc<ServerInfo>>,
     id: PeerIndex,
