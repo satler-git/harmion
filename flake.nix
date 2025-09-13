@@ -36,6 +36,27 @@
         }:
         let
           rust-bin = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+
+          cargo-flaky =
+            let
+              rustPlatform = pkgs.makeRustPlatform {
+                cargo = rust-bin;
+                rustc = rust-bin;
+              };
+            in
+            rustPlatform.buildRustPackage rec {
+              pname = "cargo-flaky";
+              version = "0.4.0";
+
+              src = pkgs.fetchCrate {
+                inherit pname version;
+                hash = "sha256-wRaYxNvc6bgSUoCvdNNFPcitxEA40qdfNZEaG33EYEE=";
+              };
+
+              cargoHash = "sha256-zUf8rP+vww+/GCHCg1SMirsl3CWXNQX5wBtczcLuDvI=";
+
+              doCheck = false;
+            };
         in
         {
 
@@ -54,6 +75,7 @@
                 rust-bin
 
                 cargo-nextest
+                cargo-flaky
               ];
             };
           };
@@ -77,6 +99,7 @@
               cargo-nextest
 
               rust-bin
+              cargo-flaky
             ];
           };
         };

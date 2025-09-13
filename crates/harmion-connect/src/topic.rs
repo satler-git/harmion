@@ -59,10 +59,10 @@ mod tests {
     #[test]
     fn debug_topic_tree() -> Result<(), Box<dyn std::error::Error>> {
         let topic = crate::topic!("harmion", "write");
-        assert_eq!(format!("{:?}", topic), "harmion / write");
+        assert_eq!(format!("{topic:?}"), "harmion / write");
 
         let topic = crate::topic!("harmion", "write", "/to/file");
-        assert_eq!(format!("{:?}", topic), "harmion / write / /to/file");
+        assert_eq!(format!("{topic:?}"), "harmion / write / /to/file");
 
         Ok(())
     }

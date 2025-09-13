@@ -40,3 +40,5 @@ jobs:
 
       - run: cargo nextest run --all --run-ignored all
       - run: cargo test --doc --all-features -- --nocapture
+
+      - run: cargo flaky -i 30
