@@ -19,7 +19,7 @@ pub trait Subscriber {
     ) -> impl std::future::Future<Output = Result<(), Self::E>> + Send;
 }
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 const NONCE_LEN: usize = 12;
@@ -85,7 +85,7 @@ impl Message {
     pub fn verify(&self) -> bool {
         (self.origin)
             .0
-            .verify(
+            .verify_strict(
                 &{
                     let mut data = Vec::with_capacity(
                         self.content.len()
