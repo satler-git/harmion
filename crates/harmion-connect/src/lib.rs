@@ -3,6 +3,7 @@
 pub mod topic;
 pub mod webrtc;
 
+use std::marker::PhantomData;
 pub use topic::TopicTree;
 
 pub trait Subscriber {
@@ -141,6 +142,48 @@ trait Connection<T, R> {
 
     async fn send(&mut self, value: T) -> Result<(), Self::Error>;
     async fn recv(&mut self) -> Result<Option<R>, Self::Error>;
+}
+
+trait Layer<T, R, C> {
+    type Connection: Connection<T, R>;
+
+    async fn layer(&self, inner: C) -> Self::Connection;
+
+    fn stack<O, T2, R2>(self, outer: O) -> Stack<O, Self, T, R, C, T2, R2>
+    where
+        O: Layer<T2, R2, Self::Connection>,
+        Self: Sized,
+    {
+        Stack {
+            outer,
+            inner: self,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+struct Stack<O, I, T, R, C, T2, R2>
+where
+    I: Layer<T, R, C>,
+    O: Layer<T2, R2, I::Connection>,
+    I::Connection: Connection<T, R>,
+{
+    outer: O,
+    inner: I,
+    _phantom: PhantomData<(T, R, C, T2, R2)>,
+}
+
+impl<O, I, T, R, C, T2, R2> Layer<T2, R2, C> for Stack<O, I, T, R, C, T2, R2>
+where
+    I: Layer<T, R, C>,
+    O: Layer<T2, R2, I::Connection>,
+    I::Connection: Connection<T, R>,
+{
+    type Connection = O::Connection;
+
+    async fn layer(&self, inner: C) -> Self::Connection {
+        self.outer.layer(self.inner.layer(inner).await).await
+    }
 }
 
 use tokio::sync::mpsc;
