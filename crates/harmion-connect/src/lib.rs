@@ -1,6 +1,7 @@
 // Topic, Connectionなどいろいろ考えれてないことばかり
 
 pub mod topic;
+mod verify;
 pub mod webrtc;
 
 use std::marker::PhantomData;
@@ -205,6 +206,96 @@ impl<T, R> Connection<T, R> for (mpsc::Sender<T>, mpsc::Receiver<R>) {
     async fn recv(&mut self) -> Result<Option<R>, Self::Error> {
         Ok(self.1.recv().await)
     }
+}
+
+struct ToBytes; // TODO: お遊びだから消すかも
+
+impl<C> Layer<Message, Vec<u8>, C> for ToBytes
+where
+    C: Connection<Message, Message>,
+{
+    type Connection = ToBytesConn<C>;
+
+    async fn layer(&self, inner: C) -> Self::Connection {
+        ToBytesConn(inner)
+    }
+}
+
+struct ToBytesConn<C>(C)
+where
+    C: Connection<Message, Message>;
+
+impl<C> Connection<Message, Vec<u8>> for ToBytesConn<C>
+where
+    C: Connection<Message, Message>,
+{
+    type Error = C::Error;
+
+    async fn send(&mut self, value: Message) -> Result<(), Self::Error> {
+        self.0.send(value).await
+    }
+
+    async fn recv(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
+        if let Some(message) = self.0.recv().await? {
+            Ok(Some(message.content))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+use std::ops::ControlFlow;
+
+trait Handshake<T, R> {
+    // 最初にstateがないときでもmessageだけはある、offerer/responderを明確に区別するのも考えたけどめんどい
+    type State;
+    type Error;
+
+    type Return;
+
+    fn start(&mut self)
+        -> Result<(ControlFlow<Self::Return, Self::State>, Option<T>), Self::Error>;
+
+    fn next_state(
+        &mut self,
+        state: Self::State,
+        message: R,
+    ) -> Result<(ControlFlow<Self::Return, Self::State>, Option<T>), Self::Error>;
+
+    async fn run<C>(
+        &mut self,
+        conn: &mut C,
+    ) -> Result<Self::Return, HandshakeRunnerError<Self::Error, C::Error>>
+    where
+        C: Connection<T, R>,
+    {
+        let (mut state, mut message) = self.start().map_err(HandshakeRunnerError::Handshake)?;
+
+        loop {
+            match state {
+                ControlFlow::Continue(prev_state) => {
+                    if let Some(m) = message.take() {
+                        conn.send(m).await.map_err(HandshakeRunnerError::Conn)?;
+                    }
+
+                    if let Some(m) = conn.recv().await.map_err(HandshakeRunnerError::Conn)? {
+                        (state, message) = self
+                            .next_state(prev_state, m)
+                            .map_err(HandshakeRunnerError::Handshake)?;
+                    } else {
+                        return Err(HandshakeRunnerError::ConnClosed);
+                    }
+                }
+                ControlFlow::Break(r) => return Ok(r),
+            }
+        }
+    }
+}
+
+enum HandshakeRunnerError<H, C> {
+    Conn(C),
+    Handshake(H),
+    ConnClosed,
 }
 
 // Encrypt<T: Connection<Message, Message>>: Connection<T, MessageT<Decrypted<T>>>

@@ -1,6 +1,5 @@
 use dashmap::DashMap;
 use either::Either::{self, Left, Right};
-use moka::future::Cache;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info};
@@ -8,7 +7,7 @@ use tracing::{error, info};
 use ed25519_dalek::SigningKey;
 use tokio_util::sync::CancellationToken;
 
-use std::{collections::HashMap, mem, time::Duration};
+use std::{collections::HashMap, mem};
 
 use crate::{
     webrtc::{
@@ -19,7 +18,7 @@ use crate::{
         simple::{Connected, Peer, PeerError},
         BUFFER_SIZE,
     },
-    Connection, Nonce, PeerIndex,
+    Connection, Layer, Message, PeerIndex,
 };
 
 // 機能
@@ -54,23 +53,15 @@ pub(crate) struct PeerPool {
     key: SigningKey,
 
     map: Arc<DashMap<PeerIndex, (CancellationToken, Peer<Connected>)>>,
-    replay_cache: Cache<(PeerIndex, Nonce), ()>,
 
     signal: SignalRef,
 }
-
-const TTL_SECS: u64 = 10 * 60;
-const MAX_CAPACITY: u64 = 10_000;
 
 impl PeerPool {
     fn new(id: PeerIndex, key: SigningKey) -> Self {
         PeerPool {
             signal: Arc::new(RwLock::new(Left(SignalClient::new(id, key.clone())))),
             map: Arc::new(DashMap::new()),
-            replay_cache: Cache::builder()
-                .max_capacity(MAX_CAPACITY)
-                .time_to_live(Duration::from_secs(TTL_SECS))
-                .build(),
 
             id,
             key,
@@ -167,6 +158,24 @@ async fn connect_offer(
 }
 
 impl PeerPool {
+    pub async fn start<L>(&self, layer: Option<L>) -> PoolResult<()>
+    where
+        L: Layer<Message, Message, Peer<Connected>>,
+    {
+        // start center thread
+        // set Sender<Peer>
+        //
+        // received Peer -> layer<peer> -> start peer thread
+        // HashMap<Id, HashSet<Sender<Message>>>
+
+        // create(wait)
+        // broadcast::Sender<(Id, Message)> // if haven't received Sender<Message>
+        // mpsc::Receiver<(Id, mpsc::Sender<mpsc::Sender<Message>>)>
+        //
+        // set Sender<(id, Sender<Message>)>
+        Ok(())
+    }
+
     pub async fn connect_to_sig(&self, to: Option<SignalInfo>) -> PoolResult<()> {
         let token = CancellationToken::new();
 
