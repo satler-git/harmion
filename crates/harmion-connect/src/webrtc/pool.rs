@@ -158,7 +158,7 @@ async fn connect_offer(
 }
 
 impl PeerPool {
-    pub async fn start<L>(&self, layer: Option<L>) -> PoolResult<()>
+    pub async fn start<L>(&self, layer: L) -> PoolResult<()>
     where
         L: Layer<Message, Message, Peer<Connected>>,
     {

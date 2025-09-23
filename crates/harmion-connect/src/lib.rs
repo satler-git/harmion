@@ -208,30 +208,44 @@ impl<T, R> Connection<T, R> for (mpsc::Sender<T>, mpsc::Receiver<R>) {
     }
 }
 
-struct ToBytes; // TODO: お遊びだから消すかも
+struct IdentityLayer;
 
-impl<C> Layer<Message, Vec<u8>, C> for ToBytes
+impl<T, R, C> Layer<T, R, C> for IdentityLayer
 where
-    C: Connection<Message, Message>,
+  C: Connection<T, R>
 {
-    type Connection = ToBytesConn<C>;
+    type Connection = C;
 
     async fn layer(&self, inner: C) -> Self::Connection {
-        ToBytesConn(inner)
+        inner
     }
 }
 
-struct ToBytesConn<C>(C)
-where
-    C: Connection<Message, Message>;
+#[derive(Default)]
+struct ToBytesLayer<T>(PhantomData<T>);
 
-impl<C> Connection<Message, Vec<u8>> for ToBytesConn<C>
+impl<T, C> Layer<T, Vec<u8>, C> for ToBytesLayer<T>
 where
-    C: Connection<Message, Message>,
+    C: Connection<T, Message>,
+{
+    type Connection = ToBytesConn<T, C>;
+
+    async fn layer(&self, inner: C) -> Self::Connection {
+        ToBytesConn(inner, PhantomData)
+    }
+}
+
+struct ToBytesConn<T, C>(C, PhantomData<T>)
+where
+    C: Connection<T, Message>;
+
+impl<T, C> Connection<T, Vec<u8>> for ToBytesConn<T, C>
+where
+    C: Connection<T, Message>,
 {
     type Error = C::Error;
 
-    async fn send(&mut self, value: Message) -> Result<(), Self::Error> {
+    async fn send(&mut self, value: T) -> Result<(), Self::Error> {
         self.0.send(value).await
     }
 
@@ -243,6 +257,42 @@ where
         }
     }
 }
+
+struct SignLayer<R>(SigningKey, PhantomData<R>);
+
+impl<R> SignLayer<R> {
+    pub(crate) fn new(key: SigningKey) -> Self {
+        Self(key, PhantomData)
+    }
+}
+
+impl<R, C> Layer<Vec<u8>, R, C> for SignLayer<R>
+where
+  C: Connection<Message, R>,
+{
+    type Connection = SignConn<R, C>;
+
+    async fn layer(&self, inner: C) -> Self::Connection {
+        SignConn(self.0.clone(), inner, PhantomData)
+    }
+}
+
+struct SignConn<R, C>(SigningKey, C, PhantomData<R>);
+
+impl<R, C> Connection<Vec<u8>, R> for  SignConn<R, C>
+where
+  C: Connection<Message, R>, {
+    type Error = C::Error;
+
+    async fn send(&mut self, value: Vec<u8>) -> Result<(), Self::Error> {
+        self.1.send(Message::new(value, &self.0)).await
+    }
+
+    async fn recv(&mut self) -> Result<Option<R>, Self::Error> {
+        self.1.recv().await
+    }
+  }
+
 
 use std::ops::ControlFlow;
 
