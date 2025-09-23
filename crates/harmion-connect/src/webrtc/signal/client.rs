@@ -19,7 +19,7 @@ use crate::{
 };
 
 #[derive(Debug, Error)]
-pub(super) enum SignalCError {
+pub(in crate::webrtc) enum SignalCError {
     #[error("failed to send http request: {0}")]
     Request(#[from] reqwest::Error),
     #[error("Signalling service is unavailable")]
@@ -40,7 +40,7 @@ pub(super) enum SignalCError {
     Send(#[from] Box<mpsc::error::SendError<SignalMessage>>),
 }
 
-pub(super) struct SignalClient {
+pub(in crate::webrtc) struct SignalClient {
     sigs: HashSet<SignalInfo>,
     pub(super) connection: Option<(
         mpsc::Sender<SignalMessage>,
@@ -55,7 +55,7 @@ pub(super) struct SignalClient {
 }
 
 impl SignalClient {
-    pub(super) fn new(id: PeerIndex, key: SigningKey) -> Self {
+    pub fn new(id: PeerIndex, key: SigningKey) -> Self {
         Self {
             sigs: HashSet::new(),
             id,
@@ -67,15 +67,15 @@ impl SignalClient {
         }
     }
 
-    pub(super) fn insert_signal(&mut self, sig: SignalInfo) -> bool {
+    pub fn insert_signal(&mut self, sig: SignalInfo) -> bool {
         self.sigs.insert(sig)
     }
 
-    pub(super) fn origin(&self) -> PeerIndex {
+    pub fn origin(&self) -> PeerIndex {
         self.id
     }
 
-    pub(super) async fn connect(&mut self, to: Option<SignalInfo>) -> Result<(), SignalCError> {
+    pub async fn connect(&mut self, to: Option<SignalInfo>) -> Result<(), SignalCError> {
         let info = if let Some(info) = to {
             if !self.sigs.contains(&info) {
                 self.sigs.insert(info.clone());
@@ -91,6 +91,7 @@ impl SignalClient {
             let mut futures = futures_util::stream::iter(
                 self.sigs
                     .iter()
+                    .cloned()
                     .map(|info| (format!("{}/heartbeat", info.to_http()), info))
                     .map(|(url, info)| {
                         let client = client.clone();
@@ -262,7 +263,7 @@ impl SignalClient {
         }
     }
 
-    pub(super) fn disconnect(&mut self) {
+    pub fn disconnect(&mut self) {
         if let Some(token) = self.token.take() {
             token.cancel();
         }

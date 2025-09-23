@@ -35,5 +35,8 @@ tracing   = { workspace = true }
 dashmap = "6.1.0"
 moka    = { version = "0.12.10", features = ["future"] }
 
+either = "1.15.0"
+strum  = { version = "0.27.2", features = ["derive"] }
+
 [dev-dependencies]
 tracing-subscriber = "0.3.20"

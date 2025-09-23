@@ -1,6 +1,7 @@
 // Topic, Connectionなどいろいろ考えれてないことばかり
 
 pub mod topic;
+mod verify;
 pub mod webrtc;
 
 use std::marker::PhantomData;
@@ -23,6 +24,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 const NONCE_LEN: usize = 12;
+type Nonce = [u8; NONCE_LEN];
 
 #[derive(Copy, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct PeerIndex(VerifyingKey);
@@ -30,6 +32,12 @@ pub struct PeerIndex(VerifyingKey);
 impl<T: Into<VerifyingKey>> From<T> for PeerIndex {
     fn from(value: T) -> Self {
         Self(value.into())
+    }
+}
+
+impl PeerIndex {
+    fn inner(self) -> VerifyingKey {
+        self.0
     }
 }
 
@@ -41,7 +49,7 @@ pub struct Message {
     pub origin: PeerIndex,
     pub sig: Signature,
 
-    pub nonce: [u8; NONCE_LEN],
+    pub nonce: Nonce,
 }
 
 use rand::{rngs::ThreadRng, RngCore}; // TODO: Reseed?
@@ -54,7 +62,7 @@ impl Message {
             .as_secs();
 
         let mut data_to_sign = Vec::with_capacity(
-            content.len() + std::mem::size_of::<u64>() + std::mem::size_of::<[u8; NONCE_LEN]>(),
+            content.len() + std::mem::size_of::<u64>() + std::mem::size_of::<Nonce>(),
         );
         data_to_sign.extend_from_slice(&content);
         data_to_sign.extend_from_slice(&timestamp.to_be_bytes());
@@ -90,7 +98,7 @@ impl Message {
                     let mut data = Vec::with_capacity(
                         self.content.len()
                             + std::mem::size_of::<u64>()
-                            + std::mem::size_of::<[u8; NONCE_LEN]>(),
+                            + std::mem::size_of::<Nonce>(),
                     );
                     data.extend_from_slice(&self.content);
                     data.extend_from_slice(&self.timestamp.to_be_bytes());
@@ -114,7 +122,7 @@ pub struct MessageT<T: DeserializeOwned> {
     pub origin: PeerIndex,
     pub sig: Signature,
 
-    pub nonce: [u8; NONCE_LEN],
+    pub nonce: Nonce,
 
     pub verify_result: bool,
 }
@@ -200,19 +208,175 @@ impl<T, R> Connection<T, R> for (mpsc::Sender<T>, mpsc::Receiver<R>) {
     }
 }
 
+struct IdentityLayer;
+
+impl<T, R, C> Layer<T, R, C> for IdentityLayer
+where
+  C: Connection<T, R>
+{
+    type Connection = C;
+
+    async fn layer(&self, inner: C) -> Self::Connection {
+        inner
+    }
+}
+
+#[derive(Default)]
+struct ToBytesLayer<T>(PhantomData<T>);
+
+impl<T, C> Layer<T, Vec<u8>, C> for ToBytesLayer<T>
+where
+    C: Connection<T, Message>,
+{
+    type Connection = ToBytesConn<T, C>;
+
+    async fn layer(&self, inner: C) -> Self::Connection {
+        ToBytesConn(inner, PhantomData)
+    }
+}
+
+struct ToBytesConn<T, C>(C, PhantomData<T>)
+where
+    C: Connection<T, Message>;
+
+impl<T, C> Connection<T, Vec<u8>> for ToBytesConn<T, C>
+where
+    C: Connection<T, Message>,
+{
+    type Error = C::Error;
+
+    async fn send(&mut self, value: T) -> Result<(), Self::Error> {
+        self.0.send(value).await
+    }
+
+    async fn recv(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
+        if let Some(message) = self.0.recv().await? {
+            Ok(Some(message.content))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+struct SignLayer<R>(SigningKey, PhantomData<R>);
+
+impl<R> SignLayer<R> {
+    pub(crate) fn new(key: SigningKey) -> Self {
+        Self(key, PhantomData)
+    }
+}
+
+impl<R, C> Layer<Vec<u8>, R, C> for SignLayer<R>
+where
+  C: Connection<Message, R>,
+{
+    type Connection = SignConn<R, C>;
+
+    async fn layer(&self, inner: C) -> Self::Connection {
+        SignConn(self.0.clone(), inner, PhantomData)
+    }
+}
+
+struct SignConn<R, C>(SigningKey, C, PhantomData<R>);
+
+impl<R, C> Connection<Vec<u8>, R> for  SignConn<R, C>
+where
+  C: Connection<Message, R>, {
+    type Error = C::Error;
+
+    async fn send(&mut self, value: Vec<u8>) -> Result<(), Self::Error> {
+        self.1.send(Message::new(value, &self.0)).await
+    }
+
+    async fn recv(&mut self) -> Result<Option<R>, Self::Error> {
+        self.1.recv().await
+    }
+  }
+
+
+use std::ops::ControlFlow;
+
+trait Handshake<T, R> {
+    // 最初にstateがないときでもmessageだけはある、offerer/responderを明確に区別するのも考えたけどめんどい
+    type State;
+    type Error;
+
+    type Return;
+
+    fn start(&mut self)
+        -> Result<(ControlFlow<Self::Return, Self::State>, Option<T>), Self::Error>;
+
+    fn next_state(
+        &mut self,
+        state: Self::State,
+        message: R,
+    ) -> Result<(ControlFlow<Self::Return, Self::State>, Option<T>), Self::Error>;
+
+    async fn run<C>(
+        &mut self,
+        conn: &mut C,
+    ) -> Result<Self::Return, HandshakeRunnerError<Self::Error, C::Error>>
+    where
+        C: Connection<T, R>,
+    {
+        let (mut state, mut message) = self.start().map_err(HandshakeRunnerError::Handshake)?;
+
+        loop {
+            match state {
+                ControlFlow::Continue(prev_state) => {
+                    if let Some(m) = message.take() {
+                        conn.send(m).await.map_err(HandshakeRunnerError::Conn)?;
+                    }
+
+                    if let Some(m) = conn.recv().await.map_err(HandshakeRunnerError::Conn)? {
+                        (state, message) = self
+                            .next_state(prev_state, m)
+                            .map_err(HandshakeRunnerError::Handshake)?;
+                    } else {
+                        return Err(HandshakeRunnerError::ConnClosed);
+                    }
+                }
+                ControlFlow::Break(r) => return Ok(r),
+            }
+        }
+    }
+}
+
+enum HandshakeRunnerError<H, C> {
+    Conn(C),
+    Handshake(H),
+    ConnClosed,
+}
+
 // Encrypt<T: Connection<Message, Message>>: Connection<T, MessageT<Decrypted<T>>>
 // or Messageにもっと組み込む
 // Handshakeする
 
 #[cfg(test)]
 mod tests {
+    use sha2::digest::crypto_common::rand_core::RngCore;
+
+    use crate::Message;
+
     pub(crate) fn init_log() {
         let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            // .with_max_level(tracing::Level::ERROR)
+            // .with_max_level(tracing::Level::DEBUG)
+            .with_max_level(tracing::Level::ERROR)
             // .with_max_level(tracing::Level::INFO)
             .with_file(true)
             .with_line_number(true)
             .try_init();
+    }
+
+    #[test]
+    fn signature() -> Result<(), Box<dyn std::error::Error>> {
+        let mut rng = ed25519_dalek::ed25519::signature::rand_core::OsRng;
+        let key = ed25519_dalek::SigningKey::generate(&mut rng);
+
+        let msg = Message::from(&rng.next_u64(), &key)?;
+
+        assert!(msg.verify());
+
+        Ok(())
     }
 }
