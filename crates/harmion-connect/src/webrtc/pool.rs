@@ -1,8 +1,8 @@
 use dashmap::DashMap;
 use either::Either::{self, Left, Right};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
-use tracing::{error, info};
+use tokio::sync::{broadcast, mpsc, RwLock};
+use tracing::{error, info, warn};
 
 use ed25519_dalek::SigningKey;
 use tokio_util::sync::CancellationToken;
@@ -55,6 +55,8 @@ pub(crate) struct PeerPool {
     map: Arc<DashMap<PeerIndex, (CancellationToken, Peer<Connected>)>>,
 
     signal: SignalRef,
+
+    center: Option<(mpsc::Sender<Peer<Connected>>, )>,
 }
 
 impl PeerPool {
@@ -65,6 +67,8 @@ impl PeerPool {
 
             id,
             key,
+
+            center: None,
         }
     }
 }
@@ -157,11 +161,102 @@ async fn connect_offer(
     Ok(peer.wait().await?)
 }
 
+// TODO: cancel
+async fn per_peer_thread(mut peer: Peer<Connected>, id: PeerIndex, tx: mpsc::Sender<Option<(PeerIndex, Message)>>, mut rx: mpsc::Receiver<Message>) -> PoolResult<()> {
+    loop {
+        tokio::select! {
+            msg = peer.recv()  => {
+                let _ = tx.send(msg?.map(|msg| (id, msg))).await; // TODO:
+            }
+            to_send = rx.recv() => {
+                let Some(to_send) = to_send else {
+                    warn!("(PeerPool per peer thread)To send has been closed");
+                    break
+                };
+
+                peer.send(&to_send).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn center_thread(
+    mut peer_rx: mpsc::Receiver<(PeerIndex, Peer<Connected>)>,
+    mut channel_rx: mpsc::Receiver<(PeerIndex, mpsc::Sender<Message>)>,
+    mut to_send_rx: mpsc::Receiver<(PeerIndex, Message)>,
+    mut bd: broadcast::Sender<(PeerIndex, Message)>,
+    cancel: CancellationToken,
+) -> PoolResult<()>
+{
+    let mut channels = HashMap::new();
+    let (tx, rx) = mpsc::channel(BUFFER_SIZE); // Option<(peerid, <message>)
+    let mut senders = HashMap::new();
+
+    // TODO: log use span
+    loop {
+        tokio::select! {
+            peer = peer_rx.recv() => {
+                let Some((id, peer)) = peer else {
+                    warn!("peer channel has been closed");
+                    break
+                };
+
+                let tx = tx.clone();
+                let (sender_tx, sender_rx) = mpsc::channel(BUFFER_SIZE);
+
+                // span
+                tokio::spawn(async move {
+                    if let Err(e) = per_peer_thread(peer, id, tx, sender_rx).await {
+                        error!("error happend in per peer thread: {e}");
+                    }
+                });
+
+                senders.insert(id, sender_tx);
+            }
+            channel = channel_rx.recv() => {
+                let Some((id, channel)) = channel else {
+                    warn!("channel channel has been closed");
+                    break
+                };
+
+                channels.entry(id).or_insert_with(|| vec![]).push(channel);
+            }
+            to_send = to_send_rx.recv() => {
+                let Some((id, msg)) = to_send else {
+                    warn!("to_send channel has been closed");
+                    break
+                };
+                if let Some(c) = senders.get_mut(&id) {
+                    let _ = c.send(msg).await;
+                } else {
+                    error!("{id:?} is not connected");
+                }
+            }
+            // TODO: rx -> if !contains then broadcast else forall
+        }
+    }
+    Ok(())
+}
+
 impl PeerPool {
-    pub async fn start<L>(&self, layer: L) -> PoolResult<()>
-    where
-        L: Layer<Message, Message, Peer<Connected>>,
+    pub async fn start(&mut self) -> PoolResult<()>
     {
+        if self.center.is_some() {
+            return Ok(());
+        }
+
+        let (peer_tx, peer_rx) = mpsc::channel(BUFFER_SIZE);
+
+        tokio::spawn(async move {
+            if let Err(e) = center_thread(peer_rx).await {
+                error!("error happened in PeerPool center thread: {e}")
+            }
+        });
+
+        self.center = Some((peer_tx, ));
+
         // start center thread
         // set Sender<Peer>
         //
