@@ -155,27 +155,37 @@ def main():
             sync()
             quiet = a.cli("sync", b.identity["node_id"])
             assert quiet["uploaded"] == quiet["downloaded"] == "0", "echo did not terminate"
-            # Verify automatic synchronization without explicit sync calls.
+            # Establish that the startup round has already captured its high.
             a.stop()
-            b.stop()
-            a.start(1)
-            b.start(1)
-            automatic = a.write("create", body="automatic")["content_id"]
-            deadline = time.monotonic() + 15
-            while True:
-                result = subprocess.run([str(CLI), "--node", str(b.path), "get", automatic], capture_output=True, text=True, timeout=10)
-                if result.returncode == 0:
-                    assert json.loads(result.stdout)["content"]["body"] == "automatic"
-                    break
-                assert time.monotonic() < deadline, result.stderr
-                time.sleep(0.1)
+            a.start()
+            startup = a.write("create", body="startup sync")["content_id"]
+            a.stop()
+            a.start(120)
+
+            def wait_for_sync(content_id, body):
+                deadline = time.monotonic() + 15
+                while True:
+                    result = subprocess.run(
+                        [str(CLI), "--node", str(b.path), "get", content_id],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if result.returncode == 0:
+                        assert json.loads(result.stdout)["content"]["body"] == body
+                        return
+                    assert time.monotonic() < deadline, result.stderr
+                    time.sleep(0.1)
+
+            wait_for_sync(startup, "startup sync")
+            # B is manual-only. Replication now requires A's save trigger.
+            automatic = a.write("create", body="save-triggered sync")["content_id"]
+            wait_for_sync(automatic, "save-triggered sync")
             a.cli("retire", b.identity["node_id"])
             a.cli("approve", b.path / "peer.json", ok=False)
             b.cli("sync", a.identity["node_id"], ok=False)
             for node in nodes:
                 for name in ["node.db", "admin.secret", "private-key.der", "connection.json", "iroh.secret"]:
                     assert (node.path / name).stat().st_mode & 0o077 == 0, name
-            print("PASS: two daemon processes, CLI, partition, late resolution, deletion conflict, crash/replay, finite echo, automatic sync, retirement")
+            print("PASS: two daemon processes, CLI, partition, late resolution, deletion conflict, crash/replay, finite echo, startup and save-triggered sync, retirement")
         finally:
             for node in nodes:
                 node.stop()

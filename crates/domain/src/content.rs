@@ -52,6 +52,8 @@ impl<V> FieldState<V> {
 pub struct ContentSnapshot<V = AttributeValue> {
     pub content: Content<V>,
     pub life: Life,
+    /// Largest UTC Unix timestamp (microseconds) of the selected field versions.
+    pub last_edited_at: i64,
     pub basis: BTreeSet<UpdateId>,
     pub fields: BTreeMap<Field, FieldState<V>>,
 }

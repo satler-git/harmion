@@ -1,8 +1,16 @@
 # 実装全体レビュー
 
-確認日: 2026-11-18。対象は現在のworktree。仕様の出典は[specification.md](specification.md)、API契約は[app-api.md](app-api.md)。会話・設計文書の照合を記録した[review.md](review.md)とは別に、ここでは実コードの状態を扱う。
+確認日: 2026-11-18。基準は `e8171cf`。以降の変更と検証結果は台帳の該当項目に記録する。仕様の出典は[specification.md](specification.md)、API契約は[app-api.md](app-api.md)。会話・設計文書の照合は[review.md](review.md)を参照。
 
-この文書は作業台帳。指摘を直した場合も削除せず、状態・修正・検証根拠を更新する。実装がない機能を「仕様違反の実装」と混同せず、暫定方式が仕様を満たしていない場合はその差を明記する。テスト数だけを完成判定にしない。
+指摘を直した場合も項目を残し、状態・修正・検証根拠を更新する。初期仕様の未実装は残作業として扱う。従来の「残す」「維持」は基準時点での判断であり、今後の変更に対する承認を表さない。
+
+## 実装とレビューの進め方
+
+仕様で定まっている動作を単位として実装し、差分・既存動作への影響・検証結果を提示してレビューを受ける。仕様に沿う実装に必要な判断が未確定の場合、判断が必要な箇所で作業を止め、選択肢と影響を所有者に確認する。
+
+- §9.3 のローカル保存後の同期は R16 に記録した。OS復帰・ネットワーク復帰・相手の更新通知は未実装。
+- §6.1 の Query は条件と参照評価器を R17、保存層の検索を R18、固定スナップショットと App API・SDK への接続を R19 に記録する。Subscribe は R20 に記録する。
+- §4.3・§5 の標準解決ツール、§6 のOAuth、§7 のInterpreter、§9 のCloudflareノード、§10 のExportは実装作業が残る。特にOAuthを載せるローカル入口、Cloudflareのノード認証と初期管理資格情報、Exportの権限・出力範囲には未決定事項がある。[未解決の設計論点](review.md#4-残る境界注意点新たな確定仕様ではない)
 
 ## 確認範囲
 
@@ -13,16 +21,17 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 | 仕様 | 現状 | 根拠・不足 |
 |---|---|---|
 | §3 Content、項目別原子保存、固定編集元 | 実装 | `domain::{Graph,ContentSnapshot}`、`node::application::save`。tokenは保存済みbasisを復元する |
+| §3.2 複製状況の確認 | 部分実装 | 手動`sync`はそのラウンドの送受信件数とログ位置を返す。保存した更新の複製先やPeerの到達状況を読む`sync_status`は未実装 |
 | §4 競合・削除・keep/restore | Core実装、管理ツール部分実装 | `Graph::accept/project`。CLIは本文中心。比較UI、属性/kind選択、三者マージ案はない |
 | §5 全履歴保持・管理向け取得 | 部分実装 | 不変recordは保持。inspectは現在の削除状態と候補を返すが、共通祖先の専用取得はない |
-| §6 Query/Subscribe | 未実装 | node/APIに操作がない。getはID指定のみ。capabilitiesはfalse |
+| §6 Query/Subscribe | native App API・Rust SDKを実装 | R17〜R20参照。固定結果のページ取得、初回取得、変更の再開、再認可、キャッシュを実装 |
 | §6 Read/Write/Manage権限 | 実装 | `node::access/application`。grant/credential/token/request_resultは同期対象外 |
-| §6 OAuth・SDK購読 | 未実装 | 管理bootstrapと手動issue-appが先行。OAuth認可フローの代替完成品とは扱わない |
+| §6 OAuth | 未実装 | 管理bootstrapと手動issue-appが先行 |
 | §6 OS所有者保護 | Unix実装、Linux検証 | `local::ProtectedDir`。Windows/Androidの保護・lifecycleはない。同一OSユーザーを信頼する前提は仕様と一致 |
 | §7 Interpreter | 未実装 | 登録、仲介、Call/Provide、Provider接続なし |
 | §8 参加・退役の伝播 | 実装・検証済み | 共通の初期信頼証明、署名付きAdmit/Retire/Dismiss、管理ログ・保留・所有者回復。R01参照 |
 | §9 端末間iroh・通信と意味の分離 | 実装、検証範囲限定 | `sync::PeerTransport`とHTTPS/iroh adapter。ローカルIP変更、リレーのみ、独立2プロセスを検証 |
-| §9 同期契機 | 部分実装 | 起動・周期・手動・backoffあり。保存直後、OS復帰、更新通知は未接続 |
+| §9 同期契機 | 部分実装 | 起動・周期・手動・backoffに、ローカル保存確定後の自動同期を追加（R16）。OS復帰・ネットワーク復帰・相手の更新通知は未接続 |
 | §9 Cloudflare | 未実装 | worker crate/DO adapterなし。現在のHTTPSをCloudflare対応済みと呼ばない |
 | §10 Export | 未実装 | 初期仕様に必要。DBファイルのコピーやHRQ要求ファイルはexportではない |
 
@@ -61,6 +70,7 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - 根拠: `app::response`は`serde_json::to_vec`の後に8MiB制限。`application::get/read_conflicts`では先に全snapshotとtokenを作る。
 - 影響: 各recordが1MiB以内でも、長い履歴で増えた属性・競合候補の集合は8MiBを超え得る。返却は拒否できるが生成メモリを制限できず、取得でtokenだけが増えることもある。
 - 解消条件: 読出し集合・候補のページング/予算、JSON生成時の上限。保存済みデータを切り捨てて成功応答にする回避は禁止。
+- QueryとSubscribeは項目ごとに借用したviewを上限付きの書き込み先へ符号化してサイズを計測し、入る分だけをページ・通知に追加する。get・conflicts等の一括応答には従来の制限が残る。
 
 ### R05 — 正確な数値と任意objectキーのJSON往復
 
@@ -86,7 +96,7 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 ### R08 — 管理CLIは本文中心で、一般アプリSDKも薄い
 
 - 種別: 未実装／暫定UX。状態: 残す。
-- 根拠: CLIのedit/resolve/restoreはBodyのみ。restoreは既知属性/kindを消す。SDKのcallはJSON Valueを返し、型付き取得結果・OAuth・購読はない。
+- 根拠: CLIのedit/resolve/restoreはBodyのみ。restoreは既知属性/kindを消す。SDKの個別Contentの取得結果はJSON Valueで、OAuthは未実装。型付きQuery要求、購読の状態管理とキャッシュはR19・R20で追加。
 - 影響: Coreの属性/kind操作が存在しても、標準ツールで全操作できるわけではない。restoreの省略値を保持するようCoreの意味を変えて隠さず、現在の制約をhelp/手順に明記する。
 
 ### R09 — エラーの診断情報がAPI境界で失われる
@@ -135,7 +145,59 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - 影響: 管理CLIの応答を失った場合、再実行で証明が追加されたり、既に解決済みのため拒否されたりする。元の応答を必ず再取得できるとは主張しない。membersで反映状態を確認する必要がある。
 - 解消条件: 管理要求のrequest_id・固定観測範囲・元receiptの契約を定めて永続化する。署名証明のネットワーク再送と、所有者操作の再実行を混同しない。
 
-## 今回の変更に対する検証条件
+### R16 — ローカル保存が次の周期照合まで同期を起こさない
+
+- 種別は仕様 §9.3 の同期契機の不足。状態は実装済み。セルフレビューで見つけた割り当ての問題も修正済み。
+- 修正前は、daemonの自動同期が保存確定を受け取る経路を持たなかった。
+- AppのContent保存で新規更新がコミットされた後、DB workerからdaemonの自動同期を起こす。同一要求の再送は元のreceiptを返し、認可・保存に失敗した場合も同期シグナルは発行しない。
+- 複数のシグナルをまとめ、同期中の追加保存はPeerごとの次回ラウンド候補にする。到達不能なPeerのbackoff、同一Peerの直列化、`--sync-seconds 0`の手動同期モードは従来どおり。保存の応答はローカル永続化で返す。
+- 確認箇所は [daemonの自動同期](../apps/daemon/src/main.rs)、[Appの保存経路](../crates/net-native/src/app.rs)、[保存トランザクション](../crates/node/src/application.rs)。
+- App HTTPSテストで新規保存の通知と、同一要求の再送・request ID衝突・書込権限不足で通知が発生しないことを検証した。[App HTTPSテスト](../crates/net-native/tests/app_https.rs)
+- 2つの実daemonを使い、起動ラウンドで最初のContentが届いた後、自動同期周期が120秒の発信元で別のContentを保存した。受信側の自発同期を無効にした構成で、HTTPS・irohとも15秒以内に2件目が届いた。[実プロセス検証](../design_checks/two_process_sync.py)
+- 5つの実daemonを使う既存検証もHTTPS・irohの両方で通過した。分断中の編集、中継、後着競合、クラッシュ再起動、1台停止中の自動同期と停止台の追従を確認した。[5プロセス検証](../design_checks/multi_process_sync.py)
+- ワークスペースのRustテスト78件、Clippy、fmt、codec fixture、Pythonの意味モデル492順列が通過した。
+- セルフレビューで、保存が続き同期候補が5件以上あると、Node ID順で毎回先頭から4枠を割り当てるため、後方のPeerが実行されない場合を確認した。退役済みPeerの経路も管理証明の交換用に保持するため、有効ノードが5台以内のクラスタでも候補が5件以上になり得る。
+- 修正後は実行可能なPeerを待ち行列に追加し、空いた枠を待機順で割り当てる。daemonの回帰テストで、4枠が埋まった状態で保存が続いても5番目のPeerが次の枠を取得すること、同期失敗後は保存があっても再試行時刻まで待つことを確認した。[スケジューラとテスト](../apps/daemon/src/main.rs)
+- 割り当て修正後のRustテスト80件、Clippy、fmt、HTTPS・irohの2プロセス検証が通過した。
+
+### R17 — 型付きQuery条件の評価
+
+- 対象は仕様 §6.1 の条件評価と §6.2 のRead Filter。状態は評価器を実装済み・セルフレビュー済み。
+- protocolに型付き条件を定義し、nodeで通常表示のkindと属性を評価する。数値は正確な10進値で比較する。文字列の比較順、型が異なる場合、不在と`null`、空の論理条件と配列条件を契約に記録した。[条件の評価](app-api.md#条件の評価)
+- getとQuery評価器で読み取り可否の判定を共有する。削除済みContentを除き、現在のRead Filterを条件とは独立に適用する。削除競合では生存側の通常値で判定する。
+- テストでは数値の指数境界、等値と大小比較、配列の順序と重複、不在と`null`、kindの通常値による認可、削除と編集の競合を確認した。[評価器のテスト](../crates/node/tests/query.rs)
+- ワークスペースのRustテスト83件、Clippy、fmtが通過した。
+- Contentの最終編集時刻を通常表示の項目版から求め、UTCマイクロ秒の大小比較を条件に追加した。選ばれた属性のunsetとkindの非所属も含む。通常表示から外れた版や削除・keepの時刻は集計対象外。domain・nodeのテストとワークスペース全ターゲットのClippy、fmtが通過した。[条件の評価](app-api.md#条件の評価)
+- セルフレビューで、時計のずれにより後継版の時刻が前の版より古い場合に、最終編集時刻が戻ることを確認し、API契約に追記した。時刻条件はRead Filterと削除状態の判定を通過した後に評価する。ワークスペースのRustテスト84件が通過した。
+- 保存アダプタでの検索はR18・R19、Rustの単一Snapshot判定を使う購読の変更処理はR20に記録する。[保存アダプタの設計](architecture.md)
+
+### R18 — native SQLiteでのQuery実行と検索索引
+
+- SQLite schema v6は通常表示からkind・属性・配列要素・最終編集時刻の索引を生成する。旧DBは保存済み更新を検証し、同一トランザクションで索引を再構築して移行する。
+- ローカル保存と同期受信は、受理ログと同じトランザクションで変更されたContentの索引を更新する。削除確定で検索対象から外し、復元で戻す。同期受信で同一Contentの更新が同じページに複数ある場合は、そのページの最終状態を索引に反映する。
+- SQLiteの保存アダプタが型付き条件とRead Filterをパラメータ付きSQLに変換し、絞り込み後にContent ID順で件数を制限する。数値の大小比較は正確な10進数と等価なバイト順を使う。[SQLiteでの実行](../crates/store-sqlite/src/query.rs)
+- 参照評価器との一致、Read Filter適用後の件数制限、既存DB移行、受信した削除と復元、ローカル保存と同期受信それぞれのロールバックをテストする。検索自体は受理ログを読み込まない。更新受理時の全ログ再読込は R03 に残る。
+- ワークスペースのRustテスト87件、Clippy、fmtが通過した。
+- この保存操作の結果は同一トランザクション内の現在値に基づく。複数のAPI呼び出しをまたぐ固定結果の公開経路は R19 に記録する。
+
+### R19 — 固定Queryのページ取得
+
+- schema v7で現在の編集元とContentごとの受理ログを索引化する。API開始時の条件とRead Filterで選んだID・編集元をSQLiteに固定し、後続ページでは候補Contentのログだけを読む。
+- 不透明カーソルをアプリと固定結果に結び付ける。版の再構築と編集トークンの発行は、最新の認可と固定時の可視状態を確認するトランザクション内で行う。期限、同時に保持する結果の数、版参照の総量、応答のバイト数を制限する。
+- HQU v1要求、App HTTPS、Rust SDKのページ取得を接続した。固定版の再構築、継続時の再認可、編集元の保持、別アプリへのカーソル流用拒否、期限経過、再起動後の継続をテストする。[ネイティブのQuery](app-api.md#ネイティブの-query)
+- ワークスペースのRustテスト89件、Clippy、fmtが通過した。
+- セルフレビューで、多数のRead kindをSQLの個別パラメータに展開するとドライバの上限に当たることを確認した。開始時の認可には保存済みのgrantをSQLで結合し、33,001件のkindを含むgrantで回帰テストした。
+
+### R20 — 変更購読と再開
+
+- schema v8で、Contentの検索索引と同じトランザクションに変更位置を記録する。ログを4096件に制限し、認可変更にはアプリごとの世代を設ける。初回の固定結果と変更履歴の基準点を同時に確定する。
+- App HTTPSで開始・再開・終了を実装する。待機中はローカル保存、Peerからの受信、grant変更で起こす。通知には購読内の順序を付け、再開時は最新の可視状態で作り直す。見えていた項目が権限外になった場合はIDだけを返す。
+- SDKは初回完了までキャッシュを仮状態にし、通知を適用してからカーソルを更新する。セルフレビューで、初回中に非同期要求がキャンセルされた場合も仮状態を破棄するよう修正した。古い通知による巻き戻しを回帰テストで確認する。
+- 期限・再起動・grantの変更・変更履歴の保持超過では `reset_required`。資格情報を失効させた場合は HTTP 401。Cloudflare側は別途保存・ホストアダプタを実装する。[ネイティブのSubscribe](app-api.md#ネイティブの-subscribe)
+- 検証では、初回取得中の複数編集の集約、応答再取得、kind変更でのIDのみの削除通知、同じ値に戻したgrant変更、保持範囲超過、初回確定までのSDKの仮状態、順序の逆転、Peerのpushとpullによる待機解除、ノード再起動後のresetを確認した。[SQLiteの購読テスト](../crates/store-sqlite/tests/application.rs) [HTTPSのPeer同期テスト](../crates/net-native/tests/https_sync.rs)
+- 最終確認でRustテスト94件、Clippy、fmt、HTTPS・irohの実daemonの2プロセス同期検証が通過した。
+
+## 基準時点の複数ノード同期の検証条件
 
 1. 3〜5ノードで、A↔B↔Cの中継、循環、分断中の別々の編集、後着の競合解決、再送が収束し、静止後のログ件数が増えない。
 2. 1台の参加承認が他の信頼済みノードへ伝わる。別クラスタ・偽署名・Node IDへの鍵差替えを拒否する。
@@ -144,7 +206,7 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 5. 1台が到達不能でも他のオンライン端末が同期を進める。実daemon・CLIで確認する。
 6. 全体の既存テスト、fmt、Clippy、fixture整合性を通す。追加機能だけの狭いテストで全仕様準拠を主張しない。
 
-## 今回の実行結果
+## 基準時点の実行記録
 
 - `cargo test --workspace --offline`: 成功。JSON属性の変形と、停止したPeerによる他Peerの待機に回帰テストを追加。
 - `cargo clippy --workspace --all-targets --offline -- -D warnings`、`cargo fmt --all -- --check`: 成功。

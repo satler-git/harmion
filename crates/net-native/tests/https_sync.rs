@@ -140,6 +140,151 @@ fn fields(text: &str) -> BTreeMap<Field, Value> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_push_and_pull_wake_an_app_subscription() {
+    use harmion_client::{Client, SubscriptionNotification as Notice};
+    use std::time::Duration;
+
+    let dir = Directory::new();
+    let a = Node::start(&dir, 1).await;
+    let b = Node::start(&dir, 2).await;
+    a.approve(&b).await;
+    b.approve(&a).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app_endpoint = listener.local_addr().unwrap();
+    let client = Client::new(
+        ConnectionInfo {
+            version: 1,
+            cluster_id: hex(&b.identity.cluster.0),
+            node_id: hex(&b.identity.node.0),
+            certificate: hex(b.tls.certificate()),
+            endpoint: app_endpoint.to_string(),
+        },
+        *b.admin.expose_bytes(),
+    )
+    .unwrap();
+    let registration = PeerRegistration {
+        version: 2,
+        signing_key: None,
+        cluster_root: None,
+        cluster_id: hex(&b.identity.cluster.0),
+        node_id: hex(&b.identity.node.0),
+        binding: PeerBinding::Https {
+            certificate: hex(b.tls.certificate()),
+            endpoint: b.endpoint.clone(),
+        },
+    };
+    let (stop, receiver) = watch::channel(false);
+    let app_task = tokio::spawn(harmion_net_native::app::serve(
+        listener,
+        b.store.clone(),
+        b.tls.clone(),
+        registration.clone(),
+        receiver,
+    ));
+    let id = ContentId([1; 32]);
+    let mut subscription = client
+        .subscribe(query::Condition::And(vec![]))
+        .await
+        .unwrap();
+    assert_eq!(
+        client.subscription_next(&mut subscription).await.unwrap(),
+        Notice::SnapshotChunk
+    );
+    assert_eq!(
+        client.subscription_next(&mut subscription).await.unwrap(),
+        Notice::SnapshotEnd
+    );
+    assert!(subscription.contents().unwrap().is_empty());
+
+    let token = a
+        .save(
+            1,
+            Command::Create {
+                fields: fields("pushed"),
+            },
+        )
+        .await
+        .view
+        .unwrap()
+        .edit_token;
+    let (notice, _) = tokio::join!(
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            client.subscription_next(&mut subscription)
+        ),
+        async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            peer::sync_once(&a.store, &a.tls, b.identity.node)
+                .await
+                .unwrap();
+        },
+    );
+    assert_eq!(
+        notice.unwrap().unwrap(),
+        Notice::Changes {
+            upserted: vec![id],
+            removed: vec![]
+        }
+    );
+    assert_eq!(
+        subscription.contents().unwrap()[&id]["content"]["body"],
+        "pushed"
+    );
+
+    a.save(
+        2,
+        Command::Edit {
+            token,
+            fields: fields("pulled"),
+        },
+    )
+    .await;
+    let (notice, _) = tokio::join!(
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            client.subscription_next(&mut subscription)
+        ),
+        async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            peer::sync_once(&b.store, &b.tls, a.identity.node)
+                .await
+                .unwrap();
+        },
+    );
+    assert_eq!(
+        notice.unwrap().unwrap(),
+        Notice::Changes {
+            upserted: vec![id],
+            removed: vec![]
+        }
+    );
+    assert_eq!(
+        subscription.contents().unwrap()[&id]["content"]["body"],
+        "pulled"
+    );
+    stop.send(true).unwrap();
+    app_task.await.unwrap().unwrap();
+    let listener = TcpListener::bind(app_endpoint).await.unwrap();
+    let (stop, receiver) = watch::channel(false);
+    let app_task = tokio::spawn(harmion_net_native::app::serve(
+        listener,
+        b.store.clone(),
+        b.tls.clone(),
+        registration,
+        receiver,
+    ));
+    assert_eq!(
+        client.subscription_next(&mut subscription).await.unwrap(),
+        Notice::ResetRequired
+    );
+    assert!(subscription.contents().is_none());
+    stop.send(true).unwrap();
+    app_task.await.unwrap().unwrap();
+    a.finish().await;
+    b.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actual_mutual_tls_sync_preserves_partitioned_edits_and_deletion_conflicts() {
     let dir = Directory::new();
     let a = Node::start(&dir, 1).await;

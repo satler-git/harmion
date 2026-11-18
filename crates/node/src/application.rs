@@ -3,7 +3,7 @@
 use crate::{
     Error,
     access::{App, Credential, Grants, authenticate},
-    storage::{Store, Transaction, read_graph},
+    storage::{Store, Transaction, read_content_graph, read_graph},
 };
 use harmion_domain::*;
 use harmion_protocol::{AppId, Command, EditToken, Record, SaveRequest, encode_save_request};
@@ -37,7 +37,7 @@ pub struct RequestResult {
 
 pub use harmion_protocol::{ConflictView, ReadView, SaveResult};
 
-fn view(snapshot: &ContentSnapshot, token: EditToken, grants: &Grants) -> ReadView {
+pub(crate) fn view(snapshot: &ContentSnapshot, token: EditToken, grants: &Grants) -> ReadView {
     ReadView {
         content: snapshot.content.clone(),
         edit_token: token,
@@ -54,7 +54,7 @@ fn view(snapshot: &ContentSnapshot, token: EditToken, grants: &Grants) -> ReadVi
     }
 }
 
-fn mint_token(
+pub(crate) fn mint_token(
     tx: &mut dyn Transaction,
     host: &mut impl Host,
     snapshot: &ContentSnapshot,
@@ -135,6 +135,9 @@ pub fn change_grants(
             return Err(Error::Forbidden);
         }
         let mut app = tx.app_by_id(id)?.ok_or(Error::NotFound)?;
+        if app.grants == grants && app.revoked == revoked {
+            return Ok(());
+        }
         app.grants = grants;
         app.revoked = revoked;
         tx.update_app(&app)
@@ -149,8 +152,10 @@ pub fn get(
 ) -> Result<ReadView, Error> {
     store.transaction(|tx| {
         let principal = authenticate(tx, credential, host.now_micros())?;
-        let snapshot = read_graph(tx)?.snapshot(id).ok_or(Error::NotFound)?;
-        if snapshot.life == Life::Deleted || !principal.app.grants.can_read(&snapshot.content) {
+        let snapshot = read_content_graph(tx, id)?
+            .snapshot(id)
+            .ok_or(Error::NotFound)?;
+        if !principal.app.grants.can_read_snapshot(&snapshot) {
             return Err(Error::NotFound);
         }
         let token = mint_token(tx, host, &snapshot, TokenPurpose::Edit)?;
@@ -188,7 +193,9 @@ fn read_conflicts(
         if management && !grants.is_administrator() {
             return Err(Error::Forbidden);
         }
-        let snapshot = read_graph(tx)?.snapshot(id).ok_or(Error::NotFound)?;
+        let snapshot = read_content_graph(tx, id)?
+            .snapshot(id)
+            .ok_or(Error::NotFound)?;
         if !grants.can_read(&snapshot.content) || (!management && snapshot.life == Life::Deleted) {
             return Err(Error::NotFound);
         }
@@ -250,6 +257,16 @@ pub fn save(
     credential: &Credential,
     request: &SaveRequest,
 ) -> Result<SaveResult, Error> {
+    save_with_outcome(store, host, credential, request).map(|(result, _)| result)
+}
+
+/// Returns the receipt and whether the transaction committed a new update.
+pub fn save_with_outcome(
+    store: &mut impl Store,
+    host: &mut impl Host,
+    credential: &Credential,
+    request: &SaveRequest,
+) -> Result<(SaveResult, bool), Error> {
     store.transaction(|tx| {
         let principal = authenticate(tx, credential, host.now_micros())?;
         let grants = &principal.app.grants;
@@ -260,7 +277,10 @@ pub fn save(
                 return Err(Error::RequestIdReuse);
             }
             // No new write. Reauthorize response content against both saved and current kinds.
-            return save_response(tx, &graph, &result, request.content_id, grants);
+            return Ok((
+                save_response(tx, &graph, &result, request.content_id, grants)?,
+                false,
+            ));
         }
         let before = graph.snapshot(request.content_id);
         if let Some(snapshot) = &before
@@ -405,6 +425,7 @@ pub fn save(
             return Err(Error::Forbidden);
         }
         tx.append(&record)?;
+        tx.put_search_projection(&after)?;
         let token = mint_token(tx, host, &after, TokenPurpose::Edit)?;
         let result = RequestResult {
             request: bytes,
@@ -413,6 +434,9 @@ pub fn save(
             return_view: after.life != Life::Deleted && grants.can_read(&after.content),
         };
         tx.insert_request(principal.app.id, request.request_id, &result)?;
-        save_response(tx, &graph, &result, request.content_id, grants)
+        Ok((
+            save_response(tx, &graph, &result, request.content_id, grants)?,
+            true,
+        ))
     })
 }

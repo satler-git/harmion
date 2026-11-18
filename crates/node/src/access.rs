@@ -1,5 +1,5 @@
 use crate::{Error, storage::Transaction};
-use harmion_domain::Content;
+use harmion_domain::{Content, ContentSnapshot};
 use harmion_protocol::AppId;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -39,6 +39,11 @@ impl Grants {
     }
     pub fn can_read(&self, content: &Content) -> bool {
         self.read.as_ref().is_some_and(|f| f.matches(content))
+    }
+    pub(crate) fn can_read_snapshot(&self, snapshot: &ContentSnapshot) -> bool {
+        snapshot
+            .visible_content()
+            .is_some_and(|content| self.can_read(content))
     }
     pub fn can_write(&self, content: &Content) -> bool {
         self.write.as_ref().is_some_and(|f| f.matches(content))

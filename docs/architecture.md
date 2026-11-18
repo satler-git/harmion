@@ -229,6 +229,7 @@ workers-rsで必要なSQL transaction境界を表せない場合は、薄いJS/T
 - 端末の保存はSQLite＋rusqliteを選ぶ。bundledでSQLiteを同梱する案とし、nativeではDB専用スレッドで短い同期トランザクションを実行する。
 - CloudflareはSQLite-backed Durable ObjectsのSQL APIを使う。rusqliteで別DBを作らず、DO固有のtransaction adapterを実装する。
 - 初期は正本、再構築可能な現在値・索引、OAuth等のローカル状態をノードDB内の別テーブルへ格納する。同期するレコードを明示し、DBファイル全体を同期しない。ノード秘密鍵は別途OS・実行環境に適した保管方法を選ぶ。
-- Query ASTからパラメータ付きSQLへ変換する。kind等の索引を用意し、属性・配列検索は共通の意味を保ちつつ計測して最適化する。driverではなく保存操作と原子性の契約を共通化する。
+- 共通の保存契約は、型付きQuery条件、Read Filter、固定スナップショット、順序・ページングの意味を定める。native SQLiteでのパラメータ付きSQLと索引、Durable Objectsでの検索方法とトランザクションは、それぞれの保存アダプタが実装する。通常表示の検索用データは更新の受理と同じトランザクションで反映する。
+- 検索APIでは、保存側で候補の絞り込みとページ取得を行う。単一Contentを評価するRustの実装を参照に、各アダプタで同じ比較ケースを検証する。不在とnull、正確な10進数、配列、Read Filter、時刻境界を含める。
 
 参照: [oxide-auth](https://docs.rs/oxide-auth/latest/oxide_auth/)、[PKCE](https://docs.rs/oxide-auth/latest/oxide_auth/frontends/simple/extensions/struct.Pkce.html)、[oauth2](https://docs.rs/oauth2/latest/oauth2/)、[oauth-as](https://docs.rs/oauth-as/latest/oauth_as/)、[rusqlite](https://github.com/rusqlite/rusqlite)。採用バージョン・依存関係・実環境の挙動は実装時に確認する。

@@ -128,7 +128,7 @@ pub struct Heads {
 pub struct Graph<V = AttributeValue> {
     cluster: ClusterId,
     updates: BTreeMap<UpdateId, Update<V>>,
-    roots: BTreeMap<ContentId, UpdateId>,
+    content_updates: BTreeMap<ContentId, BTreeSet<UpdateId>>,
 }
 
 impl<V: Eq + Clone> Graph<V> {
@@ -169,12 +169,16 @@ impl<V: Eq + Clone> Graph<V> {
             kinds: BTreeSet::new(),
         };
         let mut fields = BTreeMap::new();
+        // Every accepted Content has a body, so at least one field contributes.
+        let mut last_edited_at = i64::MIN;
         for (field, versions) in heads.fields {
             let selected = *versions
                 .iter()
                 .max_by_key(|id| (self.updates[id].edited_at, **id))
                 .expect("accepted fields have at least one head");
-            let value = &self.updates[&selected].changes[&field].value;
+            let update = &self.updates[&selected];
+            last_edited_at = last_edited_at.max(update.edited_at);
+            let value = &update.changes[&field].value;
             match (&field, value) {
                 (Field::Body, Value::Body(text)) => content.body = text.clone(),
                 (Field::Attribute { namespace, key }, Value::Attribute(value)) => {
@@ -216,6 +220,7 @@ impl<V: Eq + Clone> Graph<V> {
         ContentSnapshot {
             content,
             life,
+            last_edited_at,
             basis: heads.life,
             fields,
         }
@@ -227,12 +232,20 @@ impl<V: Eq> Graph<V> {
         Self {
             cluster,
             updates: BTreeMap::new(),
-            roots: BTreeMap::new(),
+            content_updates: BTreeMap::new(),
         }
     }
 
     pub fn update(&self, id: UpdateId) -> Option<&Update<V>> {
         self.updates.get(&id)
+    }
+
+    pub fn content_ids(&self) -> impl Iterator<Item = ContentId> + '_ {
+        self.content_updates.keys().copied()
+    }
+
+    pub fn updates(&self) -> impl Iterator<Item = &Update<V>> + '_ {
+        self.updates.values()
     }
 
     fn closure(&self, basis: &BTreeSet<UpdateId>) -> Result<BTreeSet<UpdateId>, Error> {
@@ -280,17 +293,9 @@ impl<V: Eq> Graph<V> {
     }
 
     pub fn heads(&self, content: ContentId) -> Option<Heads> {
-        self.roots.get(&content)?;
-        Some(
-            self.project(
-                &self
-                    .updates
-                    .values()
-                    .filter(|op| op.content_id == content)
-                    .map(|op| op.update_id)
-                    .collect(),
-            ),
-        )
+        self.content_updates
+            .get(&content)
+            .map(|ids| self.project(ids))
     }
 
     pub fn life(&self, content: ContentId) -> Option<Life> {
@@ -349,7 +354,7 @@ impl<V: Eq> Graph<V> {
             return Err(Error::InvalidBasis);
         }
         if op.action == Action::Create {
-            if self.roots.contains_key(&op.content_id) {
+            if self.content_updates.contains_key(&op.content_id) {
                 return Err(Error::RootCollision);
             }
             if op.root_id != op.update_id
@@ -417,7 +422,10 @@ impl<V: Eq> Graph<V> {
             }
         }
         // Mutation only after every check succeeds.
-        self.roots.insert(op.content_id, op.root_id);
+        self.content_updates
+            .entry(op.content_id)
+            .or_default()
+            .insert(op.update_id);
         self.updates.insert(op.update_id, op);
         Ok(Acceptance::Inserted)
     }

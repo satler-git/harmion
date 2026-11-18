@@ -1,11 +1,14 @@
 //! Native App API client. Does not open node databases or execute node use cases.
 pub use harmion_local::ProtectedDir;
 pub use harmion_protocol as protocol;
+mod subscription;
+pub use subscription::{Subscription, SubscriptionCheckpoint, SubscriptionNotification};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::Request;
 use hyper_util::rt::TokioIo;
+use protocol::query::{Condition, QueryCursor, QueryRequest};
 use protocol::{ConnectionInfo, MAX_APP_RESPONSE_BYTES, MAX_RECORD_BYTES, TLS_NAME};
 use rustls::{ClientConfig, RootCertStore, pki_types::CertificateDer};
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
@@ -48,6 +51,11 @@ pub struct Client {
     certificate: Vec<u8>,
     credential: [u8; 32],
     tls: Arc<ClientConfig>,
+}
+
+pub struct QueryPage {
+    pub items: Vec<serde_json::Value>,
+    pub next: Option<QueryCursor>,
 }
 impl Client {
     pub fn from_directory(path: impl AsRef<Path>) -> Result<Self, Error> {
@@ -175,5 +183,32 @@ impl Client {
         content: protocol::domain::ContentId,
     ) -> Result<serde_json::Value, Error> {
         self.call("get", &content.0).await
+    }
+
+    pub async fn query(&self, condition: Condition, limit: u32) -> Result<QueryPage, Error> {
+        self.query_page(QueryRequest::Start { condition, limit })
+            .await
+    }
+
+    pub async fn query_next(&self, cursor: QueryCursor, limit: u32) -> Result<QueryPage, Error> {
+        self.query_page(QueryRequest::Next { cursor, limit }).await
+    }
+
+    async fn query_page(&self, request: QueryRequest) -> Result<QueryPage, Error> {
+        let request =
+            protocol::query::encode_request(&request).map_err(|_| Error::InvalidRequest)?;
+        let mut response = self.call("query", &request).await?;
+        let items = match response.get_mut("items").map(serde_json::Value::take) {
+            Some(serde_json::Value::Array(items)) => items,
+            _ => return Err(Error::InvalidResponse),
+        };
+        let next = match response.get("next") {
+            Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(cursor)) => Some(QueryCursor(
+                protocol::unhex(cursor).map_err(|_| Error::InvalidResponse)?,
+            )),
+            _ => return Err(Error::InvalidResponse),
+        };
+        Ok(QueryPage { items, next })
     }
 }

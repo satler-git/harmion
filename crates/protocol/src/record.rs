@@ -108,7 +108,7 @@ impl Encoder {
         self.items += count;
         self.raw(&(count as u32).to_be_bytes())
     }
-    fn string(&mut self, text: &str) -> Result<(), CodecError> {
+    pub(crate) fn string(&mut self, text: &str) -> Result<(), CodecError> {
         if text.len() > MAX_RECORD_BYTES {
             return Err(CodecError::TooLarge);
         }
@@ -136,7 +136,11 @@ impl Encoder {
             }
         }
     }
-    fn attribute(&mut self, value: &AttributeValue, depth: usize) -> Result<(), CodecError> {
+    pub(crate) fn attribute(
+        &mut self,
+        value: &AttributeValue,
+        depth: usize,
+    ) -> Result<(), CodecError> {
         if depth > MAX_DEPTH {
             return Err(CodecError::TooDeep);
         }
@@ -277,7 +281,7 @@ impl<'a> Decoder<'a> {
         self.items += count;
         Ok(count)
     }
-    fn string(&mut self) -> Result<String, CodecError> {
+    pub(crate) fn string(&mut self) -> Result<String, CodecError> {
         let len = self.u32()? as usize;
         Ok(std::str::from_utf8(self.raw(len)?)
             .map_err(|_| CodecError::InvalidUtf8)?
@@ -303,7 +307,7 @@ impl<'a> Decoder<'a> {
             _ => Err(CodecError::InvalidTag),
         }
     }
-    fn attribute(&mut self, depth: usize) -> Result<AttributeValue, CodecError> {
+    pub(crate) fn attribute(&mut self, depth: usize) -> Result<AttributeValue, CodecError> {
         if depth > MAX_DEPTH {
             return Err(CodecError::TooDeep);
         }

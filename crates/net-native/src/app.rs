@@ -57,6 +57,7 @@ pub async fn serve_with_transport<S: Store + Send + 'static>(
     }
     let acceptor = TlsAcceptor::from(Arc::new(identity.tls.app_server_config()?));
     let slots = Arc::new(Semaphore::new(16));
+    let subscriptions = Arc::new(crate::subscriptions::Service::new());
     let mut connections = tokio::task::JoinSet::new();
     loop {
         let (tcp, _) = tokio::select! {
@@ -74,11 +75,12 @@ pub async fn serve_with_transport<S: Store + Send + 'static>(
         let Ok(permit) = slots.clone().try_acquire_owned() else {
             continue;
         };
-        let (acceptor, store, identity, registration) = (
+        let (acceptor, store, identity, registration, subscriptions) = (
             acceptor.clone(),
             store.clone(),
             identity.clone(),
             registration.clone(),
+            subscriptions.clone(),
         );
         connections.spawn(async move {
             let _permit = permit;
@@ -89,6 +91,7 @@ pub async fn serve_with_transport<S: Store + Send + 'static>(
                         store.clone(),
                         identity.clone(),
                         registration.clone(),
+                        subscriptions.clone(),
                         request,
                     )
                 });
@@ -131,6 +134,14 @@ fn failure(error: Error) -> Response<Body> {
         Error::Node(N::MembershipConflict) => (StatusCode::CONFLICT, "membership_conflict"),
         Error::Node(N::NotFound) => (StatusCode::NOT_FOUND, "not_found"),
         Error::Node(N::RequestIdReuse) => (StatusCode::CONFLICT, "request_id_reuse"),
+        Error::Node(N::QueryExpired) => (StatusCode::GONE, "query_expired"),
+        Error::Node(N::QueryCapacity) => (StatusCode::TOO_MANY_REQUESTS, "query_capacity"),
+        Error::Node(N::SubscriptionCapacity) => {
+            (StatusCode::TOO_MANY_REQUESTS, "subscription_capacity")
+        }
+        Error::Node(N::QueryItemTooLarge) => {
+            (StatusCode::PAYLOAD_TOO_LARGE, "query_item_too_large")
+        }
         Error::Node(N::Storage(_) | N::CorruptLog | N::Entropy(_)) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
         }
@@ -145,6 +156,7 @@ async fn respond<S: Store + Send + 'static>(
     store: SharedStore<S>,
     identity: Arc<crate::NativeTransport>,
     registration: PeerRegistration,
+    subscriptions: Arc<crate::subscriptions::Service>,
     request: Request<Incoming>,
 ) -> Result<Response<Body>, Infallible> {
     if request.method() != hyper::Method::POST
@@ -194,6 +206,7 @@ async fn respond<S: Store + Send + 'static>(
         &store,
         &identity,
         registration,
+        subscriptions,
         credential,
         operation,
         body.to_vec(),
@@ -244,10 +257,16 @@ async fn dispatch<S: Store + Send + 'static>(
     store: &SharedStore<S>,
     identity: &crate::NativeTransport,
     registration: PeerRegistration,
+    subscriptions: Arc<crate::subscriptions::Service>,
     credential: Credential,
     operation: String,
     body: Vec<u8>,
 ) -> Result<Json, Error> {
+    if matches!(operation.as_str(), "subscribe" | "resume" | "unsubscribe") {
+        return subscriptions
+            .handle(store, credential, &operation, &body)
+            .await;
+    }
     if operation == "sync" {
         let node = NodeId(id(&body)?);
         let allowed = store
@@ -386,6 +405,8 @@ async fn dispatch<S: Store + Send + 'static>(
         return Ok(json!({"approved":true}));
     }
     let signer = identity.membership_signer.clone();
+    let local_save = store.local_save.clone();
+    let changes = store.changes.clone();
     store.run(move |s| {
         let mut host = SystemHost;
         match operation.as_str() {
@@ -407,9 +428,27 @@ async fn dispatch<S: Store + Send + 'static>(
                 }
             },
             "get" => Ok(read_view_json(&application::get(s, &mut host, &credential, ContentId(id(&body)?))?)),
+            "query" => {
+                use harmion_protocol::query::QueryRequest;
+                let page = match harmion_protocol::query::decode_request(&body)? {
+                    QueryRequest::Start { condition, limit } => harmion_node::query::start(s, &mut host, &credential, &condition, limit)?,
+                    QueryRequest::Next { cursor, limit } => harmion_node::query::next(s, &mut host, &credential, cursor, limit)?,
+                };
+                let items: Vec<_> = page.items.iter().map(read_view_json).collect();
+                Ok(json!({"items":items,"next":page.next.map(|cursor| hex(&cursor.0))}))
+            },
             "conflicts" => Ok(conflict_view_json(&application::get_conflicts(s, &mut host, &credential, ContentId(id(&body)?))?)),
             "inspect" => Ok(conflict_view_json(&application::inspect(s, &mut host, &credential, ContentId(id(&body)?))?)),
-            "save" => Ok(save_result_json(&application::save(s, &mut host, &credential, &decode_save_request(&body)?)?)),
+            "save" => {
+                let request = decode_save_request(&body)?;
+                let (result, inserted) = application::save_with_outcome(s, &mut host, &credential, &request)?;
+                if inserted {
+                    // The DB worker can finish a commit after the HTTP task is cancelled.
+                    local_save.notify_one();
+                    changes.send_replace(());
+                }
+                Ok(save_result_json(&result))
+            },
             "retire" => {
                 let node = NodeId(id(&body)?);
                 if let Some(signer) = signer {
@@ -431,6 +470,7 @@ async fn dispatch<S: Store + Send + 'static>(
             "change-grants" => {
                 let request: ChangeGrantsRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
                 application::change_grants(s, host.now_micros(), &credential, AppId(unhex(&request.app_id)?), grants(request.grants), request.revoked)?;
+                changes.send_replace(());
                 Ok(json!({"changed":true}))
             },
             "identity" | "capabilities" | "permissions" if body.is_empty() => {
@@ -442,8 +482,16 @@ async fn dispatch<S: Store + Send + 'static>(
                         json!(registration)
                     },
                     "permissions" => json!(grant_spec(permissions)),
-                    _ => json!({"version":1,"oauth":false,"query":false,"subscriptions":false,
-                        "methods":["get","conflicts","inspect","save","identity","permissions","capabilities","members","approve","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants"]}),
+                    _ => json!({"version":1,"oauth":false,"query":true,"subscriptions":true,
+                        "query_max_page_items":harmion_protocol::query::MAX_QUERY_PAGE_ITEMS,
+                        "query_ttl_seconds":harmion_node::query::QUERY_TTL_MICROS / 1_000_000,
+                        "query_max_active":harmion_node::query::MAX_ACTIVE_QUERIES,
+                        "query_max_version_refs":harmion_node::query::MAX_QUERY_VERSION_REFS,
+                        "subscription_max_active":harmion_node::subscription::MAX_SUBSCRIPTIONS,
+                        "subscription_max_visible":harmion_node::subscription::MAX_VISIBLE_CONTENTS,
+                        "subscription_retained_changes":harmion_node::storage::MAX_RETAINED_CHANGES,
+                        "subscription_idle_seconds":harmion_node::subscription::SUBSCRIPTION_IDLE_MICROS / 1_000_000,
+                        "methods":["get","query","subscribe","resume","unsubscribe","conflicts","inspect","save","identity","permissions","capabilities","members","approve","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants"]}),
                 })
             },
             _ => Err(invalid()),

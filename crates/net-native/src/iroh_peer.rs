@@ -145,7 +145,10 @@ pub async fn serve<S: Store + Send + 'static>(
                     crate::peer::validate_membership_page(page)?;
                 }
                 let reply = store
-                    .run(move |s| membership::handle(s, &key, &request))
+                    .run_notifying(
+                        matches!(&request.command, PeerCommand::Accept(_)),
+                        move |s| membership::handle(s, &key, &request),
+                    )
                     .await?;
                 send.write_all(&encode_peer_response(&reply)?)
                     .await

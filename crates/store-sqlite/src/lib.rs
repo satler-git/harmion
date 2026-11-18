@@ -1,15 +1,23 @@
 //! Native SQLite adapter for the node transaction port.
 
-use harmion_domain::{ClusterId, ContentId, NodeId, UpdateId};
+mod changes;
+mod query;
+mod query_session;
+
+use harmion_domain::{ClusterId, ContentId, ContentSnapshot, NodeId, UpdateId};
 use harmion_node::membership::{Peer, PeerKey};
 use harmion_node::{
     Error,
     access::{App, Filter, Grants},
     application::{RequestResult, TokenPurpose, TokenState},
-    storage::{Identity, Store, Transaction},
+    query::{QueryPosition, QueryRevision},
+    storage::{ChangeWindow, ContentChange, Identity, Store, Transaction},
 };
 use harmion_protocol::membership::Certificate;
-use harmion_protocol::{AppId, EditToken, LogEntry, LogEpoch, Record, RequestId};
+use harmion_protocol::{
+    AppId, EditToken, LogEntry, LogEpoch, Record, RequestId,
+    query::{Condition, QueryCursor},
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{collections::BTreeSet, path::Path, time::Duration};
 
@@ -47,7 +55,7 @@ impl SqliteStore {
         let version: i64 = tx
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(db)?;
-        if !(0..=5).contains(&version) {
+        if !(0..=8).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
@@ -145,15 +153,26 @@ impl SqliteStore {
         if stored != identity {
             return Err(Error::IdentityMismatch);
         }
+        // Reject broken bytes/dependencies at startup; never salvage only the normal value.
+        let mut storage = SqlTransaction { sql: &tx, identity };
+        let graph = harmion_node::storage::read_graph(&mut storage)?;
+        harmion_node::membership_state::state(&mut storage)?;
+        if version < 6 {
+            query::initialize(&tx)?;
+        }
+        if version < 7 {
+            query::initialize_version_refs(&tx, &graph)?;
+            query_session::initialize(&tx)?;
+        }
+        if version < 8 {
+            changes::initialize(&tx)?;
+            tx.pragma_update(None, "user_version", 8).map_err(db)?;
+        }
         tx.commit().map_err(db)?;
-        let mut store = Self {
+        Ok(Self {
             connection,
             identity,
-        };
-        // Reject broken bytes/dependencies at startup; never salvage only the normal value.
-        store.transaction(|tx| harmion_node::storage::read_graph(tx).map(|_| ()))?;
-        store.transaction(|tx| harmion_node::membership_state::state(tx).map(|_| ()))?;
-        Ok(store)
+        })
     }
 
     pub fn identity(&self) -> Identity {
@@ -167,6 +186,34 @@ struct SqlTransaction<'a> {
 }
 
 impl SqlTransaction<'_> {
+    fn read_entries(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Vec<LogEntry>, Error> {
+        let mut statement = self.sql.prepare_cached(sql).map_err(db)?;
+        let mut rows = statement.query(params).map_err(db)?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows.next().map_err(db)? {
+            let sequence: i64 = row.get(0).map_err(db)?;
+            let id: Vec<u8> = row.get(1).map_err(db)?;
+            let bytes: Vec<u8> = row.get(2).map_err(db)?;
+            let digest: Vec<u8> = row.get(3).map_err(db)?;
+            let record = Record::from_bytes(&bytes)?;
+            if sequence <= 0
+                || fixed(id)? != record.update().update_id.0
+                || fixed(digest)? != *record.digest()
+            {
+                return Err(Error::CorruptLog);
+            }
+            entries.push(LogEntry {
+                seq: sequence as u64,
+                record,
+            });
+        }
+        Ok(entries)
+    }
+
     fn filter(
         &self,
         app: AppId,
@@ -421,28 +468,22 @@ impl Transaction for SqlTransaction<'_> {
         self.identity
     }
     fn entries(&mut self) -> Result<Vec<LogEntry>, Error> {
-        let mut statement = self
-            .sql
-            .prepare("SELECT seq,update_id,bytes,digest FROM accept_log ORDER BY seq")
-            .map_err(db)?;
-        let mut rows = statement.query([]).map_err(db)?;
-        let mut entries = Vec::new();
-        while let Some(row) = rows.next().map_err(db)? {
-            let sequence: i64 = row.get(0).map_err(db)?;
-            let id: Vec<u8> = row.get(1).map_err(db)?;
-            let bytes: Vec<u8> = row.get(2).map_err(db)?;
-            let digest: Vec<u8> = row.get(3).map_err(db)?;
-            let record = Record::from_bytes(&bytes)?;
-            if sequence <= 0
-                || fixed(id)? != record.update().update_id.0
-                || fixed(digest)? != *record.digest()
-            {
-                return Err(Error::CorruptLog);
-            }
-            entries.push(LogEntry {
-                seq: sequence as u64,
-                record,
-            });
+        self.read_entries(
+            "SELECT seq,update_id,bytes,digest FROM accept_log ORDER BY seq",
+            [],
+        )
+    }
+    fn content_entries(&mut self, content: ContentId) -> Result<Vec<LogEntry>, Error> {
+        let entries = self.read_entries(
+            "SELECT log.seq,log.update_id,log.bytes,log.digest FROM content_records AS records
+             JOIN accept_log AS log ON log.seq=records.seq WHERE records.content=?1 ORDER BY records.seq",
+            [content.0],
+        )?;
+        if entries
+            .iter()
+            .any(|entry| entry.record.update().content_id != content)
+        {
+            return Err(Error::CorruptLog);
         }
         Ok(entries)
     }
@@ -453,7 +494,65 @@ impl Transaction for SqlTransaction<'_> {
                 params![record.update().update_id.0, record.bytes(), record.digest()],
             )
             .map_err(db)?;
-        Ok(self.sql.last_insert_rowid() as u64)
+        let seq = self.sql.last_insert_rowid();
+        self.sql
+            .execute(
+                "INSERT INTO content_records VALUES(?1,?2)",
+                params![record.update().content_id.0, seq],
+            )
+            .map_err(db)?;
+        Ok(seq as u64)
+    }
+    fn put_search_projection(&mut self, snapshot: &ContentSnapshot) -> Result<(), Error> {
+        query::put_projection(self.sql, snapshot)?;
+        changes::record(self.sql, snapshot.content.id)
+    }
+    fn change_window(&mut self) -> Result<ChangeWindow, Error> {
+        changes::window(self.sql)
+    }
+    fn changes_after(&mut self, after: u64, limit: u32) -> Result<Vec<ContentChange>, Error> {
+        changes::after(self.sql, after, limit)
+    }
+    fn search_content_ids(
+        &mut self,
+        condition: &Condition,
+        read: &Filter,
+        after: Option<ContentId>,
+        limit: u32,
+    ) -> Result<Vec<ContentId>, Error> {
+        query::search(self.sql, condition, read, after, limit)
+    }
+    fn freeze_query(
+        &mut self,
+        start: QueryCursor,
+        app: AppId,
+        condition: &Condition,
+        read: &Filter,
+        now: i64,
+        expires_at: i64,
+    ) -> Result<(), Error> {
+        query_session::freeze(self.sql, start, app, condition, read, now, expires_at)
+    }
+    fn query_position(&mut self, cursor: QueryCursor) -> Result<Option<QueryPosition>, Error> {
+        query_session::position(self.sql, cursor)
+    }
+    fn discard_query(&mut self, session: QueryCursor) -> Result<(), Error> {
+        query_session::discard(self.sql, session)
+    }
+    fn query_revisions(
+        &mut self,
+        position: &QueryPosition,
+        limit: u32,
+    ) -> Result<Vec<QueryRevision>, Error> {
+        query_session::revisions(self.sql, position, limit)
+    }
+    fn put_query_cursor(
+        &mut self,
+        session: QueryCursor,
+        after: ContentId,
+        cursor: QueryCursor,
+    ) -> Result<QueryCursor, Error> {
+        query_session::put_cursor(self.sql, session, after, cursor)
     }
     fn cursor(&mut self, sender: NodeId, epoch: LogEpoch) -> Result<u64, Error> {
         let cursor: Option<i64> = self
@@ -546,7 +645,11 @@ impl Transaction for SqlTransaction<'_> {
         if changed != 1 {
             return Err(Error::NotFound);
         }
-        self.write_kinds(app)
+        self.write_kinds(app)?;
+        changes::advance_grants(self.sql, app.id)
+    }
+    fn grant_generation(&mut self, app: AppId) -> Result<u64, Error> {
+        changes::grant_generation(self.sql, app)
     }
     fn token(&mut self, token: EditToken) -> Result<Option<TokenState>, Error> {
         let row = self

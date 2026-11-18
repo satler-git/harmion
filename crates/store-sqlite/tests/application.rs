@@ -36,7 +36,11 @@ fn v3_peer_migration_preserves_tls_binding_and_separates_iroh_keys() {
     let mut t = Test::new();
     // Simulate a deployed v3 database, retaining all other state.
     let db = rusqlite::Connection::open(t.path.join("node.db")).unwrap();
-    db.execute_batch("DROP TABLE membership_identity; DROP TABLE membership_recovery_roots; DROP TABLE membership_root; DROP TABLE membership_log; DROP TABLE membership_cursors; DROP TABLE peers; CREATE TABLE peers(node BLOB PRIMARY KEY, certificate BLOB UNIQUE NOT NULL, endpoint TEXT NOT NULL, retired INTEGER NOT NULL); PRAGMA user_version=3;").unwrap();
+    db.execute_batch("DROP TABLE grant_generations; DROP TABLE content_changes;
+        DROP TABLE query_cursors; DROP TABLE query_basis; DROP TABLE query_sessions;
+        DROP TABLE search_basis; DROP TABLE content_records;
+        DROP TABLE search_elements; DROP TABLE search_attributes; DROP TABLE search_kinds; DROP TABLE search_contents;
+        DROP TABLE membership_identity; DROP TABLE membership_recovery_roots; DROP TABLE membership_root; DROP TABLE membership_log; DROP TABLE membership_cursors; DROP TABLE peers; CREATE TABLE peers(node BLOB PRIMARY KEY, certificate BLOB UNIQUE NOT NULL, endpoint TEXT NOT NULL, retired INTEGER NOT NULL); PRAGMA user_version=3;").unwrap();
     db.execute(
         "INSERT INTO peers VALUES(?1,?2,?3,0)",
         rusqlite::params![[8u8; 32], [9u8; 32], "127.0.0.1:1"],
@@ -779,6 +783,10 @@ fn request_result_failure_rolls_back_update_token_and_result() {
         .query_row("SELECT count(*) FROM edit_tokens", [], |r| r.get(0))
         .unwrap();
     assert_eq!(tokens, 0);
+    let indexed: i64 = db
+        .query_row("SELECT count(*) FROM search_contents", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(indexed, 0);
     db.execute_batch("DROP TRIGGER fail_result").unwrap();
     t.create();
     assert_eq!(t.count(), 1);
@@ -864,18 +872,346 @@ fn synchronized_content_does_not_transfer_credentials_tokens_or_request_results(
 }
 
 #[test]
+fn subscription_connects_frozen_snapshot_to_changes_and_rechecks_read() {
+    use harmion_node::subscription::Subscriptions;
+    use harmion_protocol::{query::Condition, subscription::Event};
+
+    let mut t = Test::new();
+    let admin = t.admin.clone();
+    let grants = Grants {
+        read: Some(wiki()),
+        ..Grants::default()
+    };
+    let (app_id, reader) = t.issue(grants.clone());
+    let initial_token = t.create().view.unwrap().edit_token;
+    let mut subscriptions = Subscriptions::default();
+    let Event::SnapshotBegin {
+        subscription,
+        cursor,
+    } = subscriptions
+        .start(&mut t.store, &mut t.host, &reader, Condition::And(vec![]))
+        .unwrap()
+    else {
+        panic!("expected snapshot_begin")
+    };
+    assert_eq!(
+        subscriptions
+            .resume(&mut t.store, &mut t.host, &admin, subscription, cursor)
+            .unwrap(),
+        Some(Event::ResetRequired)
+    );
+    t.host.now += 1;
+    let intermediate_token = t
+        .save(
+            &admin,
+            2,
+            Command::Edit {
+                token: initial_token,
+                fields: body("intermediate during snapshot"),
+            },
+        )
+        .unwrap()
+        .view
+        .unwrap()
+        .edit_token;
+    t.host.now += 1;
+    let latest_token = t
+        .save(
+            &admin,
+            4,
+            Command::Edit {
+                token: intermediate_token,
+                fields: body("updated during snapshot"),
+            },
+        )
+        .unwrap()
+        .view
+        .unwrap()
+        .edit_token;
+    let Event::SnapshotChunk { items, cursor } = subscriptions
+        .resume(&mut t.store, &mut t.host, &reader, subscription, cursor)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected snapshot_chunk")
+    };
+    assert_eq!(items[0].content.body, "base");
+    let Event::SnapshotEnd { cursor: baseline } = subscriptions
+        .resume(&mut t.store, &mut t.host, &reader, subscription, cursor)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected snapshot_end")
+    };
+    let Event::Changes {
+        sequence,
+        upserts,
+        removes,
+        ..
+    } = subscriptions
+        .resume(&mut t.store, &mut t.host, &reader, subscription, baseline)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected changes after snapshot_end")
+    };
+    assert_eq!(upserts[0].content.body, "updated during snapshot");
+    assert_eq!(upserts.len(), 1);
+    assert!(removes.is_empty());
+    let Event::Changes {
+        sequence: retried_sequence,
+        cursor: applied,
+        upserts,
+        ..
+    } = subscriptions
+        .resume(&mut t.store, &mut t.host, &reader, subscription, baseline)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected retry from the last applied cursor")
+    };
+    assert!(retried_sequence > sequence);
+    assert_eq!(upserts[0].content.body, "updated during snapshot");
+    assert!(
+        subscriptions
+            .resume(&mut t.store, &mut t.host, &reader, subscription, applied)
+            .unwrap()
+            .is_none()
+    );
+
+    t.save(
+        &admin,
+        3,
+        Command::Edit {
+            token: latest_token,
+            fields: [
+                (Field::Body, Value::Body("now private".into())),
+                (Field::Kind("wiki".into()), Value::Kind(false)),
+            ]
+            .into(),
+        },
+    )
+    .unwrap();
+    let Event::Changes {
+        cursor,
+        upserts,
+        removes,
+        ..
+    } = subscriptions
+        .resume(&mut t.store, &mut t.host, &reader, subscription, applied)
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("expected removal")
+    };
+    assert!(upserts.is_empty());
+    assert_eq!(removes, [content()]);
+
+    // Shrinking and restoring a grant before resume still invalidates the generation.
+    app::change_grants(
+        &mut t.store,
+        t.host.now,
+        &admin,
+        app_id,
+        Grants::default(),
+        false,
+    )
+    .unwrap();
+    app::change_grants(&mut t.store, t.host.now, &admin, app_id, grants, false).unwrap();
+    assert_eq!(
+        subscriptions
+            .resume(&mut t.store, &mut t.host, &reader, subscription, cursor)
+            .unwrap(),
+        Some(Event::ResetRequired)
+    );
+}
+
+#[test]
+fn subscription_requests_reset_when_retained_window_no_longer_covers_cursor() {
+    use harmion_node::{storage::MAX_RETAINED_CHANGES, subscription::Subscriptions};
+    use harmion_protocol::{query::Condition, subscription::Event};
+
+    let mut t = Test::new();
+    let admin = t.admin.clone();
+    t.create();
+    let mut subscriptions = Subscriptions::default();
+    let Event::SnapshotBegin {
+        subscription,
+        cursor,
+    } = subscriptions
+        .start(&mut t.store, &mut t.host, &admin, Condition::And(vec![]))
+        .unwrap()
+    else {
+        panic!("expected snapshot_begin")
+    };
+    let snapshot = t.snapshot();
+    t.store
+        .transaction(|tx| {
+            for _ in 0..=MAX_RETAINED_CHANGES {
+                tx.put_search_projection(&snapshot)?;
+            }
+            let window = tx.change_window()?;
+            assert_eq!(window.discarded_through, 2);
+            assert_eq!(
+                tx.changes_after(0, u32::MAX)?.len() as u64,
+                MAX_RETAINED_CHANGES
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        subscriptions
+            .resume(&mut t.store, &mut t.host, &admin, subscription, cursor)
+            .unwrap(),
+        Some(Event::ResetRequired)
+    );
+}
+
+#[test]
+fn public_query_uses_persisted_read_kinds_for_large_grants() {
+    let mut t = Test::new();
+    t.create();
+    let mut kinds: BTreeSet<_> = (0..33_000).map(|id| format!("kind-{id}")).collect();
+    kinds.insert("wiki".into());
+    let (_, credential) = t.issue(Grants {
+        read: Some(Filter::Kinds(kinds)),
+        ..Grants::default()
+    });
+    let page = harmion_node::query::start(
+        &mut t.store,
+        &mut t.host,
+        &credential,
+        &harmion_protocol::query::Condition::And(vec![]),
+        1,
+    )
+    .unwrap();
+    assert_eq!(page.items[0].content.id, content());
+}
+
+#[test]
+fn query_pages_freeze_membership_value_and_edit_basis_with_current_read_checks() {
+    use harmion_node::query;
+    use harmion_protocol::query::Condition;
+
+    let mut t = Test::new();
+    let admin = t.admin.clone();
+    let (_, reader) = app::issue_app(
+        &mut t.store,
+        &mut t.host,
+        &admin,
+        Grants {
+            read: Some(wiki()),
+            write: Some(wiki()),
+            ..Grants::default()
+        },
+        query::QUERY_TTL_MICROS * 2,
+    )
+    .unwrap();
+    let create = |t: &mut Test, id: u8| {
+        let mut req = create_request(id);
+        req.content_id = ContentId([id; 32]);
+        app::save(&mut t.store, &mut t.host, &admin, &req)
+            .unwrap()
+            .view
+            .unwrap()
+            .edit_token
+    };
+    create(&mut t, 1);
+    let second_token = create(&mut t, 2);
+    let third_token = create(&mut t, 3);
+    let first = query::start(
+        &mut t.store,
+        &mut t.host,
+        &reader,
+        &Condition::Kind("wiki".into()),
+        1,
+    )
+    .unwrap();
+    assert_eq!(first.items[0].content.id, ContentId([1; 32]));
+    let cursor = first.next.unwrap();
+    assert!(matches!(
+        query::next(&mut t.store, &mut t.host, &admin, cursor, 1),
+        Err(Error::QueryExpired)
+    ));
+
+    t.host.now = 200;
+    for (id, command) in [
+        (
+            2,
+            Command::Edit {
+                token: second_token,
+                fields: body("new body"),
+            },
+        ),
+        (
+            3,
+            Command::Edit {
+                token: third_token,
+                fields: [(Field::Kind("wiki".into()), Value::Kind(false))].into(),
+            },
+        ),
+    ] {
+        let mut req = request(10 + id, command);
+        req.content_id = ContentId([id; 32]);
+        app::save(&mut t.store, &mut t.host, &admin, &req).unwrap();
+    }
+    create(&mut t, 4);
+    t.restart();
+    let second = query::next(&mut t.store, &mut t.host, &reader, cursor, 1).unwrap();
+    let repeated = query::next(&mut t.store, &mut t.host, &reader, cursor, 1).unwrap();
+    assert_eq!(second.next, repeated.next);
+    let item = &second.items[0];
+    assert_eq!(item.content.id, ContentId([2; 32]));
+    assert_eq!(item.content.body, "base");
+    let mut req = request(
+        40,
+        Command::Edit {
+            token: item.edit_token,
+            fields: body("edit from frozen basis"),
+        },
+    );
+    req.content_id = item.content.id;
+    let saved = app::save(&mut t.store, &mut t.host, &reader, &req).unwrap();
+    assert!(saved.view.unwrap().conflicts.contains(&Field::Body));
+    let last = query::next(&mut t.store, &mut t.host, &reader, second.next.unwrap(), 1).unwrap();
+    assert!(last.items.is_empty() && last.next.is_none());
+    t.host.now = 100 + query::QUERY_TTL_MICROS;
+    assert!(matches!(
+        query::next(&mut t.store, &mut t.host, &reader, cursor, 1),
+        Err(Error::QueryExpired)
+    ));
+}
+
+#[test]
 fn migration_preserves_v1_records_and_cursor_generation() {
     let mut t = Test::new();
     t.create();
+    let all = harmion_protocol::query::Condition::And(vec![]);
+    assert_eq!(
+        t.store
+            .transaction(|tx| tx.search_content_ids(&all, &Filter::All, None, 8))
+            .unwrap(),
+        [content()]
+    );
     let db = rusqlite::Connection::open(t.path.join("node.db")).unwrap();
     // Reproduce the previous schema with its original log and identity intact.
     db.execute_batch(
-        "DROP TABLE request_results; DROP TABLE token_basis; DROP TABLE edit_tokens;
+        "DROP TABLE grant_generations; DROP TABLE content_changes;
+        DROP TABLE query_cursors; DROP TABLE query_basis; DROP TABLE query_sessions;
+        DROP TABLE search_basis; DROP TABLE content_records;
+        DROP TABLE search_elements; DROP TABLE search_attributes; DROP TABLE search_kinds; DROP TABLE search_contents;
+        DROP TABLE request_results; DROP TABLE token_basis; DROP TABLE edit_tokens;
         DROP TABLE app_kinds; DROP TABLE apps; DROP TABLE peers; DROP TABLE membership_identity; DROP TABLE membership_recovery_roots; DROP TABLE membership_root; DROP TABLE membership_log; DROP TABLE membership_cursors; PRAGMA user_version=1;",
     )
     .unwrap();
     t.restart();
     assert_eq!(t.count(), 1);
+    assert_eq!(
+        t.store
+            .transaction(|tx| tx.search_content_ids(&all, &Filter::All, None, 8))
+            .unwrap(),
+        [content()]
+    );
     assert_eq!(t.store.identity(), identity());
     assert_eq!(t.snapshot().content.body, "base");
     let (_, admin) = app::bootstrap_admin(&mut t.store, &mut t.host, 10_000).unwrap();
@@ -883,7 +1219,7 @@ fn migration_preserves_v1_records_and_cursor_generation() {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 8);
 }
 
 #[test]
