@@ -191,7 +191,9 @@ pub async fn sync_once<S: Store + Send + 'static>(
             let count = page.entries.len() as u64;
             let expected = peer.clone();
             let received = store
-                .run(move |s| membership::receive_response(s, &expected, &page))
+                .run_notifying(true, move |s| {
+                    membership::receive_response(s, &expected, &page)
+                })
                 .await;
             match received {
                 Ok(through) => {

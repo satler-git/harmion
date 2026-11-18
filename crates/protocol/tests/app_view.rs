@@ -35,6 +35,8 @@ fn json_view_keeps_arbitrary_object_keys_and_exact_numbers() {
     };
     let response = read_view_json(&view);
     let encoded = serde_json::to_vec(&response).unwrap();
+    assert_eq!(read_view_size(&view, encoded.len()), Some(encoded.len()));
+    assert_eq!(read_view_size(&view, encoded.len() - 1), None);
     let decoded = decode_app_json(&encoded).unwrap();
     let values = decoded["content"]["attributes"].as_array().unwrap();
     let object = &values.iter().find(|v| v["key"] == "object").unwrap()["value"];

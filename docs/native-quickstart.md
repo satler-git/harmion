@@ -40,7 +40,7 @@ target/debug/harmion --node ./node-a sync NODE_B_ID
 
 `admin.secret`・`private-key.der`・`iroh.secret`は交換しない。管理資格情報は所有者bootstrap用で、OAuth access tokenではない。
 
-旧schema v4以前のデータはschema v5へ移行する。旧クラスタでは起点にする1台だけを所有者が選び、`run DIR --bootstrap-cluster-root true`で共通の初期信頼証明を作る。他ノードは新しいv3登録でapprove/joinし直す。無署名だった既存Peerを、署名検証鍵を確認せず自動的に他端末へ紹介しない。データ・アプリ資格情報・データcursorは維持する。
+起動時にSQLite DBをschema v8へ移行する。旧DBの検索索引と項目の版参照は保持している更新から作る。Subscribeの変更履歴には移行後の更新を記録する。schema v4以前から移行した旧クラスタでは、起点にする1台だけを所有者が選び、`run DIR --bootstrap-cluster-root true`で共通の初期信頼証明を作る。他ノードは新しいv3登録でapprove/joinし直す。無署名だった既存Peerを、署名検証鍵を確認せず自動的に他端末へ紹介しない。データ・アプリ資格情報・データcursorは維持する。
 
 ## 作成・取得・再送
 
@@ -96,7 +96,7 @@ target/debug/harmion --node ./recovery approve ./node-b/peer.json
 
 削除は`delete CONTENT_ID TOKEN REQUEST_FILE`。管理`inspect CONTENT_ID`で削除済みContentを取得でき、`keep`で削除競合の生存を選べる。`restore CONTENT_ID TOKEN BODY_FILE REQUEST_FILE`は既知フィールドを置換する操作で、このCLIコマンドは本文しか指定しないため、既知の属性・kindを消す。属性を含む復元はSDKのSaveRequestで全フィールドを明示する。
 
-周期同期は標準30秒。`--sync-seconds 1`等で変更でき、0で手動同期のみとなる。失敗時は最大1時間のbackoffとjitterを使い、状態が変化した時だけstderrへ記録する。SIGINT/SIGTERMで接続taskと同期taskを停止する。再起動後もID・鍵・ログ・cursor・編集token・再送結果を保持する。
+自ノードからの自動同期は起動時、Contentの新規保存が確定したとき、および周期照合で行う。周期は標準30秒で、`--sync-seconds 1`等で変更できる。0では自ノードからの開始は手動操作に限り、認証済みPeerからの同期は受け付ける。到達不能なPeerは保存後も最大1時間のbackoffとjitterに従い、状態が変化した時だけstderrへ記録する。SIGINT/SIGTERMで接続taskと同期taskを停止する。再起動後もID・鍵・ログ・cursor・編集token・再送結果を保持する。
 
 ## 検証
 

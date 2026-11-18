@@ -1,7 +1,12 @@
 use harmion_domain::*;
 use harmion_node::{
-    Error, replication,
+    Error,
+    access::{Filter, Grants},
+    replication,
     storage::{Identity, Store, accept_records, read_graph},
+};
+use harmion_protocol::query::{
+    AttributePredicate as Predicate, Condition, OrderOperator, OrderedValue,
 };
 use harmion_protocol::{LogEntry, LogEpoch, Page, Record};
 use harmion_store_sqlite::SqliteStore;
@@ -84,6 +89,193 @@ fn save(store: &mut SqliteStore, records: &[Record]) -> usize {
 }
 fn count(store: &mut SqliteStore) -> usize {
     store.transaction(|tx| Ok(tx.entries()?.len())).unwrap()
+}
+fn search_all(store: &mut SqliteStore) -> Vec<ContentId> {
+    store
+        .transaction(|tx| tx.search_content_ids(&Condition::And(vec![]), &Filter::All, None, 100))
+        .unwrap()
+}
+
+#[test]
+fn sqlite_query_matches_reference_and_filters_before_limiting() {
+    let dir = Directory::new();
+    let mut store = dir.store(1);
+    let number = |text: &str| AttributeValue::Number(text.parse().unwrap());
+    let values = [
+        number("9007199254740993"),
+        AttributeValue::Null,
+        number("9007199254740993"),
+    ];
+
+    for (id, kind, amount) in [
+        (1, "private", Some("-1.201")),
+        (2, "wiki", Some("-1.2")),
+        (3, "wiki", Some("9007199254740993")),
+        (4, "wiki", None),
+    ] {
+        let mut update = root().update().clone();
+        update.content_id = ContentId([id; 32]);
+        update.root_id = UpdateId([id; 32]);
+        update.update_id = update.root_id;
+        update.edited_at = i64::from(id) - 3;
+        update.changes.insert(
+            Field::Kind(kind.into()),
+            Change {
+                value: Value::Kind(true),
+                replaces: BTreeSet::new(),
+            },
+        );
+        if let Some(amount) = amount {
+            update.changes.insert(
+                Field::Attribute {
+                    namespace: "test".into(),
+                    key: "amount".into(),
+                },
+                Change {
+                    value: Value::Attribute(number(amount)),
+                    replaces: BTreeSet::new(),
+                },
+            );
+        }
+        if id == 3 {
+            update.changes.insert(
+                Field::Attribute {
+                    namespace: "test".into(),
+                    key: "tags".into(),
+                },
+                Change {
+                    value: Value::Attribute(AttributeValue::Array(values.to_vec())),
+                    replaces: BTreeSet::new(),
+                },
+            );
+        }
+        if id == 4 {
+            update.changes.insert(
+                Field::Attribute {
+                    namespace: "test".into(),
+                    key: "tags".into(),
+                },
+                Change {
+                    value: Value::Attribute(AttributeValue::Null),
+                    replaces: BTreeSet::new(),
+                },
+            );
+        }
+        save(&mut store, &[Record::from_update(update).unwrap()]);
+    }
+    let attribute = |name: &str, predicate| Condition::Attribute {
+        key: AttributeKey {
+            namespace: "test".into(),
+            key: name.into(),
+        },
+        predicate,
+    };
+    let amount = |operator, value: &str| {
+        attribute(
+            "amount",
+            Predicate::Compare {
+                operator,
+                value: OrderedValue::Number(value.parse().unwrap()),
+            },
+        )
+    };
+    let exists = attribute("amount", Predicate::Exists);
+    let conditions = [
+        Condition::Or(vec![]),
+        Condition::And(vec![]),
+        Condition::And(vec![Condition::Kind("wiki".into()), exists.clone()]),
+        Condition::Not(Box::new(exists)),
+        Condition::Not(Box::new(amount(OrderOperator::Less, "-1.2"))),
+        amount(OrderOperator::Less, "-1.2"),
+        amount(OrderOperator::Greater, "9007199254740992"),
+        Condition::LastEditedAt {
+            operator: OrderOperator::GreaterOrEqual,
+            utc_micros: 0,
+        },
+        attribute("tags", Predicate::Eq(AttributeValue::Null)),
+        attribute(
+            "tags",
+            Predicate::Eq(AttributeValue::Array(values.to_vec())),
+        ),
+        attribute("tags", Predicate::Contains(values[0].clone())),
+        attribute(
+            "tags",
+            Predicate::ContainsAny(vec![number("2"), AttributeValue::Null]),
+        ),
+        attribute("tags", Predicate::ContainsAny(vec![])),
+        attribute("tags", Predicate::ContainsAll(vec![])),
+        attribute("tags", Predicate::ContainsAll(values.to_vec())),
+        attribute(
+            "tags",
+            Predicate::ContainsAll(vec![values[0].clone(), number("2")]),
+        ),
+    ];
+    store
+        .transaction(|tx| {
+            let graph = read_graph(tx)?;
+            let ids: Vec<_> = graph.content_ids().collect();
+            for read in [
+                Filter::All,
+                Filter::Kinds(["wiki".into()].into()),
+                Filter::Kinds(BTreeSet::new()),
+            ] {
+                let grants = Grants {
+                    read: Some(read.clone()),
+                    ..Grants::default()
+                };
+                for condition in &conditions {
+                    let reference: Vec<_> = ids
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            harmion_node::query::matches(
+                                &graph.snapshot(*id).unwrap(),
+                                &grants,
+                                condition,
+                            )
+                        })
+                        .collect();
+                    assert_eq!(
+                        tx.search_content_ids(condition, &read, None, 100)?,
+                        reference,
+                        "{condition:?}"
+                    );
+                    let mut paged = Vec::new();
+                    loop {
+                        let page =
+                            tx.search_content_ids(condition, &read, paged.last().copied(), 1)?;
+                        if page.is_empty() {
+                            break;
+                        }
+                        paged.extend(page);
+                    }
+                    assert_eq!(paged, reference);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn search_projection_tracks_received_deletion_and_restoration() {
+    let dir = Directory::new();
+    let mut sender = dir.store(1);
+    let mut receiver = dir.store(2);
+    save(&mut sender, &[root()]);
+    transfer(&mut sender, &mut receiver);
+    assert_eq!(search_all(&mut receiver), [content()]);
+
+    save(&mut sender, &[record(2, Action::Delete, &[1], None)]);
+    transfer(&mut sender, &mut receiver);
+    assert!(search_all(&mut receiver).is_empty());
+
+    save(
+        &mut sender,
+        &[record(3, Action::Restore, &[2], Some(("restored", &[1])))],
+    );
+    transfer(&mut sender, &mut receiver);
+    assert_eq!(search_all(&mut receiver), [content()]);
 }
 fn transfer(a: &mut SqliteStore, b: &mut SqliteStore) {
     let sender = a.identity();
@@ -198,6 +390,13 @@ fn page_failure_rolls_back_valid_prefix_and_database_write_failure() {
             .is_err()
     );
     assert_eq!(count(&mut receiver), 0);
+    assert!(search_all(&mut receiver).is_empty());
+    assert_eq!(
+        receiver
+            .transaction(|tx| Ok(tx.change_window()?.high))
+            .unwrap(),
+        0
+    );
     assert_eq!(
         receiver
             .transaction(|tx| tx.cursor(identity(1).node, identity(1).epoch))
@@ -212,6 +411,10 @@ fn page_failure_rolls_back_valid_prefix_and_database_write_failure() {
         3
     );
     assert_eq!(count(&mut receiver), 2);
+    assert_eq!(search_all(&mut receiver), [content()]);
+    let changes = receiver.transaction(|tx| tx.changes_after(0, 8)).unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].content, content());
 }
 
 #[test]

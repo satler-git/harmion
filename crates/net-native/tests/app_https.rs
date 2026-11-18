@@ -1,11 +1,11 @@
-use harmion_client::Client;
+use harmion_client::{Client, Subscription, SubscriptionNotification as Notice};
 use harmion_domain::*;
 use harmion_net_native::{SharedStore, SystemHost, app, tls::TlsIdentity};
 use harmion_node::{application, storage::Identity};
 use harmion_protocol::*;
 use harmion_store_sqlite::SqliteStore;
-use std::sync::Arc;
-use tokio::{net::TcpListener, sync::watch};
+use std::{sync::Arc, time::Duration};
+use tokio::{net::TcpListener, sync::watch, time::timeout};
 
 #[tokio::test]
 async fn pinned_app_api_save_replay_permissions_and_revocation() {
@@ -39,10 +39,17 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
         },
     };
     let (stop, receiver) = watch::channel(false);
-    let server = tokio::spawn(app::serve(listener, store, tls, registration, receiver));
+    let server = tokio::spawn(app::serve(
+        listener,
+        store.clone(),
+        tls,
+        registration,
+        receiver,
+    ));
     let client = Client::new(info.clone(), *admin.expose_bytes()).unwrap();
     let capabilities = client.call("capabilities", &[]).await.unwrap();
     assert_eq!(capabilities["oauth"], false);
+    assert_eq!(capabilities["query"], true);
     let content = ContentId([4; 32]);
     let request = SaveRequest {
         request_id: RequestId([5; 32]),
@@ -52,11 +59,31 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
         },
     };
     let saved = client.save(&request).await.unwrap();
+    timeout(Duration::from_secs(1), store.local_save_notified())
+        .await
+        .unwrap();
     assert_eq!(saved, client.save(&request).await.unwrap());
     let read = client.get(content).await.unwrap();
     assert_eq!(read["content"]["body"], "initial");
     assert!(read.get("basis").is_none());
     assert!(read["content"].get("root").is_none());
+    let second = SaveRequest {
+        content_id: ContentId([6; 32]),
+        request_id: RequestId([7; 32]),
+        ..request.clone()
+    };
+    client.save(&second).await.unwrap();
+    timeout(Duration::from_secs(1), store.local_save_notified())
+        .await
+        .unwrap();
+    let page = client
+        .query(query::Condition::And(vec![]), 1)
+        .await
+        .unwrap();
+    assert_eq!(page.items[0]["content"]["id"], hex(&content.0));
+    let tail = client.query_next(page.next.unwrap(), 1).await.unwrap();
+    assert_eq!(tail.items[0]["content"]["id"], hex(&second.content_id.0));
+    assert!(tail.next.is_none());
     let changed = SaveRequest {
         command: Command::Create {
             fields: [(Field::Body, Value::Body("changed".into()))].into(),
@@ -106,10 +133,59 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
         reader.save(&changed).await,
         Err(harmion_client::Error::Http(403))
     ));
+    assert!(
+        timeout(Duration::from_millis(50), store.local_save_notified())
+            .await
+            .is_err(),
+        "replayed or rejected save triggered synchronization"
+    );
     assert!(matches!(
         reader.call("sync", &[7; 32]).await,
         Err(harmion_client::Error::Http(403))
     ));
+    assert_eq!(capabilities["subscriptions"], true);
+    let mut sub = reader
+        .subscribe(query::Condition::And(vec![]))
+        .await
+        .unwrap();
+    assert!(sub.contents().is_none());
+    assert_eq!(
+        reader.subscription_next(&mut sub).await.unwrap(),
+        Notice::SnapshotChunk
+    );
+    assert!(sub.contents().is_none());
+    assert_eq!(
+        reader.subscription_next(&mut sub).await.unwrap(),
+        Notice::SnapshotEnd
+    );
+    let frozen_edit = sub.contents().unwrap()[&content]["edit_token"].clone();
+    let checkpoint = sub.checkpoint().unwrap();
+    let mut sub = Subscription::from_checkpoint(checkpoint).unwrap();
+    let update = SaveRequest {
+        request_id: RequestId([8; 32]),
+        content_id: content,
+        command: Command::Edit {
+            token: EditToken(unhex(read["edit_token"].as_str().unwrap()).unwrap()),
+            fields: [(Field::Body, Value::Body("during long poll".into()))].into(),
+        },
+    };
+    let (change, _) = tokio::join!(
+        timeout(Duration::from_secs(3), reader.subscription_next(&mut sub)),
+        async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            client.save(&update).await.unwrap();
+        },
+    );
+    assert_eq!(
+        change.unwrap().unwrap(),
+        Notice::Changes {
+            upserted: vec![content],
+            removed: vec![]
+        }
+    );
+    let latest = &sub.contents().unwrap()[&content];
+    assert_eq!(latest["content"]["body"], "during long poll");
+    assert_ne!(latest["edit_token"], frozen_edit);
     client
         .call(
             "change-grants",
@@ -131,6 +207,20 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
         reader.get(content).await,
         Err(harmion_client::Error::Http(401))
     ));
+    assert!(matches!(
+        reader.subscription_next(&mut sub).await,
+        Err(harmion_client::Error::Http(401))
+    ));
+    assert!(sub.contents().is_none());
+    let mut owner_sub = client
+        .subscribe(query::Condition::Or(vec![]))
+        .await
+        .unwrap();
+    client.unsubscribe(&mut owner_sub).await.unwrap();
+    assert_eq!(
+        client.subscription_next(&mut owner_sub).await.unwrap(),
+        Notice::ResetRequired
+    );
     stop.send(true).unwrap();
     server.await.unwrap().unwrap();
 }

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, str::FromStr};
+use std::{cmp::Ordering, collections::BTreeMap, str::FromStr};
 
 /// JSON-shaped data. Absence is represented by `Value::Absent`, not `Null`.
 /// Objects compare without key order; arrays retain order and duplicates.
@@ -20,6 +20,46 @@ pub struct Number {
     negative: bool,
     coefficient: String,
     exponent: i64,
+}
+
+impl Number {
+    /// The sign, significant digits and exponent of this normalized decimal.
+    pub fn decimal_parts(&self) -> (bool, &str, i64) {
+        (self.negative, &self.coefficient, self.exponent)
+    }
+
+    fn compare_magnitude(&self, other: &Self) -> Ordering {
+        let self_nonzero = self.coefficient != "0";
+        let other_nonzero = other.coefficient != "0";
+        if !self_nonzero || !other_nonzero {
+            return self_nonzero.cmp(&other_nonzero);
+        }
+        // Compare the positions of the leading digits without expanding either exponent.
+        let self_scale = i128::from(self.exponent) + self.coefficient.len() as i128;
+        let other_scale = i128::from(other.exponent) + other.coefficient.len() as i128;
+        self_scale.cmp(&other_scale).then_with(|| {
+            // With aligned leading digits, a shorter prefix compares as zero-padded:
+            // the longer normalized coefficient has a nonzero final digit.
+            self.coefficient.cmp(&other.coefficient)
+        })
+    }
+}
+
+impl Ord for Number {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self.negative, other.negative) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (true, true) => other.compare_magnitude(self),
+            (false, false) => self.compare_magnitude(other),
+        }
+    }
+}
+
+impl PartialOrd for Number {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

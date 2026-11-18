@@ -5,8 +5,10 @@ pub mod application;
 pub mod membership;
 pub mod membership_log;
 pub mod membership_state;
+pub mod query;
 pub mod replication;
 pub mod storage;
+pub mod subscription;
 
 use harmion_domain as domain;
 use harmion_protocol as protocol;
@@ -29,6 +31,10 @@ pub enum Error {
     RequestIdReuse,
     AlreadyBootstrapped,
     InvalidRequest,
+    QueryExpired,
+    QueryCapacity,
+    QueryItemTooLarge,
+    SubscriptionCapacity,
     Entropy(String),
     PeerRetired,
     MembershipConflict,

@@ -11,7 +11,7 @@ use harmion_protocol::{ConnectionInfo, LogEpoch, PeerBinding, PeerRegistration, 
 use harmion_store_sqlite::SqliteStore;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io::{self, Write},
     net::SocketAddr,
     sync::Arc,
@@ -92,46 +92,83 @@ fn initialize(path: &str, cluster: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn periodic(
+#[derive(Default)]
+struct SyncSchedule {
+    retries: BTreeMap<NodeId, (u32, Instant)>,
+    inflight: BTreeSet<NodeId>,
+    pending_saves: BTreeSet<NodeId>,
+    ready: VecDeque<NodeId>,
+}
+
+impl SyncSchedule {
+    fn start_ready(&mut self, peers: BTreeSet<NodeId>, saved: bool, now: Instant) -> Vec<NodeId> {
+        const MAX_ROUNDS: usize = 4;
+        self.retries.retain(|node, _| peers.contains(node));
+        self.pending_saves.retain(|node| peers.contains(node));
+        self.ready.retain(|node| peers.contains(node));
+        if saved {
+            self.pending_saves.extend(&peers);
+        }
+
+        // A new save can make a peer ready again, behind peers already waiting.
+        for node in peers {
+            if self.inflight.contains(&node)
+                || self.ready.contains(&node)
+                || self.retries.get(&node).is_some_and(|(failures, next)| {
+                    *next > now && (*failures != 0 || !self.pending_saves.contains(&node))
+                })
+            {
+                continue;
+            }
+            self.ready.push_back(node);
+        }
+        let count = (MAX_ROUNDS - self.inflight.len()).min(self.ready.len());
+        let starting: Vec<_> = self.ready.drain(..count).collect();
+        for node in &starting {
+            self.inflight.insert(*node);
+            // A later save can schedule a follow-up to this fixed-high round.
+            self.pending_saves.remove(node);
+        }
+        starting
+    }
+
+    fn complete(&mut self, node: NodeId, failures: u32, next: Instant) {
+        self.inflight.remove(&node);
+        self.retries.insert(node, (failures, next));
+    }
+}
+
+async fn automatic_sync(
     store: SharedStore<SqliteStore>,
     transport: Arc<NativeTransport>,
     seconds: u64,
 ) -> Result<()> {
     let base = Duration::from_secs(seconds);
-    let mut retries: BTreeMap<NodeId, (u32, Instant)> = BTreeMap::new();
-    let mut inflight = BTreeSet::new();
+    let mut schedule = SyncSchedule::default();
+    let mut local_save = false;
     let mut rounds = tokio::task::JoinSet::new();
     loop {
-        let peers = store.run(|s| s.transaction(|tx| tx.peers())).await?;
-        retries.retain(|id, _| peers.iter().any(|p| p.node == *id));
+        let peers = store
+            .run(|s| {
+                s.transaction(|tx| Ok(tx.peers()?.into_iter().map(|peer| peer.node).collect()))
+            })
+            .await?;
         // Retired/contested peers may exchange signed control evidence only.
         // sync_once checks current membership before any data operation.
-        for peer in peers {
-            if rounds.len() >= 4 {
-                break;
-            }
-            if inflight.contains(&peer.node)
-                || retries
-                    .get(&peer.node)
-                    .is_some_and(|(_, next)| *next > Instant::now())
-            {
-                continue;
-            }
-            inflight.insert(peer.node);
+        for node in schedule.start_ready(peers, std::mem::take(&mut local_save), Instant::now()) {
             let store = store.clone();
             let transport = transport.clone();
             rounds.spawn(async move {
                 (
-                    peer.node,
-                    sync::sync_once(&store, transport.as_ref(), peer.node).await,
+                    node,
+                    sync::sync_once(&store, transport.as_ref(), node).await,
                 )
             });
         }
         tokio::select! {
             completed=rounds.join_next(), if !rounds.is_empty() => {
                 let (node,result)=completed.ok_or("sync task missing")??;
-                inflight.remove(&node);
-                let previous=retries.get(&node).map_or(0,|(failures,_)|*failures);
+                let previous=schedule.retries.get(&node).map_or(0,|(failures,_)|*failures);
                 let failed=match result {
                     Ok(_) => {if previous!=0 {eprintln!("peer {} reconnected",hex(&node.0));} 0},
                     Err(harmion_net_native::Error::Node(harmion_node::Error::PeerRetired | harmion_node::Error::MembershipConflict)) => 0,
@@ -139,8 +176,9 @@ async fn periodic(
                 };
                 let delay=base.saturating_mul(1u32<<failed.min(5)).min(Duration::from_secs(3600));
                 let jitter=u16::from_be_bytes(SystemHost.random_bytes()?[..2].try_into()?) as u64 % 1000;
-                retries.insert(node,(failed,Instant::now()+delay+Duration::from_millis(jitter)));
+                schedule.complete(node,failed,Instant::now()+delay+Duration::from_millis(jitter));
             },
+            _ = store.local_save_notified() => local_save = true,
             _=tokio::time::sleep(base.min(Duration::from_secs(1))) => {},
         }
     }
@@ -325,7 +363,7 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
     }
     let mut background = tokio::task::JoinSet::new();
     if config.sync_seconds != 0 {
-        background.spawn(periodic(store, transport, config.sync_seconds));
+        background.spawn(automatic_sync(store, transport, config.sync_seconds));
     }
     println!(
         "{}",
@@ -335,7 +373,7 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
     let outcome: Result<()> = tokio::select! {
         signal = shutdown_signal() => signal.map_err(Into::into),
         ended = tasks.join_next() => match ended { Some(Ok(Err(e))) => Err(e.into()), _ => Err("HTTP server stopped unexpectedly".into()) },
-        ended = background.join_next(), if !background.is_empty() => match ended { Some(Ok(Err(e))) => Err(e), _ => Err("periodic sync stopped unexpectedly".into()) },
+        ended = background.join_next(), if !background.is_empty() => match ended { Some(Ok(Err(e))) => Err(e), _ => Err("automatic sync stopped unexpectedly".into()) },
     };
     let _ = stop.send(true);
     background.abort_all();
@@ -360,5 +398,44 @@ async fn main() {
     if let Err(error) = result {
         eprintln!("harmiond: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waiting_peer_gets_next_slot_during_continuous_saves() {
+        let [a, b, c, d, e] = [1, 2, 3, 4, 5].map(|id| NodeId([id; 32]));
+        let peers = BTreeSet::from([a, b, c, d, e]);
+        let now = Instant::now();
+        let periodic_due = now + Duration::from_secs(120);
+        let mut schedule = SyncSchedule::default();
+
+        assert_eq!(
+            schedule.start_ready(peers.clone(), false, now),
+            [a, b, c, d]
+        );
+        assert!(schedule.start_ready(peers.clone(), true, now).is_empty());
+        schedule.complete(a, 0, periodic_due);
+        assert_eq!(schedule.start_ready(peers.clone(), true, now), [e]);
+
+        schedule.complete(b, 0, periodic_due);
+        assert_eq!(schedule.start_ready(peers, true, now), [a]);
+    }
+
+    #[test]
+    fn pending_save_does_not_bypass_failure_backoff() {
+        let node = NodeId([1; 32]);
+        let peers = BTreeSet::from([node]);
+        let now = Instant::now();
+        let retry_due = now + Duration::from_secs(60);
+        let mut schedule = SyncSchedule::default();
+
+        assert_eq!(schedule.start_ready(peers.clone(), false, now), [node]);
+        schedule.complete(node, 1, retry_due);
+        assert!(schedule.start_ready(peers.clone(), true, now).is_empty());
+        assert_eq!(schedule.start_ready(peers, false, retry_due), [node]);
     }
 }

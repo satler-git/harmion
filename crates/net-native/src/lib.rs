@@ -3,6 +3,7 @@ pub mod app;
 pub mod iroh_peer;
 mod membership_sync;
 pub mod peer;
+mod subscriptions;
 pub mod sync;
 pub mod tls;
 
@@ -97,12 +98,16 @@ impl Host for SystemHost {
 pub struct SharedStore<S> {
     inner: Arc<Mutex<S>>,
     sync: Arc<Mutex<RoundLocks>>,
+    local_save: Arc<tokio::sync::Notify>,
+    changes: tokio::sync::watch::Sender<()>,
 }
 impl<S> Clone for SharedStore<S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
             sync: self.sync.clone(),
+            local_save: self.local_save.clone(),
+            changes: self.changes.clone(),
         }
     }
 }
@@ -111,8 +116,31 @@ impl<S: Store + Send + 'static> SharedStore<S> {
         Self {
             inner: Arc::new(Mutex::new(store)),
             sync: Arc::new(Mutex::new(RoundLocks::new())),
+            local_save: Arc::new(tokio::sync::Notify::new()),
+            changes: tokio::sync::watch::Sender::new(()),
         }
     }
+    /// Wait for a committed App update. The single sync driver can coalesce saves.
+    pub async fn local_save_notified(&self) {
+        self.local_save.notified().await;
+    }
+
+    pub(crate) async fn run_notifying<T: Send + 'static>(
+        &self,
+        changed: bool,
+        f: impl FnOnce(&mut S) -> Result<T, harmion_node::Error> + Send + 'static,
+    ) -> Result<T, Error> {
+        let changes = self.changes.clone();
+        self.run(move |store| {
+            let value = f(store)?;
+            if changed {
+                changes.send_replace(());
+            }
+            Ok(value)
+        })
+        .await
+    }
+
     pub(crate) fn round_lock(
         &self,
         node: harmion_domain::NodeId,

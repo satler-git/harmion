@@ -162,13 +162,16 @@ async fn respond<S: Store + Send + 'static>(
         return Ok(response(StatusCode::BAD_REQUEST, "invalid member binding"));
     }
     match store
-        .run(move |s| {
-            membership::handle(
-                s,
-                &membership::PeerKey::TlsCertificate(certificate),
-                &request,
-            )
-        })
+        .run_notifying(
+            matches!(&request.command, PeerCommand::Accept(_)),
+            move |s| {
+                membership::handle(
+                    s,
+                    &membership::PeerKey::TlsCertificate(certificate),
+                    &request,
+                )
+            },
+        )
         .await
     {
         Ok(reply) => match encode_peer_response(&reply) {

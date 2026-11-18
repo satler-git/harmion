@@ -1,13 +1,17 @@
 use crate::Error;
 use crate::membership::Peer;
+use crate::query::{QueryPosition, QueryRevision};
 use crate::{
-    access::App,
+    access::{App, Filter},
     application::{RequestResult, TokenState},
 };
-use harmion_domain::{Acceptance, ClusterId, Graph, NodeId};
-use harmion_protocol::{AppId, EditToken, RequestId};
+use harmion_domain::{Acceptance, ClusterId, ContentId, ContentSnapshot, Graph, NodeId};
+use harmion_protocol::{
+    AppId, EditToken, RequestId,
+    query::{Condition, QueryCursor},
+};
 use harmion_protocol::{LogEntry, LogEpoch, Record};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
@@ -15,6 +19,21 @@ pub struct Identity {
     pub node: NodeId,
     pub epoch: LogEpoch,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChangeWindow {
+    /// A consumer below this position must take a new snapshot.
+    pub discarded_through: u64,
+    pub high: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentChange {
+    pub sequence: u64,
+    pub content: ContentId,
+}
+
+pub const MAX_RETAINED_CHANGES: u64 = 4096;
 
 /// No await or external side effects inside the callback. The adapter must roll
 /// back all writes on Err/panic and return Ok only after a successful commit.
@@ -63,7 +82,47 @@ pub trait Transaction {
     ) -> Result<(), Error>;
     fn identity(&self) -> Identity;
     fn entries(&mut self) -> Result<Vec<LogEntry>, Error>;
+    /// All accepted records for one Content, in local acceptance order.
+    fn content_entries(&mut self, content: ContentId) -> Result<Vec<LogEntry>, Error>;
     fn append(&mut self, record: &Record) -> Result<u64, Error>;
+    /// Maintains the derived search state in the update's acceptance transaction.
+    fn put_search_projection(&mut self, snapshot: &ContentSnapshot) -> Result<(), Error>;
+    fn change_window(&mut self) -> Result<ChangeWindow, Error>;
+    fn changes_after(&mut self, after: u64, limit: u32) -> Result<Vec<ContentChange>, Error>;
+    /// Match currently visible Content within the caller's authenticated Read
+    /// Filter, ordered by ID and excluding IDs through `after`. The bound
+    /// applies after filtering. This operation does not persist a snapshot.
+    fn search_content_ids(
+        &mut self,
+        condition: &Condition,
+        read: &Filter,
+        after: Option<ContentId>,
+        limit: u32,
+    ) -> Result<Vec<ContentId>, Error>;
+    /// Capture matching IDs and their edit bases within the current transaction.
+    fn freeze_query(
+        &mut self,
+        start: QueryCursor,
+        app: AppId,
+        condition: &Condition,
+        read: &Filter,
+        now: i64,
+        expires_at: i64,
+    ) -> Result<(), Error>;
+    fn query_position(&mut self, cursor: QueryCursor) -> Result<Option<QueryPosition>, Error>;
+    fn discard_query(&mut self, session: QueryCursor) -> Result<(), Error>;
+    fn query_revisions(
+        &mut self,
+        position: &QueryPosition,
+        limit: u32,
+    ) -> Result<Vec<QueryRevision>, Error>;
+    /// Reuse an existing cursor for this position, including when a page is retried.
+    fn put_query_cursor(
+        &mut self,
+        session: QueryCursor,
+        after: ContentId,
+        cursor: QueryCursor,
+    ) -> Result<QueryCursor, Error>;
     fn cursor(&mut self, sender: NodeId, epoch: LogEpoch) -> Result<u64, Error>;
     fn set_cursor(&mut self, sender: NodeId, epoch: LogEpoch, through: u64) -> Result<(), Error>;
     fn has_apps(&mut self) -> Result<bool, Error>;
@@ -71,6 +130,9 @@ pub trait Transaction {
     fn app_by_id(&mut self, id: AppId) -> Result<Option<App>, Error>;
     fn insert_app(&mut self, app: &App) -> Result<(), Error>;
     fn update_app(&mut self, app: &App) -> Result<(), Error>;
+    /// Monotonic local authorization generation, including grant changes that
+    /// later restore the original values.
+    fn grant_generation(&mut self, app: AppId) -> Result<u64, Error>;
     fn token(&mut self, token: EditToken) -> Result<Option<TokenState>, Error>;
     fn insert_token(&mut self, token: EditToken, state: &TokenState) -> Result<(), Error>;
     fn request(&mut self, app: AppId, request: RequestId) -> Result<Option<RequestResult>, Error>;
@@ -86,9 +148,20 @@ pub trait Transaction {
 }
 
 pub fn read_graph(tx: &mut dyn Transaction) -> Result<Graph, Error> {
-    let mut graph = Graph::new(tx.identity().cluster);
+    graph_from_entries(tx.identity().cluster, tx.entries()?)
+}
+
+pub(crate) fn read_content_graph(
+    tx: &mut dyn Transaction,
+    content: ContentId,
+) -> Result<Graph, Error> {
+    graph_from_entries(tx.identity().cluster, tx.content_entries(content)?)
+}
+
+fn graph_from_entries(cluster: ClusterId, entries: Vec<LogEntry>) -> Result<Graph, Error> {
+    let mut graph = Graph::new(cluster);
     let mut previous = 0;
-    for entry in tx.entries()? {
+    for entry in entries {
         if entry.seq <= previous {
             return Err(Error::CorruptLog);
         }
@@ -111,6 +184,7 @@ pub fn accept_records(tx: &mut dyn Transaction, records: &[Record]) -> Result<us
         .map(|entry| (entry.record.update().update_id, entry.record))
         .collect();
     let mut inserted = 0;
+    let mut changed = BTreeSet::new();
     for record in records {
         let update = record.update();
         if let Some(existing) = known.get(&update.update_id) {
@@ -129,8 +203,13 @@ pub fn accept_records(tx: &mut dyn Transaction, records: &[Record]) -> Result<us
                 reason,
             })?;
         tx.append(record)?;
+        changed.insert(update.content_id);
         known.insert(update.update_id, record.clone());
         inserted += 1;
+    }
+    for content in changed {
+        let snapshot = graph.snapshot(content).ok_or(Error::CorruptLog)?;
+        tx.put_search_projection(&snapshot)?;
     }
     Ok(inserted)
 }

@@ -60,6 +60,115 @@ fn graph() -> Graph {
 }
 
 #[test]
+fn exact_decimal_order_handles_sign_scale_and_exponent_boundaries() {
+    let decimal = |s: &str| s.parse::<Number>().unwrap();
+    let ascending = [
+        "-9e9223372036854775807",
+        "-1e9223372036854775807",
+        "-1.201",
+        "-1.2",
+        "-1e-9223372036854775808",
+        "0",
+        "1e-9223372036854775808",
+        "1.2",
+        "1.201",
+        "9007199254740992",
+        "9007199254740993",
+        "1e9223372036854775807",
+        "9e9223372036854775807",
+    ]
+    .map(decimal);
+    for (i, left) in ascending.iter().enumerate() {
+        for (j, right) in ascending.iter().enumerate() {
+            assert_eq!(left.cmp(right), i.cmp(&j));
+        }
+    }
+    assert_eq!(
+        decimal("-0").cmp(&decimal("0e7")),
+        std::cmp::Ordering::Equal
+    );
+    assert_eq!(
+        decimal("1.20").cmp(&decimal("12e-1")),
+        std::cmp::Ordering::Equal
+    );
+}
+
+#[test]
+fn last_edited_at_is_projected_from_selected_fields() {
+    let mut g = graph();
+    g.accept(Update {
+        edited_at: -100,
+        ..root()
+    })
+    .unwrap();
+    assert_eq!(g.snapshot(content_id()).unwrap().last_edited_at, -100);
+    g.accept(Update {
+        edited_at: 5000,
+        ..op(
+            2,
+            Action::Edit,
+            &[1],
+            vec![(Field::Body, Value::Body("first".into()), vec![1])],
+        )
+    })
+    .unwrap();
+    g.accept(Update {
+        edited_at: -50,
+        ..op(
+            3,
+            Action::Edit,
+            &[2],
+            vec![(Field::Body, Value::Body("second".into()), vec![2])],
+        )
+    })
+    .unwrap();
+    g.accept(Update {
+        edited_at: -75,
+        ..op(
+            4,
+            Action::Edit,
+            &[1],
+            vec![(Field::Body, Value::Body("concurrent".into()), vec![1])],
+        )
+    })
+    .unwrap();
+
+    let current = g.snapshot(content_id()).unwrap();
+    assert_eq!(current.content.body, "second");
+    assert_eq!(current.last_edited_at, -50);
+    assert_eq!(
+        g.snapshot_at(content_id(), &ids(&[2]))
+            .unwrap()
+            .last_edited_at,
+        5000
+    );
+
+    let field = attr("test", "title");
+    g.accept(op(
+        5,
+        Action::Edit,
+        &[1],
+        vec![(
+            field.clone(),
+            Value::Attribute(AttributeValue::Null),
+            vec![],
+        )],
+    ))
+    .unwrap();
+    assert_eq!(g.snapshot(content_id()).unwrap().last_edited_at, 5);
+    g.accept(op(
+        6,
+        Action::Edit,
+        &[5],
+        vec![(field, Value::Absent, vec![5])],
+    ))
+    .unwrap();
+    let unset = g.snapshot(content_id()).unwrap();
+    assert!(unset.content.attributes.is_empty());
+    assert_eq!(unset.last_edited_at, 6);
+}
+
+#[test]
 fn materializes_typed_content_and_preserves_absence_distinctions() {
     let mut g = graph();
     assert!(g.snapshot(content_id()).is_none());
