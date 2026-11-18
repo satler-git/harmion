@@ -1,0 +1,22 @@
+[package]
+name = "harmion-client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+harmion-protocol = { path = "../protocol" }
+harmion-local = { path = "../local" }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+getrandom = "0.3"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+[lints]
+workspace = true

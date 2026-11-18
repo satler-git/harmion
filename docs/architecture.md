@@ -2,7 +2,9 @@
 
 更新日: 2026-11-18
 
-[仕様](specification.md)と[内部設計](internal-design.md)を実装するための構成。ユーザーからの設計委任に基づく初期選定であり、ここに挙げたcrate・実行ファイルはまだ作成していない。実装の細かな型・ライブラリバージョン・wire形式は実装時に確定する。
+実装上の更新: native管理クライアントの最初の入口は、下記の当初候補のHTTP/WSではなく、証明書を固定したloopback HTTPSとした。ポート再利用時の別プロセスへ資格情報を送らないため、SDKはTLS検証とleaf完全一致を確認してからBearerを送る。`crates/local`はdaemonとSDKが共有するUnix所有者限定ファイル操作だけを持つ。ブラウザOAuth・WS・JSON-RPCはまだ実装していない。
+
+[仕様](specification.md)と[内部設計](internal-design.md)を実装するための構成。ユーザーからの設計委任に基づく初期選定。現在の実装範囲は[進捗・レビュー記録](implementation-progress.md)を参照。実装の細かな型・ライブラリバージョン・wire形式は実装時に確定する。
 
 ## 1. Rustを中心にする
 
