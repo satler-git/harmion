@@ -2,9 +2,11 @@
 
 pub mod access;
 pub mod application;
+pub mod export;
 pub mod membership;
 pub mod membership_log;
 pub mod membership_state;
+pub mod oauth;
 pub mod query;
 pub mod replication;
 pub mod storage;
@@ -31,9 +33,12 @@ pub enum Error {
     RequestIdReuse,
     AlreadyBootstrapped,
     InvalidRequest,
+    OAuthInvalidGrant,
+    OAuthCapacity,
     QueryExpired,
     QueryCapacity,
     QueryItemTooLarge,
+    ExportBusy,
     SubscriptionCapacity,
     Entropy(String),
     PeerRetired,

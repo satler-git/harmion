@@ -2,7 +2,7 @@
 
 一人のユーザーが所有する、アプリから独立した個人データ基盤。
 
-Rustで初期実装を進めています。Content・SQLite保存・App HTTPS API・daemon/CLI・HTTPS/irohのPeer同期、署名付き参加・退役・却下証明の伝播を実装しています。5つの独立プロセスで中継・分断・再起動・周期同期を検証し、管理情報の伝播・保留・所有者回復は別の実プロセステストで確認します。irohのEndpoint IDによる認証とIP変更後の再接続も検証しています。OAuth・ブラウザ連携・DOは未実装です。次の文書は、実装済み範囲を超える仕様と設計方針を含みます。
+Rustで初期実装を進めています。Content・SQLite保存・App HTTPS API・daemon/CLI・HTTPS/irohのPeer同期、署名付き参加・退役・却下証明の伝播を実装しています。nativeではQuery/Subscribe、所有者向けExport、専用CAを使うブラウザOAuthも利用できます。5つの独立プロセスで中継・分断・再起動・周期同期を検証し、管理情報の伝播・保留・所有者回復は別の実プロセステストで確認しています。DOは未実装です。各機能の範囲は[実装全体レビュー](docs/implementation-review.md)を参照してください。
 
 ネイティブの App HTTPS と Rust SDK は、固定スナップショットの Query、初回取得と変更通知をつなぐ Subscribe、購読キャッシュを提供します。
 

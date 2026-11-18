@@ -93,12 +93,16 @@ impl ProtectedDir {
         }
         Ok(bytes)
     }
-    pub fn write_new(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
-        let mut file = options()
+    pub fn create_file(&self, name: &str) -> io::Result<File> {
+        let file = options()
             .write(true)
             .create_new(true)
             .open(self.file_path(name)?)?;
         check(&file.metadata()?, false)?;
+        Ok(file)
+    }
+    pub fn write_new(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        let mut file = self.create_file(name)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         File::open(&self.root)?.sync_all()

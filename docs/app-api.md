@@ -2,7 +2,7 @@
 
 更新日: 2026-11-18
 
-現在のnative実装: 証明書を固定したloopback HTTPSの`POST /app/v1/{operation}`を使用する。保存要求はHRQ-v1、返却値は明示的なJSON viewであり、内部snapshotの直接serializeはしない。Hostを検査しOrigin付き要求を拒否するため、現段階はnativeクライアント専用。下記のOAuth・ブラウザ・WS契約は未実装で、capabilitiesもOAuth非対応を返す。初期HTTP案からの変更と検証結果は[進捗記録](implementation-progress.md)を参照。
+現在のnative実装では、証明書を固定したloopback HTTPSの`POST /app/v1/{operation}`を使う。保存要求はHRQ-v1で、返却値は明示的なJSON view。App APIはHostを検査しOrigin付き要求を拒否する。ブラウザで行うOAuth認可には専用のHTTPS入口を使う。有効にしたノードのcapabilitiesは `oauth: true` と `oauth_origin` を返す。
 
 会話で合意した取得・編集・購読・OAuthの契約。公開済みの Query・Subscribe の転送形式はそれぞれの節に記録する。未公開のメソッドの転送形式・期限・サイズは実装時に定める。
 
@@ -30,7 +30,7 @@ editはContent ID、編集トークン、request_id、変更項目を受け取�
 - 同一request_idでの同じ要求は元の保存結果を返す。別要求への使い回しはエラー。
 - トークンは権限を付与しない。保存時に現在のWriteを検査する。
 
-保存成功はローカル永続化の成功であり、その値が通常表示に選ばれることを保証しない。保存結果は更新IDと保存完了を返し、Readがあれば保存直後の通常値・新しい編集トークン・競合情報も返す。Writeのみには本文を含まない受領結果を返す。SDKはアプリの編集バッファを勝手に上書きしない。
+保存成功はローカル永続化の成功であり、その値が通常表示に選ばれることを保証しない。HTTP 200 の保存結果は `update_id` と `saved: true` を返す。Readがあり、応答の上限内に収まるときは、`view` に保存直後の通常値・新しい編集トークン・競合情報を返す。閲覧できる `view` が上限を超える場合は `view: null` と `view_error: "response_too_large"` を返す。同じ要求を再送しても、元の更新IDと保存完了を取得できる。SDKは編集バッファを保持する。
 
 get_conflictsは権限内の候補と解決トークンを返す。resolveは解決する項目と候補を明示して新しい更新を作る。候補の一つをそのまま選ぶ場合も新しい解決更新とする。複数項目を一度に解決できるが、取得した全競合を自動的に対象にしない。未確認の並行更新は残す。
 
@@ -98,32 +98,34 @@ SDKは通知を適用してから対応カーソルを保存する。購読キ�
 
 capabilitiesはAPI版・対応操作・上限、permissionsは自分のgrantを返す。sync_statusは到達状況や複製確認を返し、ローカル保存成功と区別する。
 
+ネイティブの管理者は `POST /app/v1/export` で固定時点の本文、属性・kind、競合候補、削除記録を取得できる。転送形式とCLI出力は [Export v1](../contracts/export-v1.md) を参照。
+
 Interpreterのcallは渡された入力を計算し、Query/Subscribeを暗黙に実行しない。デフォルトQueryとユーザー条件は通常ANDで絞り、置き換えは明示指定とする。提供元と呼び出し元の契約・型定義・エラー詳細は実装時に定める。
 
 ## 5. OAuthとローカル構成
 
-各ノードが自分へのアプリ接続を認可する。原則public clientとし、埋込み共通client secretを使わない。Authorization Code＋PKCE S256、短命な不透明access token、発行するrefresh tokenのローテーションを基本とする。トークン・grantは発行ノード限定で、同期しない。
+各ノードがnative public clientを Authorization Code＋PKCE S256 で認可する。登録、grant、コード、トークンは発行ノードに保存する。管理権限はOS所有者のbootstrap経路で設定し、OAuthはReadとWriteを発行する。
 
-1. アプリを登録してclient_idを得る。登録だけではデータアクセスを許可しない。
-2. 権限・redirect URI・PKCE challengeを指定して認可を開始する。
-3. 所有者がHarmion側でアプリと要求権限を確認して承認する。
-4. 短命・一回限りのコードを返し、アプリがverifierとともにトークンへ交換する。
-5. App APIでaccess tokenと現在のgrant・ContentのFilterを検査する。
+### 登録と認可
 
-名前やclient_idだけでアプリの真正性を保証せず、同じ名前のアプリへ既存grantを自動付与しない。refreshによる権限拡大は認めず、追加権限は再承認する。grant縮小・失効は既存tokenとSubscribe/Provider接続へ反映する。
+1. ManageAppsを持つ所有者がApp APIの `oauth-register` を呼ぶ。JSONに `name` と `redirect_uri` を指定し、応答の `client_id`、`authorization_endpoint`、`token_endpoint` をアプリに渡す。登録時の権限は空。
+2. アプリがブラウザで `GET /oauth/authorize` を開く。必須パラメーターは `response_type=code`、`client_id`、`redirect_uri`、`state`、`scope`、`code_challenge`、`code_challenge_method=S256`。アプリは高エントロピーのverifierとstateを生成し、受け取ったstateを照合する。
+3. 所有者が画面に表示された要求IDをCLIの `oauth-consent` に渡し、応答のリンクをブラウザで開く。リンクは要求と管理資格情報に結び付け、2分以内かつ一度の承認・拒否に限って使える。画面で名前、client ID、callback、grantを確認する。元の要求の期限は5分。
+4. 承認時はcallbackに `code` と `state` を返す。拒否時は `error=access_denied` と `state` を返す。
+5. アプリは `POST /oauth/token` にフォーム形式で `grant_type=authorization_code`、`client_id`、`code`、`redirect_uri`、`code_verifier` を送る。redirect URIは手順2と同じ文字列にする。応答の `access_token` をApp APIへの `Authorization: Bearer ACCESS_TOKEN` に使う。応答には `token_type=Bearer`、`expires_in`（秒）、`refresh_token`、`scope` も含まれる。
 
-最初の管理grantはOSユーザーだけが使えるbootstrap手段から付属管理ツールへ渡す。その後は同じApp APIを使う。認可画面を開けるだけで承認できるようにはせず、所有者の認証状態に結び付ける。管理権限を認可対象アプリへ渡さない。
+callbackには `http://127.0.0.1:PORT/PATH` や `http://[::1]:PORT/PATH` など、IPリテラルのloopback HTTPを使う。登録時と認可時でIP、パス、クエリを照合し、アプリはOSが選んだポートを認可時に指定できる。callbackのHTTP例外はRFC 8252に従う。認可、トークン交換、App APIはHTTPSで行う。
 
-初期版は端末内のloopback HTTP/WSを選び、OAuthの認可・token endpointのTLS要件から外れるローカル専用構成として明記する。RFCのloopback HTTP redirectの例外が認可サーバー全体に適用される、とは解釈しない。外部通信はHTTPSまたはirohで暗号化する。完全なOAuth標準準拠を主張しない。
+scopeは空白区切りで `read:all`、`write:all`、`read:kind:BASE64URL`、`write:kind:BASE64URL` を指定する。`BASE64URL` はkind名のUTF-8をパディングなしで符号化する。kind集合には同じ操作のkind scopeを複数指定する。同じ操作のallとkindは排他的。grantは登録単位で、異なるscopeへの再承認は既存の資格情報を失効させる。管理者はApp APIの `change-grants` で縮小・失効できる。拡大には改めて所有者の承認を要する。
 
-- loopbackのみで待受け、LAN公開を単純な設定変更では許可しない。
-- SDKはOS保護された接続情報を使い、発見したポートだけを信用して保存済みtokenを送らない。
-- Host/Origin/CSRF検査を行い、任意のWebサイトから管理操作させない。
-- 永続tokenをURLやログへ残さない。
-- 同一OSユーザーの悪意あるプログラムからの隔離は保証しない。PKCEを接続の暗号化・ノード本人確認の代替にしない。
+### トークン
 
-このローカル構成を対象ブラウザ・OAuthライブラリが扱えるか、別OSユーザーからのアクセスをどう防ぐかは早期試作で検証する。接続情報の保護だけでポート再利用・なりすましの全問題を解決できるとは扱わない。
+コードは60秒、access tokenは最長10分、refresh tokenの系列は初回発行から最長30日。refreshは `grant_type=refresh_token`、`client_id`、`refresh_token` を同じtoken endpointに送る。消費済みrefresh tokenを再送すると、その系列のaccess tokenとrefresh tokenが失効する。有効期限内の消費済みコードの再送も、同じクライアント・redirect・PKCEを照合できた場合は、そのコードが発行した系列を失効させる。消費、ローテーション、再利用時の失効は発行ノードのDBトランザクションで処理する。App APIとSubscribeは資格情報の期限と現在のgrantを検査する。
 
-OAuth実装はoxide-authを第一候補、Rust SDKはoauth2を候補とし、採用条件はarchitectureの12節を参照。実装時にはscopeとFilterの符号化、redirect登録、期限、refresh再利用検出、失効と永続化の原子性を確定する。
+### ブラウザの信頼
 
-参照: [RFC 6749](https://www.rfc-editor.org/rfc/rfc6749.html)、[RFC 8252](https://www.rfc-editor.org/rfc/rfc8252.html)、[RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html)。
+ブラウザ用HTTPSは `127.0.0.1` に限定した専用リスナーで、既存App・Peer用の証明書と分ける。所有者がノードで生成した専用CAを直接取得し、使うブラウザでWebサイト識別用に明示的に信頼する。CAはloopbackのIP制約と下位CAの禁止を持ち、署名鍵はサーバー証明書を1枚発行した後に破棄する。ノードに残るのは有効期間1年のサーバー証明書とその秘密鍵、および公開CA証明書。導入・更新手順は[native実行手順](native-quickstart.md#oauthを有効にする)を参照。
+
+認可サーバーはHostを検査し、承認操作には同一originと一時リンクを要求する。トークン交換はnativeアプリからのHTTPSリクエストで行う。アプリはトークンをOSで保護し、URLやログへ載せない。クライアント名とIDは登録を識別するための値であり、所有者は自分が開始した要求を確認する。同じOSユーザーとして動くプログラムは所有者と同じ信頼境界にある。動的クライアント登録、ブラウザからの直接App API、外部公開用の認可サーバーは今後の範囲とする。
+
+[RFC 6749](https://www.rfc-editor.org/rfc/rfc6749.html)、[RFC 7636](https://www.rfc-editor.org/rfc/rfc7636.html)、[RFC 8252](https://www.rfc-editor.org/rfc/rfc8252.html)、[RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html)。

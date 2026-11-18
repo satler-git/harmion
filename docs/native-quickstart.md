@@ -1,6 +1,6 @@
 # native 複数ノード同期の実行
 
-現時点はUnix用のnative管理CLI。署名付き参加・退役・却下証明をノード間で伝播する。OAuth、ブラウザ、query/subscribe、Interpreter、DOは未実装。CLIはDBを開かず、所有者限定ファイルから接続先と管理credentialを読み、証明書を固定したloopback HTTPSで操作する。
+Unix用のnative管理CLIで、署名付き参加・退役・却下証明をノード間で伝播する。Query/Subscribeと、任意で有効化するブラウザOAuthを提供する。InterpreterとDOは未実装。CLIは所有者限定ファイルから接続先と管理資格情報を読み、証明書を固定したloopback HTTPSで操作する。
 
 ## 起動と参加
 
@@ -40,7 +40,29 @@ target/debug/harmion --node ./node-a sync NODE_B_ID
 
 `admin.secret`・`private-key.der`・`iroh.secret`は交換しない。管理資格情報は所有者bootstrap用で、OAuth access tokenではない。
 
-起動時にSQLite DBをschema v8へ移行する。旧DBの検索索引と項目の版参照は保持している更新から作る。Subscribeの変更履歴には移行後の更新を記録する。schema v4以前から移行した旧クラスタでは、起点にする1台だけを所有者が選び、`run DIR --bootstrap-cluster-root true`で共通の初期信頼証明を作る。他ノードは新しいv3登録でapprove/joinし直す。無署名だった既存Peerを、署名検証鍵を確認せず自動的に他端末へ紹介しない。データ・アプリ資格情報・データcursorは維持する。
+起動時にSQLite DBをschema v9へ移行する。旧DBの検索索引と項目の版参照は保持している更新から作る。Subscribeの変更履歴には移行後の更新を記録する。schema v4以前から移行した旧クラスタでは、起点にする1台だけを所有者が選び、`run DIR --bootstrap-cluster-root true`で共通の初期信頼証明を作る。他ノードは新しいv3登録でapprove/joinし直す。無署名だった既存Peerを、署名検証鍵を確認せず自動的に他端末へ紹介しない。データ・アプリ資格情報・データcursorは維持する。
+
+## OAuthを有効にする
+
+ノードを停止した状態で、所有者が専用CAとサーバー証明書を発行する。初期状態ではOAuthの待受けを無効にしている。
+
+```sh
+target/debug/harmiond oauth-provision ./node-a > node-a-oauth-root.pem
+target/debug/harmiond run ./node-a --oauth-listen 127.0.0.1:0
+```
+
+標準出力の `oauth_origin` にHTTPS originが表示される。ポートは再起動後も維持する。公開CAを再取得するには `harmiond oauth-root ./node-a` を使う。サーバーの秘密鍵を含む `oauth-identity.json` はノードディレクトリー内に保管する。
+
+認可の前に、所有者が生成した `node-a-oauth-root.pem` を、使うブラウザのWebサイト用CAとしてインポートする。Firefoxでは設定の「プライバシーとセキュリティ」から「証明書を表示」 → 「認証局証明書」 → 「インポート」と進み、Webサイトの識別を信頼する。ブラウザがOSの証明書ストアを使う環境では、利用ユーザーの信頼ストアを使う。token endpointを呼ぶアプリにも同じPEMを設定する。App APIにはSDKの証明書固定接続を使う。
+
+```sh
+target/debug/harmion --node ./node-a oauth-register "My app" http://127.0.0.1/callback
+target/debug/harmion --node ./node-a oauth-consent REQUEST_ID
+```
+
+アプリは登録時に返された認可URLを [App APIのOAuth契約](app-api.md#5-oauthとローカル構成) に沿って開く。2つ目のコマンドは、所有者がブラウザに表示された要求IDを確認して実行する。表示されたリンクは所有者が承認または拒否のためにそのブラウザで開く。Rust SDKでのApp API接続には、ノードディレクトリーとaccess tokenを `Client::from_directory_with_token` に渡す。
+
+証明書の有効期間は発行から1年。期限前にノードを停止し、`harmiond oauth-provision ./node-a --replace > node-a-oauth-root.pem` で入れ替える。新しいPEMをブラウザとアプリに登録し、古いCAを信頼ストアから削除する。OAuthの待受けを停止するには `run DIR --oauth-listen off` を使う。発行済み資格情報はApp APIの `change-grants` で失効できる。
 
 ## 作成・取得・再送
 
@@ -98,6 +120,29 @@ target/debug/harmion --node ./recovery approve ./node-b/peer.json
 
 自ノードからの自動同期は起動時、Contentの新規保存が確定したとき、および周期照合で行う。周期は標準30秒で、`--sync-seconds 1`等で変更できる。0では自ノードからの開始は手動操作に限り、認証済みPeerからの同期は受け付ける。到達不能なPeerは保存後も最大1時間のbackoffとjitterに従い、状態が変化した時だけstderrへ記録する。SIGINT/SIGTERMで接続taskと同期taskを停止する。再起動後もID・鍵・ログ・cursor・編集token・再送結果を保持する。
 
+## 古いノードバックアップからの復元
+
+停止したノードのディレクトリのバックアップから、受理済みのContent履歴を新しいノードに復元する。手順では復元先に新しいNode ID・ログ世代・鍵を作る。元のNode IDと受領済みログ位置を再利用すると、相手が更新を受領済みと扱うことがある。
+
+```sh
+target/debug/harmiond restore ./offline-backup ./restored-node
+target/debug/harmiond run ./restored-node
+```
+
+復元先は未作成のディレクトリを指定する。入力はノードディレクトリのバックアップ。復元するデータは、更新IDを維持した本文・属性・kind・競合・削除を含む受理済み履歴。資格情報、アプリ登録、同期カーソルと参加状態は新しいノードのものを使う。OAuthが必要なら新しいノードで設定する。
+
+既存クラスタへは、有効なノードで `approve`、復元先で `join` してから `sync` する。この同期でバックアップにだけあった更新とクラスタ側にだけあった更新も突き合わせる。有効なノードが残っていない場合でもローカルのContentは復元できる。元クラスタへの再参加には有効な承認元が必要。
+
+## Export
+
+新しい出力ディレクトリを指定して管理者用 CLI から実行する。
+
+```sh
+target/debug/harmion --node ./node-a export ./harmion-export
+```
+
+本文は `bodies/`、現在値・候補・削除記録は `metadata.jsonl` に入る。完了後に `manifest.json` が作られる。ディレクトリとファイルの読み書きは所有者に限定する。 [Export v1の形式](../contracts/export-v1.md)
+
 ## 検証
 
 ```sh
@@ -106,6 +151,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
 python3 design_checks/two_process_sync.py
+python3 design_checks/restore_process.py
 cargo build -p harmion-net-native --example local_relay
 python3 design_checks/two_process_sync.py --iroh
 python3 design_checks/multi_process_sync.py --iroh

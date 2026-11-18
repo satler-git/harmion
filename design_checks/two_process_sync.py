@@ -26,20 +26,23 @@ def command(*args, ok=True):
 
 
 class Node:
-    def __init__(self, path, cluster=None):
+    def __init__(self, path, cluster=None, *, backup=None):
         self.path, self.process, self.counter = path, None, 0
         args = [DAEMON, "init", path]
-        if cluster:
+        if backup is not None:
+            assert cluster is None
+            args = [DAEMON, "restore", backup, path]
+        elif cluster:
             args += ["--cluster", cluster]
         self.identity = command(*args)
         self.log = open(path / "test-stderr", "w+")
         os.chmod(path / "test-stderr", 0o600)
 
-    def start(self, interval=0):
+    def start(self, interval=0, extra_options=()):
         assert self.process is None
         options = ["--peer-transport", "https"] if RELAY_URL is None else ["--peer-transport", "iroh", "--relay-url", RELAY_URL, "--discovery", "none"]
         self.process = subprocess.Popen(
-            [str(DAEMON), "run", str(self.path), *options, "--sync-seconds", str(interval)],
+            [str(DAEMON), "run", str(self.path), *options, "--sync-seconds", str(interval), *extra_options],
             stdout=subprocess.PIPE, stderr=self.log, text=True,
         )
         with selectors.DefaultSelector() as selector:

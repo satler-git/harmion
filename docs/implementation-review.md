@@ -10,7 +10,7 @@
 
 - §9.3 のローカル保存後の同期は R16 に記録した。OS復帰・ネットワーク復帰・相手の更新通知は未実装。
 - §6.1 の Query は条件と参照評価器を R17、保存層の検索を R18、固定スナップショットと App API・SDK への接続を R19 に記録する。Subscribe は R20 に記録する。
-- §4.3・§5 の標準解決ツール、§6 のOAuth、§7 のInterpreter、§9 のCloudflareノード、§10 のExportは実装作業が残る。特にOAuthを載せるローカル入口、Cloudflareのノード認証と初期管理資格情報、Exportの権限・出力範囲には未決定事項がある。[未解決の設計論点](review.md#4-残る境界注意点新たな確定仕様ではない)
+- §6 のnative OAuthはR22に記録する。§4.3・§5 の標準解決ツール、§7 のInterpreter、§9 のCloudflareノードは実装作業が残る。Cloudflareのノード認証と初期管理資格情報は設計が残る。[未解決の設計論点](review.md#4-残る境界注意点新たな確定仕様ではない)
 
 ## 確認範囲
 
@@ -26,14 +26,15 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 | §5 全履歴保持・管理向け取得 | 部分実装 | 不変recordは保持。inspectは現在の削除状態と候補を返すが、共通祖先の専用取得はない |
 | §6 Query/Subscribe | native App API・Rust SDKを実装 | R17〜R20参照。固定結果のページ取得、初回取得、変更の再開、再認可、キャッシュを実装 |
 | §6 Read/Write/Manage権限 | 実装 | `node::access/application`。grant/credential/token/request_resultは同期対象外 |
-| §6 OAuth | 未実装 | 管理bootstrapと手動issue-appが先行 |
+| §6 OAuth | native実装 | R22参照。HTTPS、登録、所有者承認、PKCE、refreshと失効。ブラウザでCAの設定が必要 |
 | §6 OS所有者保護 | Unix実装、Linux検証 | `local::ProtectedDir`。Windows/Androidの保護・lifecycleはない。同一OSユーザーを信頼する前提は仕様と一致 |
 | §7 Interpreter | 未実装 | 登録、仲介、Call/Provide、Provider接続なし |
 | §8 参加・退役の伝播 | 実装・検証済み | 共通の初期信頼証明、署名付きAdmit/Retire/Dismiss、管理ログ・保留・所有者回復。R01参照 |
+| §8 古いノードバックアップからの復元 | native 実装 | 新しい Node ID で Content 履歴を復元し、有効なノードから承認を受けて再参加する。R23参照 |
 | §9 端末間iroh・通信と意味の分離 | 実装、検証範囲限定 | `sync::PeerTransport`とHTTPS/iroh adapter。ローカルIP変更、リレーのみ、独立2プロセスを検証 |
 | §9 同期契機 | 部分実装 | 起動・周期・手動・backoffに、ローカル保存確定後の自動同期を追加（R16）。OS復帰・ネットワーク復帰・相手の更新通知は未接続 |
 | §9 Cloudflare | 未実装 | worker crate/DO adapterなし。現在のHTTPSをCloudflare対応済みと呼ばない |
-| §10 Export | 未実装 | 初期仕様に必要。DBファイルのコピーやHRQ要求ファイルはexportではない |
+| §10 Export | ネイティブ App API・管理CLI実装 | R21参照。本文、通常値、競合候補、削除記録を固定時点で出力 |
 
 ## 指摘・暫定対応の台帳
 
@@ -57,16 +58,15 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - 検証: `sync_transport::an_unresponsive_peer_does_not_lock_out_another_peer`で永遠に返らないPeerと別Peerの同期を同時に開始し、後者が進むことを確認。`design_checks/multi_process_sync.py --iroh`では5実プロセス中1台停止中にも、別経路で周期同期が進み、停止台の再起動後に追いついた。
 - 残る制限: 固定highは更新流入によるラウンド延長を防ぐが、履歴ページ数に比例した全体時間は制限しない。DBを共有するため、重い再projectionの影響はR03として残る。
 
-### R03 — 全ログの再読込・再構築を毎回行う
+### R03 — 保存・同期データ処理の全ログ再読込
 
-- 種別: 参照実装としての暫定方式。優先度: 中。状態: 残す。
-- 根拠: `storage::read_graph/accept_records`、`replication::high/page`は`tx.entries()`を使う。SQLite entriesは全recordをdecodeする。受理時も既知IDのmapを全体から作る。管理情報も全ログから参加状態を再構築し、署名を再検証する。
-- 影響: 履歴が増えるとCPU・メモリ・transaction保持時間が増える。5台上限でもデータ量の上限にはならない。
-- 解消条件: seq範囲・update ID照会用port、永続projection/索引、性能測定。全履歴保持自体は初期仕様どおりであり、勝手な履歴削減で回避しない。
+- 状態は主要経路を修正済み。保存と同期受理は対象Contentの履歴だけを読み、update IDの重複をSQLiteの一意索引で検査する。同期の上限位置とページは受理ログの位置から求め、件数・バイト上限内のレコードだけを読み出す。
+- 同じローカルデバッグビルドの測定で、約500件蓄積時の保存中央値は約61 msから約4 ms、差分ゼロの同期は約294 msから約184 msになった。本文は4 KiBで、端末間の実容量や長期運用の上限は未測定。
+- 起動時の完全性確認、参加状態の再構築、個々のContent内の履歴再構築は残る。全履歴は保持する。
 
 ### R04 — JSON返却を全生成してからサイズを制限する
 
-- 種別: リソース制限の不足。優先度: 中。状態: 未修正。
+- 保存応答は修正済み。本文と属性を別々に保存して表示が8 MiBを超えると、コミット済みにもかかわらず保存も再送もHTTP 413になっていた。現在はHTTP 200で元の更新IDと `saved: true` を返す。表示が上限を超える場合は `view: null` と `view_error: "response_too_large"` を返す。[App HTTPSテスト](../crates/net-native/tests/app_https.rs)
 - 根拠: `app::response`は`serde_json::to_vec`の後に8MiB制限。`application::get/read_conflicts`では先に全snapshotとtokenを作る。
 - 影響: 各recordが1MiB以内でも、長い履歴で増えた属性・競合候補の集合は8MiBを超え得る。返却は拒否できるが生成メモリを制限できず、取得でtokenだけが増えることもある。
 - 解消条件: 読出し集合・候補のページング/予算、JSON生成時の上限。保存済みデータを切り捨てて成功応答にする回避は禁止。
@@ -91,12 +91,12 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - 種別: 明示した設計変更。状態: 維持。
 - 根拠: loopback HTTPS、POSTの固定route、保存HRQ binary、明示JSON view。Origin付き要求を拒否する。
 - 理由: native管理CLIを先行し、ポート再利用時の資格情報漏洩を防ぐため証明書を固定。architecture/app-apiに差を明記済み。
-- 制約: ブラウザ・OAuth・WS対応を実装したことにはならない。後からnative専用経路を一般アプリ契約と混同しない。
+- 制約はnative App APIに適用する。OAuth認可にはR22の別のHTTPS入口を使う。App APIのブラウザ直接呼び出しとWSは未実装。
 
 ### R08 — 管理CLIは本文中心で、一般アプリSDKも薄い
 
 - 種別: 未実装／暫定UX。状態: 残す。
-- 根拠: CLIのedit/resolve/restoreはBodyのみ。restoreは既知属性/kindを消す。SDKの個別Contentの取得結果はJSON Valueで、OAuthは未実装。型付きQuery要求、購読の状態管理とキャッシュはR19・R20で追加。
+- 根拠: CLIのedit/resolve/restoreはBodyのみ。restoreは既知属性/kindを消す。SDKの個別Contentの取得結果はJSON Value。型付きQuery要求、購読の状態管理とキャッシュはR19・R20で追加。
 - 影響: Coreの属性/kind操作が存在しても、標準ツールで全操作できるわけではない。restoreの省略値を保持するようCoreの意味を変えて隠さず、現在の制約をhelp/手順に明記する。
 
 ### R09 — エラーの診断情報がAPI境界で失われる
@@ -196,6 +196,27 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - 期限・再起動・grantの変更・変更履歴の保持超過では `reset_required`。資格情報を失効させた場合は HTTP 401。Cloudflare側は別途保存・ホストアダプタを実装する。[ネイティブのSubscribe](app-api.md#ネイティブの-subscribe)
 - 検証では、初回取得中の複数編集の集約、応答再取得、kind変更でのIDのみの削除通知、同じ値に戻したgrant変更、保持範囲超過、初回確定までのSDKの仮状態、順序の逆転、Peerのpushとpullによる待機解除、ノード再起動後のresetを確認した。[SQLiteの購読テスト](../crates/store-sqlite/tests/application.rs) [HTTPSのPeer同期テスト](../crates/net-native/tests/https_sync.rs)
 - 最終確認でRustテスト94件、Clippy、fmt、HTTPS・irohの実daemonの2プロセス同期検証が通過した。
+
+### R21 — 所有者向けExport
+
+- CLIは新規の所有者用ディレクトリに本文とメタデータを書き、転送終端を確認した後にマニフェストを公開する。対象範囲、各レコードの意味と、出力の読み方を [Export v1](../contracts/export-v1.md) に記録した。
+- 起点の受理ログ位置を固定し、Contentごとに索引から履歴を読み出す。取得単位で管理者権限を再確認し、DBの排他中にネットワークの読み手を待たない。
+- 保存された削除記録は復元済みの操作も含む。通常表示から外れた解決済み本文、認可・資格情報、同期の運用状態は出力範囲外。
+- 実daemon・CLIで、合計8 MiBを超える転送、UTF-8本文のバイト一致、未解決候補と削除記録、所有者用の権限、既存出力先の保持を確認した。Rustテストでは出力開始後の編集の隔離、権限失効、終端の欠落・件数不一致、属性の精度を検証した。[実プロセス検証](../design_checks/export_process.py)
+
+### R22 — native OAuth
+
+- 所有者が登録したnative public clientをAuthorization Code＋PKCE S256で認可する。既存管理資格情報で発行した単回リンクにブラウザの承認を結び付け、OAuthではRead・Writeを付与する。
+- OAuthは別のloopback HTTPSリスナーで提供し、初期状態では無効。所有者は専用CAをブラウザとトークン交換クライアントに登録する。CAの署名鍵はサーバー証明書の発行後に破棄する。[有効化と更新の手順](native-quickstart.md#oauthを有効にする)
+- SQLite schema v9にノードローカルの登録・認可・資格情報を格納する。コードとrefreshの単回消費、再利用時の系列失効、grantの再承認をトランザクションで処理する。SDKは取得済みaccess tokenで既存App APIへ接続できる。
+- 実daemon・CLIで、未信頼CAの拒否、正しいCAでのHTTPS、承認と拒否、不正Origin・redirect・PKCEの拒否、kind権限、再起動後のrefresh、再利用・縮小・管理者失効を確認した。RustのSQLiteテストでIPv6 callback、期限、旧schemaからの移行を確認した。[実プロセス検証](../design_checks/oauth_process.py)
+- 一時Firefoxプロファイルに専用CAを登録し、HTTPSの認可画面を表示して承認し、loopback callbackで受け取ったコードをトークンに交換できた。ほかのブラウザとOAuthクライアントライブラリの互換性は未検証。
+
+### R23 — 古いバックアップ復元時のログ位置再利用
+
+- 古いノードディレクトリを元の Node ID のまま起動すると、新しい保存が相手の受領済みログ位置に入り、同期成功後も相手へ届かないことを2ノードで確認した。
+- 仕様§8に従い、`harmiond restore BACKUP_DIR NEW_DIR` はバックアップの受理済み履歴を読み、新しい Node ID、ログ世代、鍵、資格情報で復元する。元のノードディレクトリの直接起動にはこの復旧処理が適用されない。[復元手順](native-quickstart.md#古いノードバックアップからの復元)
+- 実daemonで、有効なノードから再承認を受け、バックアップにだけある更新と既存ノードにだけある更新を双方で取得し、復元先の新規保存も同期できることを確認した。[実プロセス検証](../design_checks/restore_process.py)
 
 ## 基準時点の複数ノード同期の検証条件
 

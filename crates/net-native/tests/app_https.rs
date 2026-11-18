@@ -125,6 +125,15 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
         .await
         .unwrap();
     let reader = Client::new(info, unhex(issued["credential"].as_str().unwrap()).unwrap()).unwrap();
+    let mut export_records = 0;
+    let export = reader
+        .export(|_| {
+            export_records += 1;
+            Ok(())
+        })
+        .await;
+    assert!(matches!(export, Err(harmion_client::Error::Http(403))));
+    assert_eq!(export_records, 0);
     assert_eq!(
         reader.get(content).await.unwrap()["content"]["body"],
         "initial"
@@ -221,6 +230,39 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
         client.subscription_next(&mut owner_sub).await.unwrap(),
         Notice::ResetRequired
     );
+    let oversized = ContentId([10; 32]);
+    let create = SaveRequest {
+        request_id: RequestId([11; 32]),
+        content_id: oversized,
+        command: Command::Create {
+            fields: [(Field::Body, Value::Body("\u{1}".repeat(800_000)))].into(),
+        },
+    };
+    let created = client.save(&create).await.unwrap();
+    let edit = SaveRequest {
+        request_id: RequestId([12; 32]),
+        content_id: oversized,
+        command: Command::Edit {
+            token: EditToken(unhex(created["view"]["edit_token"].as_str().unwrap()).unwrap()),
+            fields: [(
+                Field::Attribute {
+                    namespace: "test".into(),
+                    key: "large".into(),
+                },
+                Value::Attribute(AttributeValue::String("\u{2}".repeat(800_000))),
+            )]
+            .into(),
+        },
+    };
+    let receipt = client.save(&edit).await.unwrap();
+    assert_eq!(receipt["saved"], true);
+    assert!(receipt["view"].is_null());
+    assert_eq!(receipt["view_error"], "response_too_large");
+    assert_eq!(client.save(&edit).await.unwrap(), receipt);
+    assert!(matches!(
+        client.get(oversized).await,
+        Err(harmion_client::Error::Http(413))
+    ));
     stop.send(true).unwrap();
     server.await.unwrap().unwrap();
 }

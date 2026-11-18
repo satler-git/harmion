@@ -1,7 +1,9 @@
 //! Native HTTP/TLS host adapters. Shared node semantics remain in harmion-node.
 pub mod app;
+mod export;
 pub mod iroh_peer;
 mod membership_sync;
+pub mod oauth_browser;
 pub mod peer;
 mod subscriptions;
 pub mod sync;
@@ -100,6 +102,7 @@ pub struct SharedStore<S> {
     sync: Arc<Mutex<RoundLocks>>,
     local_save: Arc<tokio::sync::Notify>,
     changes: tokio::sync::watch::Sender<()>,
+    oauth: Arc<std::sync::OnceLock<Arc<oauth_browser::Service>>>,
 }
 impl<S> Clone for SharedStore<S> {
     fn clone(&self) -> Self {
@@ -108,6 +111,7 @@ impl<S> Clone for SharedStore<S> {
             sync: self.sync.clone(),
             local_save: self.local_save.clone(),
             changes: self.changes.clone(),
+            oauth: self.oauth.clone(),
         }
     }
 }
@@ -118,6 +122,7 @@ impl<S: Store + Send + 'static> SharedStore<S> {
             sync: Arc::new(Mutex::new(RoundLocks::new())),
             local_save: Arc::new(tokio::sync::Notify::new()),
             changes: tokio::sync::watch::Sender::new(()),
+            oauth: Arc::new(std::sync::OnceLock::new()),
         }
     }
     /// Wait for a committed App update. The single sync driver can coalesce saves.
@@ -161,15 +166,21 @@ impl<S: Store + Send + 'static> SharedStore<S> {
         &self,
         f: impl FnOnce(&mut S) -> Result<T, harmion_node::Error> + Send + 'static,
     ) -> Result<T, Error> {
-        let inner = self.inner.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut store = inner
-                .lock()
-                .map_err(|_| harmion_node::Error::Storage("DB worker poisoned".into()))?;
-            f(&mut *store)
-        })
-        .await
-        .map_err(transport)?
-        .map_err(Error::Node)
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.run_blocking(f))
+            .await
+            .map_err(transport)?
+            .map_err(Error::Node)
+    }
+
+    pub(crate) fn run_blocking<T>(
+        &self,
+        f: impl FnOnce(&mut S) -> Result<T, harmion_node::Error>,
+    ) -> Result<T, harmion_node::Error> {
+        let mut store = self
+            .inner
+            .lock()
+            .map_err(|_| harmion_node::Error::Storage("DB worker poisoned".into()))?;
+        f(&mut *store)
     }
 }

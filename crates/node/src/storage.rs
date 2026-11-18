@@ -5,13 +5,15 @@ use crate::{
     access::{App, Filter},
     application::{RequestResult, TokenState},
 };
-use harmion_domain::{Acceptance, ClusterId, ContentId, ContentSnapshot, Graph, NodeId};
+use harmion_domain::{
+    Acceptance, Action, ClusterId, ContentId, ContentSnapshot, Graph, NodeId, UpdateId,
+};
 use harmion_protocol::{
     AppId, EditToken, RequestId,
     query::{Condition, QueryCursor},
 };
 use harmion_protocol::{LogEntry, LogEpoch, Record};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, btree_map::Entry};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
@@ -46,7 +48,7 @@ pub trait Store {
 
 /// Storage operations, not application policy. Called only within a transaction.
 /// Full-log reads are the initial reference implementation, not an indexing plan.
-pub trait Transaction {
+pub trait Transaction: crate::oauth::Storage {
     fn membership_identity(
         &mut self,
     ) -> Result<Option<harmion_protocol::membership::Certificate>, Error>;
@@ -83,7 +85,22 @@ pub trait Transaction {
     fn identity(&self) -> Identity;
     fn entries(&mut self) -> Result<Vec<LogEntry>, Error>;
     /// All accepted records for one Content, in local acceptance order.
-    fn content_entries(&mut self, content: ContentId) -> Result<Vec<LogEntry>, Error>;
+    fn content_entries(
+        &mut self,
+        content: ContentId,
+        through: Option<u64>,
+    ) -> Result<Vec<LogEntry>, Error>;
+    fn accepted_high(&mut self) -> Result<u64, Error>;
+    /// Ordered prefix of (after, high] within the replication count and byte budgets.
+    fn accepted_page(&mut self, after: u64, high: u64) -> Result<Vec<LogEntry>, Error>;
+    fn accepted_record(&mut self, id: UpdateId) -> Result<Option<Record>, Error>;
+    /// Includes deleted Content and uses the fixed acceptance position.
+    fn export_content_ids(
+        &mut self,
+        through: u64,
+        after: Option<ContentId>,
+        limit: u32,
+    ) -> Result<Vec<ContentId>, Error>;
     fn append(&mut self, record: &Record) -> Result<u64, Error>;
     /// Maintains the derived search state in the update's acceptance transaction.
     fn put_search_projection(&mut self, snapshot: &ContentSnapshot) -> Result<(), Error>;
@@ -155,7 +172,15 @@ pub(crate) fn read_content_graph(
     tx: &mut dyn Transaction,
     content: ContentId,
 ) -> Result<Graph, Error> {
-    graph_from_entries(tx.identity().cluster, tx.content_entries(content)?)
+    read_content_graph_through(tx, content, None)
+}
+
+pub(crate) fn read_content_graph_through(
+    tx: &mut dyn Transaction,
+    content: ContentId,
+    through: Option<u64>,
+) -> Result<Graph, Error> {
+    graph_from_entries(tx.identity().cluster, tx.content_entries(content, through)?)
 }
 
 fn graph_from_entries(cluster: ClusterId, entries: Vec<LogEntry>) -> Result<Graph, Error> {
@@ -177,17 +202,11 @@ fn graph_from_entries(cluster: ClusterId, entries: Vec<LogEntry>) -> Result<Grap
 /// and any associated cursor/request result writes in one Store::transaction.
 /// App authentication/authorization must be added by application use cases.
 pub fn accept_records(tx: &mut dyn Transaction, records: &[Record]) -> Result<usize, Error> {
-    let mut graph = read_graph(tx)?;
-    let mut known: BTreeMap<_, _> = tx
-        .entries()?
-        .into_iter()
-        .map(|entry| (entry.record.update().update_id, entry.record))
-        .collect();
+    let mut graphs = BTreeMap::new();
     let mut inserted = 0;
-    let mut changed = BTreeSet::new();
     for record in records {
         let update = record.update();
-        if let Some(existing) = known.get(&update.update_id) {
+        if let Some(existing) = tx.accepted_record(update.update_id)? {
             if existing.bytes() != record.bytes() {
                 return Err(Error::RecordRejected {
                     update_id: update.update_id,
@@ -196,18 +215,29 @@ pub fn accept_records(tx: &mut dyn Transaction, records: &[Record]) -> Result<us
             }
             continue;
         }
-        graph
-            .accept(update.clone())
-            .map_err(|reason| Error::RecordRejected {
+        let graph = match graphs.entry(update.content_id) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(read_content_graph(tx, update.content_id)?),
+        };
+        if let Err(mut reason) = graph.accept(update.clone()) {
+            if let harmion_domain::Error::MissingDependency(id) = reason
+                && tx.accepted_record(id)?.is_some()
+            {
+                reason = if update.action != Action::Create && id == update.root_id {
+                    harmion_domain::Error::RootCollision
+                } else {
+                    harmion_domain::Error::InvalidBasis
+                };
+            }
+            return Err(Error::RecordRejected {
                 update_id: update.update_id,
                 reason,
-            })?;
+            });
+        }
         tx.append(record)?;
-        changed.insert(update.content_id);
-        known.insert(update.update_id, record.clone());
         inserted += 1;
     }
-    for content in changed {
+    for (content, graph) in graphs {
         let snapshot = graph.snapshot(content).ok_or(Error::CorruptLog)?;
         tx.put_search_projection(&snapshot)?;
     }

@@ -5,13 +5,15 @@ mod json;
 pub mod membership;
 pub use json::decode_app_json;
 mod discovery;
+pub mod export;
 pub use app_view::{
     ConflictView, ReadView, SaveResult, conflict_view_json, read_view_json, read_view_size,
     save_result_json,
 };
 pub use discovery::{
     ChangeGrantsRequest, ConnectionInfo, FilterSpec, GrantSpec, IssueAppRequest,
-    MAX_APP_RESPONSE_BYTES, PeerBinding, PeerRegistration, TLS_NAME, hex, unhex, unhex_bytes,
+    MAX_APP_RESPONSE_BYTES, OAuthRegistration, PeerBinding, PeerRegistration, TLS_NAME, hex, unhex,
+    unhex_bytes,
 };
 pub use harmion_domain as domain;
 mod peer;

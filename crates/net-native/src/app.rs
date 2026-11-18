@@ -1,9 +1,9 @@
-//! Native-only local App HTTPS endpoint. Browser OAuth is not implemented.
+//! Native App API using pinned loopback HTTPS. Browser authorization has a separate listener.
 use crate::{Error, SharedStore, SystemHost, peer, tls::TlsIdentity, transport};
 use bytes::Bytes;
 use harmion_domain::{ClusterId, ContentId, NodeId};
 use harmion_node::{
-    access::{self, Credential, Filter, Grants},
+    access::{self, Credential},
     application::{self, Host},
     membership,
     storage::Store,
@@ -21,7 +21,7 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
-type Body = Full<Bytes>;
+use crate::export::Body;
 const DEADLINE: Duration = Duration::from_secs(60);
 
 pub async fn serve<S: Store + Send + 'static>(
@@ -58,6 +58,7 @@ pub async fn serve_with_transport<S: Store + Send + 'static>(
     let acceptor = TlsAcceptor::from(Arc::new(identity.tls.app_server_config()?));
     let slots = Arc::new(Semaphore::new(16));
     let subscriptions = Arc::new(crate::subscriptions::Service::new());
+    let export_slot = Arc::new(Semaphore::new(1));
     let mut connections = tokio::task::JoinSet::new();
     loop {
         let (tcp, _) = tokio::select! {
@@ -75,16 +76,21 @@ pub async fn serve_with_transport<S: Store + Send + 'static>(
         let Ok(permit) = slots.clone().try_acquire_owned() else {
             continue;
         };
-        let (acceptor, store, identity, registration, subscriptions) = (
+        let (acceptor, store, identity, registration, subscriptions, export_slot) = (
             acceptor.clone(),
             store.clone(),
             identity.clone(),
             registration.clone(),
             subscriptions.clone(),
+            export_slot.clone(),
         );
         connections.spawn(async move {
             let _permit = permit;
-            let _ = timeout(DEADLINE, async {
+            let (activity, mut progress) = watch::channel(());
+            let idle = async move {
+                while let Ok(Ok(())) = timeout(DEADLINE, progress.changed()).await {}
+            };
+            let serve = async {
                 let tls = acceptor.accept(tcp).await.map_err(transport)?;
                 let service = service_fn(move |request| {
                     respond(
@@ -92,6 +98,7 @@ pub async fn serve_with_transport<S: Store + Send + 'static>(
                         identity.clone(),
                         registration.clone(),
                         subscriptions.clone(),
+                        (export_slot.clone(), activity.clone()),
                         request,
                     )
                 });
@@ -101,8 +108,11 @@ pub async fn serve_with_transport<S: Store + Send + 'static>(
                     .serve_connection(TokioIo::new(tls), service)
                     .await
                     .map_err(transport)
-            })
-            .await;
+            };
+            tokio::select! {
+                _ = serve => {},
+                _ = idle => {},
+            }
         });
     }
 }
@@ -122,7 +132,11 @@ fn response(status: StatusCode, value: Json) -> Response<Body> {
         .header("content-type", "application/json")
         .header("cache-control", "no-store")
         .header("x-content-type-options", "nosniff")
-        .body(Full::new(Bytes::from(bytes)))
+        .body(
+            Full::new(Bytes::from(bytes))
+                .map_err(|never| match never {})
+                .boxed_unsync(),
+        )
         .expect("static headers")
 }
 fn failure(error: Error) -> Response<Body> {
@@ -136,6 +150,8 @@ fn failure(error: Error) -> Response<Body> {
         Error::Node(N::RequestIdReuse) => (StatusCode::CONFLICT, "request_id_reuse"),
         Error::Node(N::QueryExpired) => (StatusCode::GONE, "query_expired"),
         Error::Node(N::QueryCapacity) => (StatusCode::TOO_MANY_REQUESTS, "query_capacity"),
+        Error::Node(N::ExportBusy) => (StatusCode::TOO_MANY_REQUESTS, "export_busy"),
+        Error::Node(N::OAuthCapacity) => (StatusCode::TOO_MANY_REQUESTS, "oauth_capacity"),
         Error::Node(N::SubscriptionCapacity) => {
             (StatusCode::TOO_MANY_REQUESTS, "subscription_capacity")
         }
@@ -157,6 +173,7 @@ async fn respond<S: Store + Send + 'static>(
     identity: Arc<crate::NativeTransport>,
     registration: PeerRegistration,
     subscriptions: Arc<crate::subscriptions::Service>,
+    export: (Arc<Semaphore>, watch::Sender<()>),
     request: Request<Incoming>,
 ) -> Result<Response<Body>, Infallible> {
     if request.method() != hyper::Method::POST
@@ -202,6 +219,17 @@ async fn respond<S: Store + Send + 'static>(
             ));
         }
     };
+    if operation == "export" {
+        if !body.is_empty() {
+            return Ok(failure(invalid().into()));
+        }
+        return Ok(
+            match crate::export::response(&store, credential, export.0, export.1).await {
+                Ok(response) => response,
+                Err(error) => failure(error),
+            },
+        );
+    }
     let result = dispatch(
         &store,
         &identity,
@@ -222,36 +250,6 @@ fn invalid() -> harmion_node::Error {
 }
 fn id(bytes: &[u8]) -> Result<[u8; 32], harmion_node::Error> {
     bytes.try_into().map_err(|_| invalid())
-}
-fn filter(spec: FilterSpec) -> Filter {
-    match spec {
-        FilterSpec::All => Filter::All,
-        FilterSpec::Kinds { kinds } => Filter::Kinds(kinds.into_iter().collect()),
-    }
-}
-fn grants(spec: GrantSpec) -> Grants {
-    Grants {
-        read: spec.read.map(filter),
-        write: spec.write.map(filter),
-        manage_apps: spec.manage_apps,
-        manage_nodes: spec.manage_nodes,
-    }
-}
-fn grant_spec(grants: Grants) -> GrantSpec {
-    fn filter_spec(filter: Filter) -> FilterSpec {
-        match filter {
-            Filter::All => FilterSpec::All,
-            Filter::Kinds(kinds) => FilterSpec::Kinds {
-                kinds: kinds.into_iter().collect(),
-            },
-        }
-    }
-    GrantSpec {
-        read: grants.read.map(filter_spec),
-        write: grants.write.map(filter_spec),
-        manage_apps: grants.manage_apps,
-        manage_nodes: grants.manage_nodes,
-    }
 }
 async fn dispatch<S: Store + Send + 'static>(
     store: &SharedStore<S>,
@@ -407,6 +405,7 @@ async fn dispatch<S: Store + Send + 'static>(
     let signer = identity.membership_signer.clone();
     let local_save = store.local_save.clone();
     let changes = store.changes.clone();
+    let oauth = store.oauth.get().cloned();
     store.run(move |s| {
         let mut host = SystemHost;
         match operation.as_str() {
@@ -464,12 +463,23 @@ async fn dispatch<S: Store + Send + 'static>(
             },
             "issue-app" => {
                 let request: IssueAppRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
-                let (app, secret) = application::issue_app(s, &mut host, &credential, grants(request.grants), request.expires_at.parse().map_err(|_| invalid())?)?;
+                let (app, secret) = application::issue_app(s, &mut host, &credential, request.grants.into(), request.expires_at.parse().map_err(|_| invalid())?)?;
                 Ok(json!({"app_id":hex(&app.0),"credential":hex(secret.expose_bytes())}))
+            },
+            "oauth-register" => {
+                let oauth = oauth.ok_or_else(invalid)?;
+                let registration: OAuthRegistration = serde_json::from_slice(&body).map_err(|_| invalid())?;
+                let client = harmion_node::oauth::register(s, &mut host, &credential, registration.name, registration.redirect_uri)?;
+                Ok(json!({"client_id":hex(&client.id.0), "redirect_uri":client.redirect,
+                    "authorization_endpoint":format!("{}/oauth/authorize", oauth.origin()),
+                    "token_endpoint":format!("{}/oauth/token", oauth.origin())}))
+            },
+            "oauth-consent" => {
+                oauth.ok_or_else(invalid)?.consent_link(s, credential, id(&body)?)
             },
             "change-grants" => {
                 let request: ChangeGrantsRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
-                application::change_grants(s, host.now_micros(), &credential, AppId(unhex(&request.app_id)?), grants(request.grants), request.revoked)?;
+                application::change_grants(s, host.now_micros(), &credential, AppId(unhex(&request.app_id)?), request.grants.into(), request.revoked)?;
                 changes.send_replace(());
                 Ok(json!({"changed":true}))
             },
@@ -481,8 +491,12 @@ async fn dispatch<S: Store + Send + 'static>(
                         registration.cluster_root = s.transaction(|tx| Ok(tx.membership_root()?.map(|root| hex(root.bytes()))))?;
                         json!(registration)
                     },
-                    "permissions" => json!(grant_spec(permissions)),
-                    _ => json!({"version":1,"oauth":false,"query":true,"subscriptions":true,
+                    "permissions" => json!(GrantSpec::from(permissions)),
+                    _ => {
+                        let mut methods = vec!["get","query","subscribe","resume","unsubscribe","export","conflicts","inspect","save","identity","permissions","capabilities","members","approve","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants"];
+                        if oauth.is_some() { methods.extend(["oauth-register","oauth-consent"]); }
+                        json!({"version":1,"oauth":oauth.is_some(),"query":true,"subscriptions":true,
+                        "oauth_origin":oauth.as_ref().map(|service| service.origin()),
                         "query_max_page_items":harmion_protocol::query::MAX_QUERY_PAGE_ITEMS,
                         "query_ttl_seconds":harmion_node::query::QUERY_TTL_MICROS / 1_000_000,
                         "query_max_active":harmion_node::query::MAX_ACTIVE_QUERIES,
@@ -491,7 +505,8 @@ async fn dispatch<S: Store + Send + 'static>(
                         "subscription_max_visible":harmion_node::subscription::MAX_VISIBLE_CONTENTS,
                         "subscription_retained_changes":harmion_node::storage::MAX_RETAINED_CHANGES,
                         "subscription_idle_seconds":harmion_node::subscription::SUBSCRIPTION_IDLE_MICROS / 1_000_000,
-                        "methods":["get","query","subscribe","resume","unsubscribe","conflicts","inspect","save","identity","permissions","capabilities","members","approve","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants"]}),
+                        "methods":methods})
+                    },
                 })
             },
             _ => Err(invalid()),

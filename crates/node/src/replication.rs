@@ -8,7 +8,7 @@ use harmion_domain::NodeId;
 use harmion_protocol::{LogEpoch, MAX_PAGE_ENTRIES, MAX_PAGE_RECORD_BYTES, Page};
 
 pub fn high(tx: &mut dyn Transaction) -> Result<u64, Error> {
-    Ok(tx.entries()?.last().map_or(0, |entry| entry.seq))
+    tx.accepted_high()
 }
 
 pub fn page(
@@ -20,24 +20,10 @@ pub fn page(
     if tx.identity().epoch != epoch {
         return Err(Error::IdentityMismatch);
     }
-    let log = tx.entries()?;
-    if after > high || high > log.last().map_or(0, |entry| entry.seq) {
+    if after > high || high > tx.accepted_high()? {
         return Err(Error::InvalidPage);
     }
-    let mut entries = Vec::new();
-    let mut bytes = 0;
-    for entry in log
-        .into_iter()
-        .filter(|entry| after < entry.seq && entry.seq <= high)
-    {
-        if entries.len() == MAX_PAGE_ENTRIES
-            || bytes + entry.record.bytes().len() > MAX_PAGE_RECORD_BYTES
-        {
-            break;
-        }
-        bytes += entry.record.bytes().len();
-        entries.push(entry);
-    }
+    let entries = tx.accepted_page(after, high)?;
     let through = entries.last().map_or(high, |entry| entry.seq);
     Ok(Page {
         epoch,

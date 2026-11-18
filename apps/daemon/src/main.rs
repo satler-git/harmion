@@ -1,7 +1,8 @@
 use harmion_domain::{ClusterId, NodeId};
 use harmion_local::ProtectedDir;
 use harmion_net_native::{
-    NativeTransport, SharedStore, SystemHost, app, iroh_peer, peer, sync, tls::TlsIdentity,
+    NativeTransport, SharedStore, SystemHost, app, iroh_peer, oauth_browser, peer, sync,
+    tls::{BrowserTls, TlsIdentity},
 };
 use harmion_node::{
     application::{self, Host},
@@ -28,6 +29,8 @@ struct Config {
     node_id: String,
     log_epoch: String,
     app_listen: SocketAddr,
+    #[serde(default)]
+    oauth_listen: Option<SocketAddr>,
     peer_listen: SocketAddr,
     sync_seconds: u64,
     #[serde(default)]
@@ -54,7 +57,11 @@ impl Config {
         })
     }
 }
-fn initialize(path: &str, cluster: Option<&str>) -> Result<()> {
+fn initialize(
+    path: &str,
+    cluster: Option<&str>,
+    backup: Option<(&ProtectedDir, Identity)>,
+) -> Result<()> {
     let founder = cluster.is_none();
     let cluster = match cluster {
         Some(id) => unhex(id)?,
@@ -66,6 +73,7 @@ fn initialize(path: &str, cluster: Option<&str>) -> Result<()> {
         node_id: hex(&SystemHost.random_bytes()?),
         log_epoch: hex(&SystemHost.random_bytes()?),
         app_listen: "127.0.0.1:0".parse()?,
+        oauth_listen: None,
         peer_listen: "127.0.0.1:0".parse()?,
         sync_seconds: 30,
         use_iroh: true,
@@ -78,6 +86,9 @@ fn initialize(path: &str, cluster: Option<&str>) -> Result<()> {
     let _lock = directory.lock()?;
     directory.write_new("node.db", &[])?;
     let mut store = SqliteStore::open(directory.path().join("node.db"), config.identity()?)?;
+    if let Some((backup, identity)) = backup {
+        store.restore_backup(backup.path().join("node.db"), identity)?;
+    }
     let (_, credential) = application::bootstrap_admin(&mut store, &mut SystemHost, i64::MAX)?;
     directory.write_new("certificate.der", tls.certificate())?;
     directory.write_new("private-key.der", tls.private_key_der())?;
@@ -90,6 +101,72 @@ fn initialize(path: &str, cluster: Option<&str>) -> Result<()> {
         serde_json::json!({"initialized":true,"cluster_id":config.cluster_id,"node_id":config.node_id})
     );
     Ok(())
+}
+
+fn verify_database_files(directory: &ProtectedDir) -> Result<()> {
+    directory.verify_file("node.db")?;
+    for sidecar in ["node.db-wal", "node.db-shm", "node.db-journal"] {
+        match directory.verify_file(sidecar) {
+            Ok(()) => (),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+fn restore(backup: &str, destination: &str) -> Result<()> {
+    let backup = ProtectedDir::open(backup)?;
+    let _lock = backup.lock()?;
+    let config: Config = serde_json::from_slice(&backup.read("node.json", 4096)?)?;
+    verify_database_files(&backup)?;
+    initialize(
+        destination,
+        Some(&config.cluster_id),
+        Some((&backup, config.identity()?)),
+    )
+}
+
+const OAUTH_IDENTITY_FILE: &str = "oauth-identity.json";
+
+#[derive(Serialize, Deserialize)]
+struct OAuthIdentity {
+    root_der: Vec<u8>,
+    leaf_der: Vec<u8>,
+    private_key_der: Vec<u8>,
+}
+
+fn provision_oauth(path: &str, replace: bool) -> Result<()> {
+    let directory = ProtectedDir::open(path)?;
+    let _lock = directory.lock()?;
+    let config: Config = serde_json::from_slice(&directory.read("node.json", 4096)?)?;
+    let identity = config.identity()?;
+    let tls = BrowserTls::generate(&hex(&identity.node.0[..4]))?;
+    let pem = tls.root_pem();
+    let bytes = serde_json::to_vec(&OAuthIdentity {
+        root_der: tls.root_der,
+        leaf_der: tls.leaf_der,
+        private_key_der: tls.private_key_der,
+    })?;
+    if replace {
+        directory.replace(OAUTH_IDENTITY_FILE, &bytes)?;
+    } else {
+        directory.write_new(OAUTH_IDENTITY_FILE, &bytes)?;
+    }
+    print!("{pem}");
+    Ok(())
+}
+
+fn browser_tls(directory: &ProtectedDir) -> Result<BrowserTls> {
+    let identity: OAuthIdentity =
+        serde_json::from_slice(&directory.read(OAUTH_IDENTITY_FILE, 65_536)?)?;
+    let tls = BrowserTls {
+        root_der: identity.root_der,
+        leaf_der: identity.leaf_der,
+        private_key_der: identity.private_key_der,
+    };
+    tls.server_config()?;
+    Ok(tls)
 }
 
 #[derive(Default)]
@@ -205,6 +282,13 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
     for pair in options.as_chunks::<2>().0 {
         match pair[0].as_str() {
             "--app-listen" => config.app_listen = pair[1].parse()?,
+            "--oauth-listen" => {
+                config.oauth_listen = if pair[1] == "off" {
+                    None
+                } else {
+                    Some(pair[1].parse()?)
+                };
+            }
             "--peer-listen" => config.peer_listen = pair[1].parse()?,
             "--sync-seconds" => config.sync_seconds = pair[1].parse()?,
             "--bootstrap-cluster-root" => config.founder = pair[1].parse()?,
@@ -234,6 +318,12 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
             "App must be loopback; Peer needs a concrete IP; sync seconds must be 0..3600".into(),
         );
     }
+    if config
+        .oauth_listen
+        .is_some_and(|address| address.ip() != std::net::Ipv4Addr::LOCALHOST)
+    {
+        return Err("OAuth must listen on 127.0.0.1".into());
+    }
     let identity = config.identity()?;
     if config.use_iroh
         && !config.public_lookup
@@ -248,19 +338,22 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
         directory.read("certificate.der", 65536)?,
         directory.read("private-key.der", 65536)?,
     )?);
-    directory.verify_file("node.db")?;
-    for sidecar in ["node.db-wal", "node.db-shm", "node.db-journal"] {
-        match directory.verify_file(sidecar) {
-            Ok(()) => (),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
-            Err(e) => return Err(e.into()),
-        }
-    }
+    verify_database_files(&directory)?;
     let store = SharedStore::new(SqliteStore::open(
         directory.path().join("node.db"),
         identity,
     )?);
     let app_listener = TcpListener::bind(config.app_listen).await?;
+    let oauth_listener = if let Some(address) = config.oauth_listen {
+        let tls = browser_tls(&directory)?;
+        let listener = TcpListener::bind(address).await?;
+        let actual = listener.local_addr()?;
+        let origin = oauth_browser::configure(&store, actual)?;
+        config.oauth_listen = Some(actual);
+        Some((listener, tls, origin))
+    } else {
+        None
+    };
     let peer_listener = if config.use_iroh {
         None
     } else {
@@ -341,6 +434,17 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
     directory.replace("peer.json", &serde_json::to_vec(&registration)?)?;
     let (stop, receiver) = watch::channel(false);
     let mut tasks = tokio::task::JoinSet::new();
+    let oauth_origin = if let Some((listener, tls, origin)) = oauth_listener {
+        tasks.spawn(oauth_browser::serve(
+            listener,
+            store.clone(),
+            tls,
+            receiver.clone(),
+        ));
+        Some(origin)
+    } else {
+        None
+    };
     let transport = Arc::new(NativeTransport {
         membership_signer: Some(membership_signer),
         tls: tls.clone(),
@@ -367,7 +471,7 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
     }
     println!(
         "{}",
-        serde_json::json!({"ready":true,"app_endpoint":config.app_listen.to_string(),"peer":registration})
+        serde_json::json!({"ready":true,"app_endpoint":config.app_listen.to_string(),"peer":registration,"oauth_origin":oauth_origin})
     );
     io::stdout().flush()?;
     let outcome: Result<()> = tokio::select! {
@@ -390,10 +494,15 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.as_slice() {
-        [command, path] if command == "init" => initialize(path, None),
-        [command, path, flag, cluster] if command == "init" && flag == "--cluster" => initialize(path, Some(cluster)),
+        [command, path] if command == "init" => initialize(path, None, None),
+        [command, path, flag, cluster] if command == "init" && flag == "--cluster" => initialize(path, Some(cluster), None),
+        [command, backup, destination] if command == "restore" => restore(backup, destination),
+        [command, path] if command == "oauth-provision" => provision_oauth(path, false),
+        [command, path, flag] if command == "oauth-provision" && flag == "--replace" => provision_oauth(path, true),
+        [command, path] if command == "oauth-root" => ProtectedDir::open(path)
+            .map_err(Into::into).and_then(|directory| browser_tls(&directory)).map(|tls| print!("{}", tls.root_pem())),
         [command, path, options @ ..] if command == "run" => run(path, options).await,
-        _ => Err("usage: harmiond init DIR [--cluster HEX] | run DIR [--app-listen IP:PORT] [--peer-listen IP:PORT] [--sync-seconds N] [--peer-transport iroh|https] [--relay-url URL] [--discovery public|none] [--bootstrap-cluster-root true|false]".into()),
+        _ => Err("usage: harmiond init DIR [--cluster HEX] | restore BACKUP_DIR NEW_DIR | oauth-provision DIR [--replace] | oauth-root DIR | run DIR [--app-listen IP:PORT] [--oauth-listen 127.0.0.1:PORT|off] [--peer-listen IP:PORT] [--sync-seconds N] [--peer-transport iroh|https] [--relay-url URL] [--discovery public|none] [--bootstrap-cluster-root true|false]".into()),
     };
     if let Err(error) = result {
         eprintln!("harmiond: {error}");

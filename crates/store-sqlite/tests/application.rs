@@ -31,12 +31,97 @@ impl Host for TestHost {
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn oauth_expiry_uses_persisted_deadlines_and_ipv6_loopback_callback() {
+    use harmion_node::{access, oauth};
+    let mut t = Test::new();
+    let registered = "http://[::1]/callback";
+    let callback = "http://[::1]:49152/callback";
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = oauth::pkce_challenge(verifier).unwrap();
+    assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    let client = oauth::register(
+        &mut t.store,
+        &mut t.host,
+        &t.admin,
+        "example".into(),
+        registered.into(),
+    )
+    .unwrap();
+    let mut code = || {
+        let authorization = oauth::start(
+            &mut t.store,
+            &mut t.host,
+            oauth::Start {
+                client: client.id,
+                redirect: callback.into(),
+                challenge: challenge.clone(),
+                state: "state".into(),
+                grants: read_write(),
+            },
+        )
+        .unwrap();
+        oauth::decide(
+            &mut t.store,
+            &mut t.host,
+            &t.admin,
+            authorization.request,
+            true,
+        )
+        .unwrap()
+        .code
+        .unwrap()
+    };
+    let fresh = code();
+    let unused = code();
+    let issued_at = t.host.now;
+    let tokens = oauth::exchange(
+        &mut t.store,
+        &mut t.host,
+        client.id,
+        fresh,
+        callback,
+        verifier,
+    )
+    .unwrap();
+    t.restart();
+    t.host.now = issued_at + 60_000_000;
+    assert!(matches!(
+        oauth::exchange(
+            &mut t.store,
+            &mut t.host,
+            client.id,
+            unused,
+            callback,
+            verifier
+        ),
+        Err(Error::OAuthInvalidGrant)
+    ));
+    t.host.now = issued_at + 600_000_000;
+    assert!(matches!(
+        access::permissions(&mut t.store, &tokens.access, t.host.now),
+        Err(Error::Unauthenticated)
+    ));
+    let rotated = oauth::refresh(&mut t.store, &mut t.host, client.id, tokens.refresh).unwrap();
+    assert_eq!(
+        access::permissions(&mut t.store, &rotated.access, t.host.now).unwrap(),
+        read_write()
+    );
+    t.host.now = issued_at + 30 * 24 * 60 * 60 * 1_000_000;
+    assert!(matches!(
+        oauth::refresh(&mut t.store, &mut t.host, client.id, rotated.refresh),
+        Err(Error::OAuthInvalidGrant)
+    ));
+}
+
+#[test]
 fn v3_peer_migration_preserves_tls_binding_and_separates_iroh_keys() {
     use harmion_node::membership::{self, Peer, PeerKey};
     let mut t = Test::new();
     // Simulate a deployed v3 database, retaining all other state.
     let db = rusqlite::Connection::open(t.path.join("node.db")).unwrap();
-    db.execute_batch("DROP TABLE grant_generations; DROP TABLE content_changes;
+    db.execute_batch("DROP TABLE oauth_refresh; DROP TABLE oauth_access; DROP TABLE oauth_families;
+        DROP TABLE oauth_codes; DROP TABLE oauth_pending; DROP TABLE oauth_clients;
+        DROP TABLE grant_generations; DROP TABLE content_changes;
         DROP TABLE query_cursors; DROP TABLE query_basis; DROP TABLE query_sessions;
         DROP TABLE search_basis; DROP TABLE content_records;
         DROP TABLE search_elements; DROP TABLE search_attributes; DROP TABLE search_kinds; DROP TABLE search_contents;
@@ -1183,6 +1268,97 @@ fn query_pages_freeze_membership_value_and_edit_basis_with_current_read_checks()
 }
 
 #[test]
+fn export_pins_all_content_at_start_and_reauthorizes_each_read() {
+    use harmion_node::export::Snapshot;
+
+    let mut t = Test::new();
+    let admin = t.admin.clone();
+    let (owner_id, owner) = t.issue(Grants::administrator());
+    let (_, reader) = t.issue(read_write());
+    let original = t.create();
+    let mut deleted = create_request(2);
+    deleted.content_id = ContentId([2; 32]);
+    let deleted_view = app::save(&mut t.store, &mut t.host, &admin, &deleted)
+        .unwrap()
+        .view
+        .unwrap();
+    let mut delete = request(
+        3,
+        Command::Delete {
+            token: deleted_view.edit_token,
+        },
+    );
+    delete.content_id = deleted.content_id;
+    app::save(&mut t.store, &mut t.host, &admin, &delete).unwrap();
+    assert!(matches!(
+        Snapshot::start(&mut t.store, &reader, t.host.now),
+        Err(Error::Forbidden)
+    ));
+    let snapshot = Snapshot::start(&mut t.store, &owner, t.host.now).unwrap();
+    t.save(
+        &admin,
+        4,
+        Command::Edit {
+            token: original.view.unwrap().edit_token,
+            fields: body("after export began"),
+        },
+    )
+    .unwrap();
+    let mut late = create_request(5);
+    late.content_id = ContentId([3; 32]);
+    app::save(&mut t.store, &mut t.host, &admin, &late).unwrap();
+
+    assert_eq!(
+        snapshot
+            .ids(&mut t.store, &owner, t.host.now, None)
+            .unwrap(),
+        [content(), deleted.content_id]
+    );
+    assert_eq!(
+        snapshot
+            .ids(&mut t.store, &owner, t.host.now, Some(content()))
+            .unwrap(),
+        [deleted.content_id]
+    );
+    assert_eq!(
+        snapshot
+            .content(&mut t.store, &owner, t.host.now, content())
+            .unwrap()
+            .snapshot(content())
+            .unwrap()
+            .content
+            .body,
+        "base"
+    );
+    assert_eq!(
+        snapshot
+            .content(&mut t.store, &owner, t.host.now, deleted.content_id)
+            .unwrap()
+            .snapshot(deleted.content_id)
+            .unwrap()
+            .life,
+        Life::Deleted
+    );
+    assert!(matches!(
+        snapshot.ids(&mut t.store, &admin, t.host.now, None),
+        Err(Error::Forbidden)
+    ));
+    app::change_grants(
+        &mut t.store,
+        t.host.now,
+        &admin,
+        owner_id,
+        Grants::administrator(),
+        true,
+    )
+    .unwrap();
+    assert!(matches!(
+        snapshot.content(&mut t.store, &owner, t.host.now, content()),
+        Err(Error::Unauthenticated)
+    ));
+}
+
+#[test]
 fn migration_preserves_v1_records_and_cursor_generation() {
     let mut t = Test::new();
     t.create();
@@ -1196,7 +1372,9 @@ fn migration_preserves_v1_records_and_cursor_generation() {
     let db = rusqlite::Connection::open(t.path.join("node.db")).unwrap();
     // Reproduce the previous schema with its original log and identity intact.
     db.execute_batch(
-        "DROP TABLE grant_generations; DROP TABLE content_changes;
+        "DROP TABLE oauth_refresh; DROP TABLE oauth_access; DROP TABLE oauth_families;
+        DROP TABLE oauth_codes; DROP TABLE oauth_pending; DROP TABLE oauth_clients;
+        DROP TABLE grant_generations; DROP TABLE content_changes;
         DROP TABLE query_cursors; DROP TABLE query_basis; DROP TABLE query_sessions;
         DROP TABLE search_basis; DROP TABLE content_records;
         DROP TABLE search_elements; DROP TABLE search_attributes; DROP TABLE search_kinds; DROP TABLE search_contents;
@@ -1219,7 +1397,7 @@ fn migration_preserves_v1_records_and_cursor_generation() {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
 }
 
 #[test]

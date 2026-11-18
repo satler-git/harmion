@@ -3,7 +3,7 @@
 use crate::{
     Error,
     access::{App, Credential, Grants, authenticate},
-    storage::{Store, Transaction, read_content_graph, read_graph},
+    storage::{Store, Transaction, read_content_graph},
 };
 use harmion_domain::*;
 use harmion_protocol::{AppId, Command, EditToken, Record, SaveRequest, encode_save_request};
@@ -138,6 +138,12 @@ pub fn change_grants(
         if app.grants == grants && app.revoked == revoked {
             return Ok(());
         }
+        if tx.oauth_client(app.id)?.is_some() {
+            crate::oauth::restrict_grant_update(&app.grants, &grants)?;
+            if revoked {
+                tx.revoke_oauth_app(app.id)?;
+            }
+        }
         app.grants = grants;
         app.revoked = revoked;
         tx.update_app(&app)
@@ -271,7 +277,7 @@ pub fn save_with_outcome(
         let principal = authenticate(tx, credential, host.now_micros())?;
         let grants = &principal.app.grants;
         let bytes = encode_save_request(request)?;
-        let mut graph = read_graph(tx)?;
+        let mut graph = read_content_graph(tx, request.content_id)?;
         if let Some(result) = tx.request(principal.app.id, request.request_id)? {
             if result.request != bytes {
                 return Err(Error::RequestIdReuse);
@@ -417,6 +423,9 @@ pub fn save_with_outcome(
             }
         }
         let record = Record::from_update(update)?;
+        if tx.accepted_record(update_id)?.is_some() {
+            return Err(Error::Domain(harmion_domain::Error::IdMismatch));
+        }
         if graph.accept(record.update().clone())? != Acceptance::Inserted {
             return Err(Error::InvalidRequest);
         }
