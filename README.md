@@ -2,15 +2,42 @@
 
 一人のユーザーが所有する、アプリから独立した個人データ基盤。
 
-現時点では設計段階です。次の文書は実装済み機能ではなく、会話で合意した仕様と設計方針を記録しています。
+Rustで初期実装を進めています。Content・SQLite保存・App HTTPS API・daemon/CLI・HTTPS/irohのPeer同期、署名付き参加・退役・却下証明の伝播を実装しています。5つの独立プロセスで中継・分断・再起動・周期同期を検証し、管理情報の伝播・保留・所有者回復は別の実プロセステストで確認します。irohのEndpoint IDによる認証とIP変更後の再接続も検証しています。OAuth・ブラウザ連携・DOは未実装です。次の文書は、実装済み範囲を超える仕様と設計方針を含みます。
+
+- [native 複数ノード同期の実行手順](docs/native-quickstart.md)
 
 - [現時点の仕様と設計方針](docs/specification.md)
 - [過去の議論との照合・整合性レビュー](docs/review.md)
+- [実装全体レビュー・仕様との差異・暫定対応](docs/implementation-review.md)
+- [参加・退役の設計判断](docs/membership-design.md)
+- [署名付き参加・退役・却下証明の契約](contracts/membership-v1.md)
 - [内部表現と同期の初期設計](docs/internal-design.md)
 - [ArchitectureとRustパッケージ構成](docs/architecture.md)
 - [取得・編集・Subscribe・OAuthの契約](docs/app-api.md)
 - [設計の実行可能な意味モデル](design_checks/model_check.py)
+- [2ノード同期までの実装・レビュー記録](docs/implementation-progress.md)
+- [更新レコードの保存・転送形式v1](contracts/record-v1.md)
+- [App保存要求・認可・ローカル状態](contracts/app-save-v1.md)
+- [HTTPS Peerと直接承認の契約](contracts/peer-v1.md)
 
-内部表現と同期の初期方式を選定し、小規模な意味モデルで到着順・再送・障害時の挙動を検証しています。実システムは未実装です。未決定事項を確定仕様として扱わず、仕様・内部設計・レビューを併せて参照してください。
+`crates/domain` は外部依存なしの純粋なRustライブラリです。型で区別したID、create/edit/delete/keep/restore、項目と存在の候補、通常値選択、重複受理と不正参照の検証を扱います。Python意味モデルの10シナリオに対応する到着順テストと、追加の境界テストを用意しています。
+
+```sh
+cargo test --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+`Content` はID・本文・名前空間付き属性・kindsをまとめた通常値です。`Graph::snapshot(id)` は存在状態、固定basis、値ごとにまとめた競合候補と版IDも持つ、所有された `ContentSnapshot` を返します。同じ値の版IDを保持するため、その値を編集しても他の競合値を解決しません。snapshotは後から更新を受理しても変わりません。
+
+削除済みデータも内部snapshotでは保持し、`visible_content()` は削除済みなら `None`、削除競合なら通常値を返します。属性のunsetとkindのfalseは通常値から省きますが、編集元の版情報は保持します。snapshotは認可前の内部表現です。node層はこれを直接公開せず、認可・情報制限を行い、不透明な編集トークン付きのReadViewへ変換します。
+
+属性は標準で `AttributeValue` を使い、null・真偽値・数値・文字列・配列・オブジェクトを表します。不存在はnullとは別です。数値は正確な10進数で、`1`・`1.0`・`10e-1` を等値、負のゼロをゼロとして扱います。係数は任意桁、入力指数と正規化後の指数はi64範囲に制限します。配列は順序・重複を保持し、オブジェクトはキー順によらず比較します。record codecでは重複キー・非canonical入力を拒否し、1 MiB・深さ64・コンテナ要素合計32,768の上限を適用します。`Graph<V>` の型引数は意味モデル等のテスト用に残しています。
+
+IDは32バイトの型として扱い、乱数生成はホスト側の責任です。現在のGraphは全履歴をメモリ上に保持し、読出し時に候補を再計算します。SQLite adapterは正本レコードと受理ログ・Peerカーソルを永続化しますが、索引はまだ持ちません。
+
+実ファイルのSQLite DBとTCP/TLSでページ転送・再送・再起動・競合収束をテストしています。承認済み証明書とNode IDを照合し、退役は既存接続にも適用します。nodeのアプリ操作ではcredential・失効・期限・変更前後の権限を同じトランザクションで検査し、固定編集トークンとrequest_idの保存結果を保持します。独立2プロセスの検証は`cargo build --workspace`後に`python3 design_checks/two_process_sync.py`で実行できます。ネットワークテストにはlocalhostの待受け権限が必要です。未決定事項を確定仕様として扱わず、仕様・内部設計・レビューを併せて参照してください。
 
 モデル検証はPython 3.10以降で `python3 design_checks/model_check.py` を実行できます。外部パッケージは不要です。
+
+5プロセスのデータ同期検証は、`cargo build --workspace`後に`python3 design_checks/multi_process_sync.py`で実行します。管理情報の伝播・保留・回復は`python3 design_checks/membership_process_sync.py`で実行します。iroh経路は`cargo build -p harmion-net-native --example local_relay`後に各スクリプトへ`--iroh`を付けます。公開探索を使わず、テストが起動するローカルリレーを使用します。

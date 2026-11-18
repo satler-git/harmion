@@ -1,0 +1,418 @@
+//! Local application operations. Every entry point authenticates and reads current
+//! grants inside its storage transaction; tokens never grant read or write access.
+use crate::{
+    Error,
+    access::{App, Credential, Grants, authenticate},
+    storage::{Store, Transaction, read_graph},
+};
+use harmion_domain::*;
+use harmion_protocol::{AppId, Command, EditToken, Record, SaveRequest, encode_save_request};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Host-provided entropy and UTC clock; neither is inferred from untrusted requests.
+pub trait Host {
+    fn random_bytes(&mut self) -> Result<[u8; 32], Error>;
+    fn now_micros(&self) -> i64;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenPurpose {
+    Edit,
+    Resolve,
+    Manage,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenState {
+    pub content_id: ContentId,
+    pub basis: BTreeSet<UpdateId>,
+    pub purpose: TokenPurpose,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestResult {
+    pub request: Vec<u8>,
+    pub update_id: UpdateId,
+    pub snapshot_token: EditToken,
+    pub return_view: bool,
+}
+
+pub use harmion_protocol::{ConflictView, ReadView, SaveResult};
+
+fn view(snapshot: &ContentSnapshot, token: EditToken, grants: &Grants) -> ReadView {
+    ReadView {
+        content: snapshot.content.clone(),
+        edit_token: token,
+        conflicts: snapshot
+            .fields
+            .iter()
+            .filter(|(field, state)| {
+                state.is_conflicted()
+                    && (!matches!(field, Field::Kind(_)) || grants.is_administrator())
+            })
+            .map(|(field, _)| field.clone())
+            .collect(),
+        deletion_conflict: snapshot.life == Life::Conflict,
+    }
+}
+
+fn mint_token(
+    tx: &mut dyn Transaction,
+    host: &mut impl Host,
+    snapshot: &ContentSnapshot,
+    purpose: TokenPurpose,
+) -> Result<EditToken, Error> {
+    let token = EditToken(host.random_bytes()?);
+    tx.insert_token(
+        token,
+        &TokenState {
+            content_id: snapshot.content.id,
+            basis: snapshot.basis.clone(),
+            purpose,
+        },
+    )?;
+    Ok(token)
+}
+
+/// Only the owner-controlled initialization path may call this; no network route.
+/// Revoked or expired apps still count, so deleting grants cannot re-enable bootstrap.
+pub fn bootstrap_admin(
+    store: &mut impl Store,
+    host: &mut impl Host,
+    expires_at: i64,
+) -> Result<(AppId, Credential), Error> {
+    store.transaction(|tx| {
+        if tx.has_apps()? {
+            return Err(Error::AlreadyBootstrapped);
+        }
+        insert_app(tx, host, Grants::administrator(), expires_at)
+    })
+}
+fn insert_app(
+    tx: &mut dyn Transaction,
+    host: &mut impl Host,
+    grants: Grants,
+    expires_at: i64,
+) -> Result<(AppId, Credential), Error> {
+    if expires_at <= host.now_micros() {
+        return Err(Error::InvalidRequest);
+    }
+    let id = AppId(host.random_bytes()?);
+    let credential = Credential::from_bytes(host.random_bytes()?);
+    tx.insert_app(&App {
+        id,
+        verifier: credential.verifier(),
+        expires_at,
+        revoked: false,
+        grants,
+    })?;
+    Ok((id, credential))
+}
+pub fn issue_app(
+    store: &mut impl Store,
+    host: &mut impl Host,
+    credential: &Credential,
+    grants: Grants,
+    expires_at: i64,
+) -> Result<(AppId, Credential), Error> {
+    store.transaction(|tx| {
+        let principal = authenticate(tx, credential, host.now_micros())?;
+        if !principal.app.grants.manage_apps {
+            return Err(Error::Forbidden);
+        }
+        insert_app(tx, host, grants, expires_at)
+    })
+}
+pub fn change_grants(
+    store: &mut impl Store,
+    now: i64,
+    credential: &Credential,
+    id: AppId,
+    grants: Grants,
+    revoked: bool,
+) -> Result<(), Error> {
+    store.transaction(|tx| {
+        let principal = authenticate(tx, credential, now)?;
+        if !principal.app.grants.manage_apps {
+            return Err(Error::Forbidden);
+        }
+        let mut app = tx.app_by_id(id)?.ok_or(Error::NotFound)?;
+        app.grants = grants;
+        app.revoked = revoked;
+        tx.update_app(&app)
+    })
+}
+
+pub fn get(
+    store: &mut impl Store,
+    host: &mut impl Host,
+    credential: &Credential,
+    id: ContentId,
+) -> Result<ReadView, Error> {
+    store.transaction(|tx| {
+        let principal = authenticate(tx, credential, host.now_micros())?;
+        let snapshot = read_graph(tx)?.snapshot(id).ok_or(Error::NotFound)?;
+        if snapshot.life == Life::Deleted || !principal.app.grants.can_read(&snapshot.content) {
+            return Err(Error::NotFound);
+        }
+        let token = mint_token(tx, host, &snapshot, TokenPurpose::Edit)?;
+        Ok(view(&snapshot, token, &principal.app.grants))
+    })
+}
+
+pub fn get_conflicts(
+    store: &mut impl Store,
+    host: &mut impl Host,
+    credential: &Credential,
+    id: ContentId,
+) -> Result<ConflictView, Error> {
+    read_conflicts(store, host, credential, id, false)
+}
+/// Owner management tool can inspect deleted contents and obtain a restore token.
+pub fn inspect(
+    store: &mut impl Store,
+    host: &mut impl Host,
+    credential: &Credential,
+    id: ContentId,
+) -> Result<ConflictView, Error> {
+    read_conflicts(store, host, credential, id, true)
+}
+fn read_conflicts(
+    store: &mut impl Store,
+    host: &mut impl Host,
+    credential: &Credential,
+    id: ContentId,
+    management: bool,
+) -> Result<ConflictView, Error> {
+    store.transaction(|tx| {
+        let principal = authenticate(tx, credential, host.now_micros())?;
+        let grants = &principal.app.grants;
+        if management && !grants.is_administrator() {
+            return Err(Error::Forbidden);
+        }
+        let snapshot = read_graph(tx)?.snapshot(id).ok_or(Error::NotFound)?;
+        if !grants.can_read(&snapshot.content) || (!management && snapshot.life == Life::Deleted) {
+            return Err(Error::NotFound);
+        }
+        let purpose = if management {
+            TokenPurpose::Manage
+        } else {
+            TokenPurpose::Resolve
+        };
+        let token = mint_token(tx, host, &snapshot, purpose)?;
+        Ok(ConflictView {
+            view: view(&snapshot, token, grants),
+            deleted: snapshot.life == Life::Deleted,
+            candidates: snapshot
+                .fields
+                .iter()
+                .filter(|(field, _)| !matches!(field, Field::Kind(_)) || grants.is_administrator())
+                .map(|(field, state)| (field.clone(), state.candidates.clone()))
+                .collect(),
+        })
+    })
+}
+
+fn token_snapshot(
+    tx: &mut dyn Transaction,
+    graph: &Graph,
+    token: EditToken,
+    content: ContentId,
+) -> Result<(TokenPurpose, ContentSnapshot), Error> {
+    let state = tx.token(token)?.ok_or(Error::InvalidToken)?;
+    if state.content_id != content {
+        return Err(Error::InvalidToken);
+    }
+    Ok((state.purpose, graph.snapshot_at(content, &state.basis)?))
+}
+
+fn save_response(
+    tx: &mut dyn Transaction,
+    graph: &Graph,
+    result: &RequestResult,
+    content: ContentId,
+    grants: &Grants,
+) -> Result<SaveResult, Error> {
+    let (_, saved) = token_snapshot(tx, graph, result.snapshot_token, content)?;
+    let current = graph.snapshot(content).ok_or(Error::NotFound)?;
+    let readable = result.return_view
+        && saved.life != Life::Deleted
+        && current.life != Life::Deleted
+        && grants.can_read(&saved.content)
+        && grants.can_read(&current.content);
+    Ok(SaveResult {
+        update_id: result.update_id,
+        view: readable.then(|| view(&saved, result.snapshot_token, grants)),
+    })
+}
+
+pub fn save(
+    store: &mut impl Store,
+    host: &mut impl Host,
+    credential: &Credential,
+    request: &SaveRequest,
+) -> Result<SaveResult, Error> {
+    store.transaction(|tx| {
+        let principal = authenticate(tx, credential, host.now_micros())?;
+        let grants = &principal.app.grants;
+        let bytes = encode_save_request(request)?;
+        let mut graph = read_graph(tx)?;
+        if let Some(result) = tx.request(principal.app.id, request.request_id)? {
+            if result.request != bytes {
+                return Err(Error::RequestIdReuse);
+            }
+            // No new write. Reauthorize response content against both saved and current kinds.
+            return save_response(tx, &graph, &result, request.content_id, grants);
+        }
+        let before = graph.snapshot(request.content_id);
+        if let Some(snapshot) = &before
+            && !grants.can_write(&snapshot.content)
+        {
+            return Err(Error::Forbidden);
+        }
+        let fixed = request
+            .command
+            .token()
+            .map(|token| token_snapshot(tx, &graph, token, request.content_id))
+            .transpose()?;
+        let update_id = UpdateId(host.random_bytes()?);
+        let mut update = Update {
+            format_version: 1,
+            cluster_id: tx.identity().cluster,
+            content_id: request.content_id,
+            root_id: update_id,
+            update_id,
+            author_node_id: tx.identity().node,
+            edited_at: host.now_micros(),
+            action: Action::Create,
+            basis: BTreeSet::new(),
+            changes: BTreeMap::new(),
+        };
+        if let Some((_, snapshot)) = &fixed {
+            update.basis = snapshot.basis.clone();
+            update.root_id = graph
+                .update(*snapshot.basis.first().ok_or(Error::InvalidToken)?)
+                .ok_or(Error::InvalidToken)?
+                .root_id;
+        }
+        match &request.command {
+            Command::Create { fields } => {
+                if before.is_some() {
+                    return Err(Error::InvalidRequest);
+                }
+                update.changes = fields
+                    .iter()
+                    .map(|(field, value)| {
+                        (
+                            field.clone(),
+                            Change {
+                                value: value.clone(),
+                                replaces: BTreeSet::new(),
+                            },
+                        )
+                    })
+                    .collect();
+            }
+            Command::Edit { fields, .. } => {
+                let (purpose, snapshot) = fixed.as_ref().ok_or(Error::InvalidToken)?;
+                if !matches!(purpose, TokenPurpose::Edit | TokenPurpose::Manage) {
+                    return Err(Error::InvalidToken);
+                }
+                if fields.is_empty() {
+                    return Err(Error::InvalidRequest);
+                }
+                update.action = Action::Edit;
+                let parents = snapshot.edit_parents();
+                for (field, value) in fields {
+                    if matches!(field, Field::Kind(_))
+                        && !grants.is_administrator()
+                        && (snapshot
+                            .fields
+                            .get(field)
+                            .is_some_and(FieldState::is_conflicted)
+                            || before
+                                .as_ref()
+                                .and_then(|s| s.fields.get(field))
+                                .is_some_and(FieldState::is_conflicted))
+                    {
+                        return Err(Error::Forbidden);
+                    }
+                    update.changes.insert(
+                        field.clone(),
+                        Change {
+                            value: value.clone(),
+                            replaces: parents.get(field).cloned().unwrap_or_default(),
+                        },
+                    );
+                }
+            }
+            Command::Resolve { changes, .. } => {
+                let (purpose, snapshot) = fixed.as_ref().ok_or(Error::InvalidToken)?;
+                if !matches!(purpose, TokenPurpose::Resolve | TokenPurpose::Manage) {
+                    return Err(Error::InvalidToken);
+                }
+                if changes.is_empty() {
+                    return Err(Error::InvalidRequest);
+                }
+                for (field, change) in changes {
+                    if matches!(field, Field::Kind(_)) && !grants.is_administrator() {
+                        return Err(Error::Forbidden);
+                    }
+                    let state = snapshot.fields.get(field).ok_or(Error::InvalidRequest)?;
+                    let allowed: BTreeSet<_> = state
+                        .candidates
+                        .iter()
+                        .flat_map(|c| c.versions.iter().copied())
+                        .collect();
+                    if change.replaces.is_empty() || !change.replaces.is_subset(&allowed) {
+                        return Err(Error::InvalidRequest);
+                    }
+                }
+                update.action = Action::Edit;
+                update.changes = changes.clone();
+            }
+            Command::Delete { .. } => {
+                let (_, snapshot) = fixed.as_ref().ok_or(Error::InvalidToken)?;
+                if !grants.is_administrator()
+                    && (snapshot.life == Life::Conflict
+                        || before.as_ref().is_some_and(|s| s.life == Life::Conflict))
+                {
+                    return Err(Error::Forbidden);
+                }
+                update.action = Action::Delete;
+            }
+            Command::Keep { .. } | Command::Restore { .. } => {
+                let (purpose, _) = fixed.as_ref().ok_or(Error::InvalidToken)?;
+                if !grants.is_administrator() {
+                    return Err(Error::Forbidden);
+                }
+                if *purpose != TokenPurpose::Manage {
+                    return Err(Error::InvalidToken);
+                }
+                match &request.command {
+                    Command::Restore { fields, .. } => {
+                        update.action = Action::Restore;
+                        update.changes = graph.restore_changes(&update.basis, fields.clone())?;
+                    }
+                    _ => update.action = Action::Keep,
+                }
+            }
+        }
+        let record = Record::from_update(update)?;
+        if graph.accept(record.update().clone())? != Acceptance::Inserted {
+            return Err(Error::InvalidRequest);
+        }
+        let after = graph.snapshot(request.content_id).ok_or(Error::NotFound)?;
+        if !grants.can_write(&after.content) {
+            return Err(Error::Forbidden);
+        }
+        tx.append(&record)?;
+        let token = mint_token(tx, host, &after, TokenPurpose::Edit)?;
+        let result = RequestResult {
+            request: bytes,
+            update_id,
+            snapshot_token: token,
+            return_view: after.life != Life::Deleted && grants.can_read(&after.content),
+        };
+        tx.insert_request(principal.app.id, request.request_id, &result)?;
+        save_response(tx, &graph, &result, request.content_id, grants)
+    })
+}

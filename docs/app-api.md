@@ -2,6 +2,8 @@
 
 更新日: 2026-11-18
 
+現在のnative実装: 証明書を固定したloopback HTTPSの`POST /app/v1/{operation}`を使用する。保存要求はHRQ-v1、返却値は明示的なJSON viewであり、内部snapshotの直接serializeはしない。Hostを検査しOrigin付き要求を拒否するため、現段階はnativeクライアント専用。下記のOAuth・ブラウザ・WS契約は未実装で、capabilitiesもOAuth非対応を返す。初期HTTP案からの変更と検証結果は[進捗記録](implementation-progress.md)を参照。
+
 会話で合意した取得・編集・購読・OAuthの契約。メソッド名・通知名は論理名であり、具体wire形式・型・期限・サイズは実装時に定める。実装済み機能の説明ではない。
 
 ## 1. 操作の分類

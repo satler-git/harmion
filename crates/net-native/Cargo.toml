@@ -1,0 +1,30 @@
+[package]
+name = "harmion-net-native"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+harmion-domain = { path = "../domain" }
+harmion-node = { path = "../node" }
+harmion-protocol = { path = "../protocol" }
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "crypto"] }
+getrandom = "0.3"
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+iroh = { version = "1.4.1", default-features = false, features = ["tls-ring"] }
+
+[dev-dependencies]
+iroh-relay = { version = "1.4.1", default-features = false, features = ["server", "tls-ring"] }
+harmion-store-sqlite = { path = "../store-sqlite" }
+harmion-client = { path = "../client" }
+
+[lints]
+workspace = true
