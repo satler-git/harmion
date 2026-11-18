@@ -1,4 +1,4 @@
-use crate::{EditToken, hex};
+use crate::{EditToken, MAX_APP_RESPONSE_BYTES, hex};
 use harmion_domain::*;
 use serde::{
     Serialize, Serializer,
@@ -132,7 +132,7 @@ impl<'a> From<&'a ReadView> for ReadViewRef<'a> {
     }
 }
 
-fn value_json(value: &Value) -> Json {
+pub(crate) fn value_json(value: &Value) -> Json {
     match value {
         Value::Body(s) => json!({"type":"body","value":s}),
         Value::Attribute(v) => json!({"type":"attribute","value":AttributeRef(v)}),
@@ -170,5 +170,15 @@ pub fn conflict_view_json(view: &ConflictView) -> Json {
     json!({"view":read_view_json(&view.view),"candidates":candidates,"deleted":view.deleted})
 }
 pub fn save_result_json(result: &SaveResult) -> Json {
-    json!({"update_id":hex(&result.update_id.0),"saved":true,"view":result.view.as_ref().map(read_view_json)})
+    // The required receipt must fit regardless of the accumulated Content size.
+    const ENVELOPE_BYTES: usize = br#"{"update_id":"","saved":true,"view":}"#.len() + 64;
+    let mut receipt = json!({"update_id":hex(&result.update_id.0),"saved":true,"view":null});
+    if let Some(view) = &result.view {
+        if read_view_size(view, MAX_APP_RESPONSE_BYTES - ENVELOPE_BYTES).is_some() {
+            receipt["view"] = read_view_json(view);
+        } else {
+            receipt["view_error"] = json!("response_too_large");
+        }
+    }
+    receipt
 }

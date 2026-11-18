@@ -1,12 +1,13 @@
 //! Native App API client. Does not open node databases or execute node use cases.
 pub use harmion_local::ProtectedDir;
 pub use harmion_protocol as protocol;
+mod export;
 mod subscription;
 pub use subscription::{Subscription, SubscriptionCheckpoint, SubscriptionNotification};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::Request;
+use hyper::{Request, Response, body::Incoming};
 use hyper_util::rt::TokioIo;
 use protocol::query::{Condition, QueryCursor, QueryRequest};
 use protocol::{ConnectionInfo, MAX_APP_RESPONSE_BYTES, MAX_RECORD_BYTES, TLS_NAME};
@@ -16,6 +17,14 @@ use tokio::{net::TcpStream, time::timeout};
 use tokio_rustls::TlsConnector;
 
 const DEADLINE: Duration = Duration::from_secs(60);
+
+/// Abort the transport when the request or its response consumer is dropped.
+struct Connection(tokio::task::JoinHandle<()>);
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 pub fn random_id() -> Result<[u8; 32], Error> {
     let mut bytes = [0; 32];
@@ -60,14 +69,26 @@ pub struct QueryPage {
 impl Client {
     pub fn from_directory(path: impl AsRef<Path>) -> Result<Self, Error> {
         let directory = ProtectedDir::open(path)?;
-        let info: ConnectionInfo =
-            serde_json::from_slice(&directory.read("connection.json", 150_000)?)
-                .map_err(|_| Error::InvalidDiscovery)?;
+        let info = Self::read_connection(&directory)?;
         let credential = directory
             .read("admin.secret", 32)?
             .try_into()
             .map_err(|_| Error::InvalidDiscovery)?;
         Self::new(info, credential)
+    }
+
+    /// Connect with an OAuth access token using the node's pinned App API certificate.
+    pub fn from_directory_with_token(path: impl AsRef<Path>, token: &str) -> Result<Self, Error> {
+        let credential = protocol::unhex(token).map_err(|_| Error::InvalidRequest)?;
+        Self::new(
+            Self::read_connection(&ProtectedDir::open(path)?)?,
+            credential,
+        )
+    }
+
+    fn read_connection(directory: &ProtectedDir) -> Result<ConnectionInfo, Error> {
+        serde_json::from_slice(&directory.read("connection.json", 150_000)?)
+            .map_err(|_| Error::InvalidDiscovery)
     }
 
     pub fn new(info: ConnectionInfo, credential: [u8; 32]) -> Result<Self, Error> {
@@ -100,69 +121,9 @@ impl Client {
         })
     }
 
-    /// Verify the pinned TLS leaf before constructing or sending Authorization.
-    /// There is no proxy, redirect, or plaintext fallback.
     pub async fn call(&self, operation: &str, body: &[u8]) -> Result<serde_json::Value, Error> {
-        if operation.is_empty()
-            || !operation
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b == b'-')
-            || body.len() > MAX_RECORD_BYTES
-        {
-            return Err(Error::InvalidRequest);
-        }
         timeout(DEADLINE, async {
-            let tcp = TcpStream::connect(self.endpoint).await?;
-            let tls = TlsConnector::from(self.tls.clone())
-                .connect(
-                    TLS_NAME.try_into().map_err(|_| Error::InvalidDiscovery)?,
-                    tcp,
-                )
-                .await
-                .map_err(|_| Error::Transport)?;
-            if tls
-                .get_ref()
-                .1
-                .peer_certificates()
-                .and_then(|c| c.first())
-                .map(|c| c.as_ref())
-                != Some(self.certificate.as_slice())
-            {
-                return Err(Error::InvalidResponse);
-            }
-            let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
-                .await
-                .map_err(|_| Error::Transport)?;
-            let connection = tokio::spawn(async move {
-                let _ = timeout(DEADLINE, connection).await;
-            });
-            // Abort the transport even if this future is cancelled or times out.
-            struct Connection(tokio::task::JoinHandle<()>);
-            impl Drop for Connection {
-                fn drop(&mut self) {
-                    self.0.abort();
-                }
-            }
-            let _connection = Connection(connection);
-            let mut authorization = hyper::header::HeaderValue::from_str(&format!(
-                "Bearer {}",
-                protocol::hex(&self.credential)
-            ))
-            .map_err(|_| Error::InvalidRequest)?;
-            authorization.set_sensitive(true);
-            let request = Request::post(format!("/app/v1/{operation}"))
-                .header("host", TLS_NAME)
-                .header("authorization", authorization)
-                .header("content-type", "application/octet-stream")
-                .body(Full::new(Bytes::copy_from_slice(body)))
-                .map_err(|_| Error::InvalidRequest)?;
-            let response = sender
-                .send_request(request)
-                .await
-                .map_err(|_| Error::Transport)?;
-            if response.status() != hyper::StatusCode::OK {
-                return Err(Error::Http(response.status().as_u16()));
-            }
+            let (response, _connection) = self.request(operation, body).await?;
             let bytes = Limited::new(response.into_body(), MAX_APP_RESPONSE_BYTES)
                 .collect()
                 .await
@@ -172,6 +133,67 @@ impl Client {
         })
         .await
         .map_err(|_| Error::Timeout)?
+    }
+
+    /// Verify the pinned TLS leaf before constructing or sending Authorization.
+    async fn request(
+        &self,
+        operation: &str,
+        body: &[u8],
+    ) -> Result<(Response<Incoming>, Connection), Error> {
+        if operation.is_empty()
+            || !operation
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'-')
+            || body.len() > MAX_RECORD_BYTES
+        {
+            return Err(Error::InvalidRequest);
+        }
+        let tcp = TcpStream::connect(self.endpoint).await?;
+        let tls = TlsConnector::from(self.tls.clone())
+            .connect(
+                TLS_NAME.try_into().map_err(|_| Error::InvalidDiscovery)?,
+                tcp,
+            )
+            .await
+            .map_err(|_| Error::Transport)?;
+        if tls
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|c| c.first())
+            .map(|c| c.as_ref())
+            != Some(self.certificate.as_slice())
+        {
+            return Err(Error::InvalidResponse);
+        }
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+            .await
+            .map_err(|_| Error::Transport)?;
+        let connection = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let connection = Connection(connection);
+        let mut authorization = hyper::header::HeaderValue::from_str(&format!(
+            "Bearer {}",
+            protocol::hex(&self.credential)
+        ))
+        .map_err(|_| Error::InvalidRequest)?;
+        authorization.set_sensitive(true);
+        let request = Request::post(format!("/app/v1/{operation}"))
+            .header("host", TLS_NAME)
+            .header("authorization", authorization)
+            .header("content-type", "application/octet-stream")
+            .body(Full::new(Bytes::copy_from_slice(body)))
+            .map_err(|_| Error::InvalidRequest)?;
+        let response = sender
+            .send_request(request)
+            .await
+            .map_err(|_| Error::Transport)?;
+        if response.status() != hyper::StatusCode::OK {
+            return Err(Error::Http(response.status().as_u16()));
+        }
+        Ok((response, connection))
     }
 
     pub async fn save(&self, request: &protocol::SaveRequest) -> Result<serde_json::Value, Error> {

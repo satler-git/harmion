@@ -2,7 +2,7 @@
 
 更新日: 2026-11-18
 
-実装上の更新: native管理クライアントの最初の入口は、下記の当初候補のHTTP/WSではなく、証明書を固定したloopback HTTPSとした。ポート再利用時の別プロセスへ資格情報を送らないため、SDKはTLS検証とleaf完全一致を確認してからBearerを送る。`crates/local`はdaemonとSDKが共有するUnix所有者限定ファイル操作だけを持つ。ブラウザOAuth・WS・JSON-RPCはまだ実装していない。
+native管理クライアントの入口は証明書を固定したloopback HTTPS。SDKはTLS検証とleaf完全一致を確認してからBearerを送る。`crates/local`はdaemonとSDKが共有するUnix所有者限定ファイル操作を持つ。ブラウザOAuthは所有者が専用CAを信頼する別のloopback HTTPSで提供する。WS・JSON-RPCは未実装。
 
 [仕様](specification.md)と[内部設計](internal-design.md)を実装するための構成。ユーザーからの設計委任に基づく初期選定。現在の実装範囲は[進捗・レビュー記録](implementation-progress.md)を参照。実装の細かな型・ライブラリバージョン・wire形式は実装時に確定する。
 
@@ -107,7 +107,8 @@ NodeServiceはApp、peer、Provider操作を区別する。一般アプリ操作
 
 | API | 呼び出し元 | 初期通信 | 認証・権限 |
 |---|---|---|---|
-| App API | Wiki等と付属管理ツール | 認証付きloopback HTTP/WS。OAuthのTLS要件から外れるローカル専用構成 | アプリ資格情報、Read/Write/Call、管理操作には管理権限 |
+| App API | Wiki等と付属管理ツール | 証明書固定のloopback HTTPS | アプリ資格情報、Read/Write/Call、管理操作には管理権限 |
+| OAuth | nativeアプリの認可とトークン交換 | 所有者が信頼する専用CAのloopback HTTPS | public clientの登録、所有者による承認、PKCE S256 |
 | Provider API | Interpreter提供元 | 提供元発のloopback WS | アプリ資格情報、Provide、承認済み名前 |
 | Peer API | 別ノード | native間iroh、HTTPノードへHTTPS | ノード本人確認＋クラスタ参加資格 |
 
@@ -135,9 +136,9 @@ Read<all>やWrite<all>だけではノード追加・grant発行はできない�
 
 ### アプリの登録・失効
 
-アプリは要求する権限を提示し、所有者の承認後にノードローカルの資格情報を受け取る。OAuth Authorization Code＋PKCEを採用する方向とし、各ノードが認可サーバーとリソースサーバーになる。管理ツールも同じApp APIとgrant体系を使う。申請やclient_idの提示だけではgrantしない。
+アプリは要求する権限を提示し、所有者の承認後にノードローカルの資格情報を受け取る。各ノードがOAuth Authorization Code＋PKCE S256の認可サーバーとリソースサーバーになる。管理ツールも同じApp APIとgrant体系を使う。
 
-OAuthはアプリへの認可・トークン受け渡しを担い、所有者確認そのものはOSユーザーへの信頼で行う。初回管理grantはOS保護されたbootstrapから渡す。初期のローカル通信はloopback HTTP/WSに限定し、OAuthのTLS要件に完全準拠した構成とはしない。外部通信ではHTTPSを使う。public client、PKCE S256、短命な不透明access token、refresh tokenのローテーションを基本とする。scopeとFilterの符号化、具体期限、認可画面やredirectの実装は要検証。独立したユーザーアカウントや外部ログインサービスは必須にしない。
+初回管理grantはOS保護されたbootstrapから渡す。承認操作はその資格情報で発行した使い切りリンクでブラウザへ引き継ぐ。ブラウザ用サーバー証明書は専用CAで署名し、所有者はそのCAをブラウザに登録する。コード・トークンの状態遷移と現在のgrantの確定はnodeと保存層、HTTPS・認可画面はnet-nativeが担当する。scope、Filter、redirect、期限の契約は[App API](app-api.md#5-oauthとローカル構成)にまとめる。
 
 長期の資格情報は推測困難な秘密として発行し、サーバー側は検証用の値を保存する。資格情報の発行・保存・交換を専門のモジュールへ閉じ込める。具体的な秘密長・検証方式・OS保管APIは実装時に選ぶ。
 
@@ -223,9 +224,7 @@ workers-rsで必要なSQL transaction境界を表せない場合は、薄いJS/T
 
 ## 12. ライブラリとStorage Backendの選定
 
-- OAuth認可サーバーはoxide-authを第一候補として試作する。PKCEを必須化しS256のみ許可する。refresh tokenのローテーション・再利用検出、コードの一回限りの消費、永続化の原子性、保守状況、native/Wasm適合を確認して採用を確定する。
-- RustクライアントSDKではoauth2 crateを候補とする。これは認可サーバーの実装ではない。oauth-asは組込み認可サーバーの比較候補に留め、品質・実績を検証せず採用確定しない。
-- OAuth依存はnode/access::oauthへ閉じ込め、ライブラリ固有の型を公開App APIへ広げない。所有者の承認、Harmionのgrant、保存adapterはHarmion側で実装する。
+- native OAuthは対象をpublic clientのAuthorization Code＋PKCE S256とrefreshに限定し、既存の暗号・URLライブラリとDBトランザクションで実装する。SDKには取得済みaccess tokenでのApp API接続を追加する。OAuthクライアントライブラリとの互換性は検証が残る。
 - 端末の保存はSQLite＋rusqliteを選ぶ。bundledでSQLiteを同梱する案とし、nativeではDB専用スレッドで短い同期トランザクションを実行する。
 - CloudflareはSQLite-backed Durable ObjectsのSQL APIを使う。rusqliteで別DBを作らず、DO固有のtransaction adapterを実装する。
 - 初期は正本、再構築可能な現在値・索引、OAuth等のローカル状態をノードDB内の別テーブルへ格納する。同期するレコードを明示し、DBファイル全体を同期しない。ノード秘密鍵は別途OS・実行環境に適した保管方法を選ぶ。

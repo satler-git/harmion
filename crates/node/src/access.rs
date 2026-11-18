@@ -1,6 +1,6 @@
 use crate::{Error, storage::Transaction};
 use harmion_domain::{Content, ContentSnapshot};
-use harmion_protocol::AppId;
+use harmion_protocol::{AppId, FilterSpec, GrantSpec};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
@@ -50,6 +50,38 @@ impl Grants {
     }
 }
 
+impl From<GrantSpec> for Grants {
+    fn from(spec: GrantSpec) -> Self {
+        let filter = |value| match value {
+            FilterSpec::All => Filter::All,
+            FilterSpec::Kinds { kinds } => Filter::Kinds(kinds.into_iter().collect()),
+        };
+        Self {
+            read: spec.read.map(filter),
+            write: spec.write.map(filter),
+            manage_apps: spec.manage_apps,
+            manage_nodes: spec.manage_nodes,
+        }
+    }
+}
+
+impl From<Grants> for GrantSpec {
+    fn from(grants: Grants) -> Self {
+        let filter = |value| match value {
+            Filter::All => FilterSpec::All,
+            Filter::Kinds(kinds) => FilterSpec::Kinds {
+                kinds: kinds.into_iter().collect(),
+            },
+        };
+        Self {
+            read: grants.read.map(filter),
+            write: grants.write.map(filter),
+            manage_apps: grants.manage_apps,
+            manage_nodes: grants.manage_nodes,
+        }
+    }
+}
+
 /// High-entropy bearer secret supplied only by an authenticated transport.
 /// Redacted Debug prevents accidental inclusion in diagnostic messages.
 #[derive(Clone, PartialEq, Eq)]
@@ -93,9 +125,21 @@ pub(crate) fn authenticate(
     credential: &Credential,
     now: i64,
 ) -> Result<Principal, Error> {
-    let app = tx
-        .app_by_verifier(credential.verifier())?
-        .ok_or(Error::Unauthenticated)?;
+    let verifier = credential.verifier();
+    let app = match tx.app_by_verifier(verifier)? {
+        Some(app) => app,
+        None => {
+            let access = tx
+                .oauth_access(verifier)?
+                .filter(|access| access.expires_at > now)
+                .ok_or(Error::Unauthenticated)?;
+            let app = tx.app_by_id(access.app)?.ok_or(Error::Unauthenticated)?;
+            if app.grants.manage_apps || app.grants.manage_nodes {
+                return Err(Error::Unauthenticated);
+            }
+            app
+        }
+    };
     if app.revoked || now >= app.expires_at {
         return Err(Error::Unauthenticated);
     }

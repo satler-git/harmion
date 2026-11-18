@@ -10,6 +10,9 @@ harmion-domain = { path = "../domain" }
 harmion-node = { path = "../node" }
 harmion-protocol = { path = "../protocol" }
 bytes = "1"
+base64 = "0.22.1"
+url = "2.5.8"
+time = "0.3.55"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

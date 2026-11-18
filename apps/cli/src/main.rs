@@ -1,6 +1,7 @@
 use domain::{Change, ContentId, Field, UpdateId, Value};
 use harmion_client::{Client, ProtectedDir, protocol::*, random_id};
 use std::{collections::BTreeMap, fs::File, io::Read, path::Path};
+mod export;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 fn read(path: &str, max: usize) -> Result<Vec<u8>> {
@@ -70,6 +71,17 @@ async fn execute(args: &[String]) -> Result<serde_json::Value> {
         ("identity" | "capabilities" | "permissions" | "members", []) => {
             Ok(client.call(command, &[]).await?)
         }
+        ("export", [path]) => Ok(export::run(&client, path).await?),
+        ("oauth-register", [name, redirect]) => Ok(client
+            .call(
+                command,
+                &serde_json::to_vec(&OAuthRegistration {
+                    name: name.clone(),
+                    redirect_uri: redirect.clone(),
+                })?,
+            )
+            .await?),
+        ("oauth-consent", [request]) => Ok(client.call(command, &unhex::<32>(request)?).await?),
         (
             "get" | "conflicts" | "inspect" | "sync" | "retire" | "dismiss-retirement"
             | "confirm-retirement",
@@ -130,7 +142,7 @@ async fn execute(args: &[String]) -> Result<serde_json::Value> {
         _ => Err(USAGE.into()),
     }
 }
-const USAGE: &str = "usage: harmion --node DIR COMMAND ...\nidentity | capabilities | permissions | members\napprove|join PEER_JSON | sync|retire NODE_ID | change-grants JSON\nconfirm-retirement|dismiss-retirement CERTIFICATE_ID\njoin-recovery|trust-recovery-peer PEER_JSON (explicit local owner recovery)\nget|conflicts|inspect CONTENT_ID\ncreate BODY_FILE REQUEST_FILE [KIND...]\nedit|restore CONTENT_ID TOKEN BODY_FILE REQUEST_FILE\ndelete|keep CONTENT_ID TOKEN REQUEST_FILE\nresolve CONTENT_ID TOKEN BODY_FILE REQUEST_FILE VERSION_ID...\nsave REQUEST_FILE\nRequest files require an owner-only parent directory and must not exist. Restore replaces all known fields; this command supplies only body.";
+const USAGE: &str = "usage: harmion --node DIR COMMAND ...\nidentity | capabilities | permissions | members\napprove|join PEER_JSON | sync|retire NODE_ID | change-grants JSON\nconfirm-retirement|dismiss-retirement CERTIFICATE_ID\njoin-recovery|trust-recovery-peer PEER_JSON (explicit local owner recovery)\nget|conflicts|inspect CONTENT_ID\nexport NEW_DIRECTORY\noauth-register NAME REDIRECT_URI | oauth-consent REQUEST_ID\ncreate BODY_FILE REQUEST_FILE [KIND...]\nedit|restore CONTENT_ID TOKEN BODY_FILE REQUEST_FILE\ndelete|keep CONTENT_ID TOKEN REQUEST_FILE\nresolve CONTENT_ID TOKEN BODY_FILE REQUEST_FILE VERSION_ID...\nsave REQUEST_FILE\nRequest files require an owner-only parent directory and must not exist. Restore replaces all known fields; this command supplies only body.";
 #[tokio::main]
 async fn main() {
     match execute(&std::env::args().skip(1).collect::<Vec<_>>()).await {

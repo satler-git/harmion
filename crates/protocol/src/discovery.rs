@@ -69,6 +69,13 @@ pub struct ChangeGrantsRequest {
     pub revoked: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OAuthRegistration {
+    pub name: String,
+    pub redirect_uri: String,
+}
+
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

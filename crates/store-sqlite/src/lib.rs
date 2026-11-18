@@ -1,6 +1,7 @@
 //! Native SQLite adapter for the node transaction port.
 
 mod changes;
+mod oauth;
 mod query;
 mod query_session;
 
@@ -31,6 +32,31 @@ fn seq(value: u64) -> Result<i64, Error> {
     value.try_into().map_err(|_| Error::InvalidPage)
 }
 
+fn verify_identity(sql: &Connection, identity: Identity) -> Result<(), Error> {
+    let (cluster, node, epoch) = sql
+        .query_row(
+            "SELECT cluster,node,epoch FROM identity WHERE singleton=1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .map_err(db)?;
+    let stored = Identity {
+        cluster: ClusterId(fixed(cluster)?),
+        node: NodeId(fixed(node)?),
+        epoch: LogEpoch(fixed(epoch)?),
+    };
+    if stored != identity {
+        return Err(Error::IdentityMismatch);
+    }
+    Ok(())
+}
+
 pub struct SqliteStore {
     connection: Connection,
     identity: Identity,
@@ -55,7 +81,7 @@ impl SqliteStore {
         let version: i64 = tx
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(db)?;
-        if !(0..=8).contains(&version) {
+        if !(0..=9).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
@@ -132,27 +158,7 @@ impl SqliteStore {
                 CREATE TABLE membership_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), bytes BLOB NOT NULL);
                 PRAGMA user_version=5;").map_err(db)?;
         }
-        let stored = tx
-            .query_row(
-                "SELECT cluster,node,epoch FROM identity WHERE singleton=1",
-                [],
-                |r| {
-                    Ok((
-                        r.get::<_, Vec<u8>>(0)?,
-                        r.get::<_, Vec<u8>>(1)?,
-                        r.get::<_, Vec<u8>>(2)?,
-                    ))
-                },
-            )
-            .map_err(db)?;
-        let stored = Identity {
-            cluster: ClusterId(fixed(stored.0)?),
-            node: NodeId(fixed(stored.1)?),
-            epoch: LogEpoch(fixed(stored.2)?),
-        };
-        if stored != identity {
-            return Err(Error::IdentityMismatch);
-        }
+        verify_identity(&tx, identity)?;
         // Reject broken bytes/dependencies at startup; never salvage only the normal value.
         let mut storage = SqlTransaction { sql: &tx, identity };
         let graph = harmion_node::storage::read_graph(&mut storage)?;
@@ -166,7 +172,10 @@ impl SqliteStore {
         }
         if version < 8 {
             changes::initialize(&tx)?;
-            tx.pragma_update(None, "user_version", 8).map_err(db)?;
+        }
+        if version < 9 {
+            oauth::initialize(&tx)?;
+            tx.pragma_update(None, "user_version", 9).map_err(db)?;
         }
         tx.commit().map_err(db)?;
         Ok(Self {
@@ -177,6 +186,46 @@ impl SqliteStore {
 
     pub fn identity(&self) -> Identity {
         self.identity
+    }
+
+    /// Restore Content records into a fresh identity. The caller must acquire
+    /// the owner-protected backup's daemon lock before opening it.
+    pub fn restore_backup(
+        &mut self,
+        path: impl AsRef<Path>,
+        identity: Identity,
+    ) -> Result<(), Error> {
+        if self.identity.cluster != identity.cluster || self.identity.node == identity.node {
+            return Err(Error::IdentityMismatch);
+        }
+        let mut connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(db)?;
+        let tx = connection.transaction().map_err(db)?;
+        let version: i64 = tx
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(db)?;
+        if !(1..=9).contains(&version) {
+            return Err(Error::Storage(format!(
+                "unsupported schema version {version}"
+            )));
+        }
+        verify_identity(&tx, identity)?;
+        let mut source = SqlTransaction { sql: &tx, identity };
+        let high = source.accepted_high()?;
+        self.transaction(|destination| {
+            if destination.accepted_high()? != 0 {
+                return Err(Error::InvalidRequest);
+            }
+            let mut after = 0;
+            while after < high {
+                let entries = source.accepted_page(after, high)?;
+                after = entries.last().ok_or(Error::CorruptLog)?.seq;
+                let records: Vec<_> = entries.into_iter().map(|entry| entry.record).collect();
+                harmion_node::storage::accept_records(destination, &records)?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -473,11 +522,16 @@ impl Transaction for SqlTransaction<'_> {
             [],
         )
     }
-    fn content_entries(&mut self, content: ContentId) -> Result<Vec<LogEntry>, Error> {
+    fn content_entries(
+        &mut self,
+        content: ContentId,
+        through: Option<u64>,
+    ) -> Result<Vec<LogEntry>, Error> {
         let entries = self.read_entries(
             "SELECT log.seq,log.update_id,log.bytes,log.digest FROM content_records AS records
-             JOIN accept_log AS log ON log.seq=records.seq WHERE records.content=?1 ORDER BY records.seq",
-            [content.0],
+             JOIN accept_log AS log ON log.seq=records.seq WHERE records.content=?1 AND records.seq<=?2
+             ORDER BY records.seq",
+            params![content.0, through.map(seq).transpose()?.unwrap_or(i64::MAX)],
         )?;
         if entries
             .iter()
@@ -486,6 +540,76 @@ impl Transaction for SqlTransaction<'_> {
             return Err(Error::CorruptLog);
         }
         Ok(entries)
+    }
+    fn accepted_high(&mut self) -> Result<u64, Error> {
+        let high: i64 = self
+            .sql
+            .query_row("SELECT COALESCE(MAX(seq),0) FROM accept_log", [], |r| {
+                r.get(0)
+            })
+            .map_err(db)?;
+        high.try_into().map_err(|_| Error::CorruptLog)
+    }
+    fn accepted_page(&mut self, after: u64, high: u64) -> Result<Vec<LogEntry>, Error> {
+        self.read_entries(
+            "WITH candidates AS (
+                SELECT seq,length(bytes) AS bytes FROM accept_log
+                WHERE seq>?1 AND seq<=?2 ORDER BY seq LIMIT ?3
+            ), budget AS (
+                SELECT seq,SUM(bytes) OVER (ORDER BY seq) AS used FROM candidates
+            )
+            SELECT log.seq,log.update_id,
+                   CASE WHEN length(log.bytes)>?5 THEN x'' ELSE log.bytes END,log.digest
+            FROM budget JOIN accept_log AS log USING(seq)
+            WHERE budget.used<=?4 OR log.seq=(SELECT MIN(seq) FROM candidates)
+            ORDER BY log.seq",
+            params![
+                seq(after)?,
+                seq(high)?,
+                harmion_protocol::MAX_PAGE_ENTRIES as i64,
+                harmion_protocol::MAX_PAGE_RECORD_BYTES as i64,
+                harmion_protocol::MAX_RECORD_BYTES as i64,
+            ],
+        )
+    }
+    fn accepted_record(&mut self, id: UpdateId) -> Result<Option<Record>, Error> {
+        Ok(self
+            .read_entries(
+                "SELECT seq,update_id,bytes,digest FROM accept_log WHERE update_id=?1",
+                [id.0],
+            )?
+            .pop()
+            .map(|entry| entry.record))
+    }
+    fn export_content_ids(
+        &mut self,
+        through: u64,
+        after: Option<ContentId>,
+        limit: u32,
+    ) -> Result<Vec<ContentId>, Error> {
+        let mut statement;
+        let mut rows = if let Some(after) = after {
+            statement = self
+                .sql
+                .prepare_cached(
+                    "SELECT DISTINCT content FROM content_records WHERE content>?1 AND seq<=?2
+                 ORDER BY content LIMIT ?3",
+                )
+                .map_err(db)?;
+            statement
+                .query(params![after.0, seq(through)?, limit])
+                .map_err(db)?
+        } else {
+            statement = self.sql.prepare_cached(
+                "SELECT DISTINCT content FROM content_records WHERE seq<=?1 ORDER BY content LIMIT ?2"
+            ).map_err(db)?;
+            statement.query(params![seq(through)?, limit]).map_err(db)?
+        };
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().map_err(db)? {
+            result.push(ContentId(fixed(row.get(0).map_err(db)?)?));
+        }
+        Ok(result)
     }
     fn append(&mut self, record: &Record) -> Result<u64, Error> {
         self.sql

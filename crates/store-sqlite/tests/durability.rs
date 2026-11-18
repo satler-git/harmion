@@ -592,6 +592,50 @@ fn invalid_page_boundaries_do_not_advance_progress() {
 }
 
 #[test]
+fn replication_pages_stop_at_the_byte_budget_and_resume_at_the_next_record() {
+    let dir = Directory::new();
+    let mut store = dir.store(1);
+    let body = "x".repeat(800_000);
+    let mut records = vec![root()];
+    for id in 2..=7 {
+        records.push(record(
+            id,
+            Action::Edit,
+            &[id - 1],
+            Some((&body, &[id - 1])),
+        ));
+    }
+    save(&mut store, &records);
+    let high = store.transaction(replication::high).unwrap();
+    let front = store
+        .transaction(|tx| replication::page(tx, identity(1).epoch, 0, high))
+        .unwrap();
+    assert_eq!(front.entries.len(), 6);
+    assert_eq!(front.through, 6);
+    let tail = store
+        .transaction(|tx| replication::page(tx, identity(1).epoch, front.through, high))
+        .unwrap();
+    assert_eq!(tail.entries.len(), 1);
+    assert_eq!(tail.entries[0].record.bytes(), records[6].bytes());
+    assert_eq!(tail.through, high);
+
+    let mut restored = dir.store(2);
+    restored
+        .restore_backup(dir.path("1.db"), identity(1))
+        .unwrap();
+    assert_eq!(
+        restored
+            .transaction(|tx| Ok(tx
+                .entries()?
+                .into_iter()
+                .map(|entry| entry.record)
+                .collect::<Vec<_>>()))
+            .unwrap(),
+        records
+    );
+}
+
+#[test]
 fn fixed_high_multiple_pages_and_concurrent_connections_use_durable_cursor() {
     let dir = Directory::new();
     let mut a = dir.store(1);

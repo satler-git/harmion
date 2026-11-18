@@ -38,6 +38,7 @@ Editの省略項目は未変更。Restoreの省略した既知属性は不存在
 - 編集トークンはcontent_id・固定basis・用途をDBに保存し、履歴から当時の候補を再構築する。使い捨てにせず、現在basisへ差し替えない。ReadなしのWriteへ別途トークンを渡せるが、トークン自体は権限を与えない。
 - 保存前後の通常kindsで現在のWriteを確認する。削除済みContentの古いlive basisからの編集も、保持された現在の項目で認可する。
 - 保存成功時は更新、受理ログ、結果用トークン、再送結果を一緒にcommitする。
+- native HTTPSでは、閲覧可能な保存時snapshotが応答上限を超える場合も、HTTP 200で元の更新IDと保存完了を返す。この場合は `view: null` と `view_error: "response_too_large"` を返す。
 - 再送は元のupdate_idと保存時snapshotを返す。本文は保存時に返せた場合のみ候補とし、さらに現在のReadが保存時と現在のkindsの両方を許可する場合に限る。失効・期限切れなら再送も拒否。Writeのみの元受領結果に、後から本文を付け足さない。
 - 一般ReadViewはContent、不透明トークン、公開可能な項目競合、削除競合フラグのみ。内部basisや非公開kind候補は含めない。管理inspectは削除済みContentと復元用トークンを取得できる。
 
