@@ -134,7 +134,7 @@ pub async fn serve<S: Store + Send + 'static>(
         let store = store.clone();
         tasks.spawn(async move {
             let _permit = permit;
-            let _ = timeout(DEADLINE, async {
+            let result = timeout(DEADLINE, async {
                 let connection = Connection(incoming.await.map_err(transport)?);
                 let key = PeerKey::Iroh(*connection.0.remote_id().as_bytes());
                 let (mut send, mut recv) = connection.0.accept_bi().await.map_err(transport)?;
@@ -159,6 +159,7 @@ pub async fn serve<S: Store + Send + 'static>(
                 Ok::<(), Error>(())
             })
             .await;
+            crate::trace_connection("peer iroh", result);
         });
     }
     tasks.abort_all();

@@ -6,6 +6,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+thiserror.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 harmion-domain = { path = "../../crates/domain" }
 harmion-protocol = { path = "../../crates/protocol" }
 harmion-node = { path = "../../crates/node" }

@@ -7,7 +7,8 @@ pub const MAX_DEPTH: usize = 64;
 pub const MAX_ITEMS: usize = 32_768;
 const MAGIC: &[u8; 4] = b"HUP\0";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{self:?}")]
 pub enum CodecError {
     InvalidJson,
     InvalidHex,
@@ -25,12 +26,6 @@ pub enum CodecError {
     NonCanonical,
     TrailingBytes,
 }
-impl std::fmt::Display for CodecError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-impl std::error::Error for CodecError {}
 
 /// Preserves canonical bytes for storage and relay. Digest is not a signature.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -96,7 +96,7 @@ pub async fn serve<S: Store + Send + 'static>(
         let identity = identity.clone();
         connections.spawn(async move {
             let _permit = permit;
-            let _ = timeout(DEADLINE, async {
+            let result = timeout(DEADLINE, async {
                 let peers = store.run(|s| s.transaction(|tx| tx.peers())).await?;
                 let config = identity.peer_server_config(&peers)?;
                 let tls = TlsAcceptor::from(Arc::new(config))
@@ -120,6 +120,7 @@ pub async fn serve<S: Store + Send + 'static>(
                     .map_err(transport)
             })
             .await;
+            crate::trace_connection("peer HTTPS", result);
         });
     }
 }
@@ -223,7 +224,11 @@ pub async fn exchange(
             .await
             .map_err(transport)?;
         tokio::spawn(async move {
-            let _ = timeout(DEADLINE, connection).await;
+            let result = timeout(DEADLINE, connection).await;
+            crate::trace_connection(
+                "outgoing peer HTTPS",
+                result.map(|result| result.map_err(transport)),
+            );
         });
         let bytes = encode_peer_request(&PeerRequest {
             cluster: local.cluster,
