@@ -141,7 +141,7 @@ fn provision_oauth(path: &str, replace: bool) -> Result<()> {
     let _lock = directory.lock()?;
     let config: Config = serde_json::from_slice(&directory.read("node.json", 4096)?)?;
     let identity = config.identity()?;
-    let tls = BrowserTls::generate(&hex(&identity.node.0[..4]))?;
+    let tls = BrowserTls::generate(&format!("OAuth {}", hex(&identity.node.0[..4])))?;
     let pem = tls.root_pem();
     let bytes = serde_json::to_vec(&OAuthIdentity {
         root_der: tls.root_der,

@@ -2,6 +2,8 @@
 pub use harmion_local::ProtectedDir;
 pub use harmion_protocol as protocol;
 mod export;
+mod export_directory;
+mod resolution;
 mod subscription;
 pub use subscription::{Subscription, SubscriptionCheckpoint, SubscriptionNotification};
 
@@ -199,6 +201,21 @@ impl Client {
     pub async fn save(&self, request: &protocol::SaveRequest) -> Result<serde_json::Value, Error> {
         let bytes = protocol::encode_save_request(request).map_err(|_| Error::InvalidRequest)?;
         self.call("save", &bytes).await
+    }
+
+    /// Join through an owner-verified peer registration and publish the updated
+    /// local registration for subsequent peer approvals.
+    pub async fn join_directory(
+        &self,
+        directory: &ProtectedDir,
+        peer_registration: &[u8],
+        recovery: bool,
+    ) -> Result<serde_json::Value, Error> {
+        let operation = if recovery { "join-recovery" } else { "join" };
+        let registration = self.call(operation, peer_registration).await?;
+        let bytes = serde_json::to_vec(&registration).map_err(|_| Error::InvalidResponse)?;
+        directory.replace("peer.json", &bytes)?;
+        Ok(registration)
     }
     pub async fn get(
         &self,

@@ -4,8 +4,8 @@ use crate::{
     CodecError,
     record::{Decoder, Encoder},
 };
-use harmion_domain::{Change, ContentId, Field, Value};
-use std::collections::BTreeMap;
+use harmion_domain::{Change, ContentId, Field, UpdateId, Value};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AppId(pub [u8; 32]);
@@ -42,7 +42,23 @@ pub enum Command {
         token: EditToken,
         fields: BTreeMap<Field, Value>,
     },
+    Select {
+        token: EditToken,
+        selections: BTreeMap<Field, FieldSelection>,
+    },
+    RestoreFrom {
+        token: EditToken,
+        body: String,
+        fields: BTreeMap<Field, UpdateId>,
+    },
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldSelection {
+    pub version: UpdateId,
+    pub replaces: BTreeSet<UpdateId>,
+}
+
 impl Command {
     pub fn token(&self) -> Option<EditToken> {
         match self {
@@ -51,6 +67,8 @@ impl Command {
             | Self::Resolve { token, .. }
             | Self::Delete { token }
             | Self::Keep { token }
+            | Self::Select { token, .. }
+            | Self::RestoreFrom { token, .. }
             | Self::Restore { token, .. } => Some(*token),
         }
     }
@@ -78,6 +96,8 @@ pub fn encode_save_request(request: &SaveRequest) -> Result<Vec<u8>, CodecError>
         Command::Delete { .. } => 3,
         Command::Keep { .. } => 4,
         Command::Restore { .. } => 5,
+        Command::Select { .. } => 6,
+        Command::RestoreFrom { .. } => 7,
     })?;
     if let Some(token) = request.command.token() {
         e.raw(&token.0)?;
@@ -100,6 +120,25 @@ pub fn encode_save_request(request: &SaveRequest) -> Result<Vec<u8>, CodecError>
                 e.ids(&change.replaces)?;
             }
         }
+        Command::Select { selections, .. } => {
+            e.count(selections.len())?;
+            for (field, selection) in selections {
+                e.field(field)?;
+                e.raw(&selection.version.0)?;
+                e.ids(&selection.replaces)?;
+            }
+        }
+        Command::RestoreFrom { body, fields, .. } => {
+            e.string(body)?;
+            e.count(fields.len())?;
+            for (field, version) in fields {
+                if *field == Field::Body {
+                    return Err(CodecError::InvalidFieldValue);
+                }
+                e.field(field)?;
+                e.raw(&version.0)?;
+            }
+        }
         Command::Delete { .. } | Command::Keep { .. } => (),
     }
     Ok(e.finish())
@@ -117,7 +156,7 @@ pub fn decode_save_request(bytes: &[u8]) -> Result<SaveRequest, CodecError> {
     let request_id = RequestId(d.fixed()?);
     let content_id = ContentId(d.fixed()?);
     let tag = d.tag()?;
-    if tag > 5 {
+    if tag > 7 {
         return Err(CodecError::InvalidTag);
     }
     let token = if tag != 0 {
@@ -165,9 +204,40 @@ pub fn decode_save_request(bytes: &[u8]) -> Result<SaveRequest, CodecError> {
         3 => Command::Delete {
             token: token.unwrap(),
         },
-        _ => Command::Keep {
+        4 => Command::Keep {
             token: token.unwrap(),
         },
+        6 => {
+            let mut selections = BTreeMap::new();
+            for _ in 0..d.count()? {
+                let field = d.field()?;
+                let selection = FieldSelection {
+                    version: UpdateId(d.fixed()?),
+                    replaces: d.ids()?,
+                };
+                if selections.insert(field, selection).is_some() {
+                    return Err(CodecError::Duplicate);
+                }
+            }
+            Command::Select {
+                token: token.unwrap(),
+                selections,
+            }
+        }
+        _ => {
+            let body = d.string()?;
+            let mut fields = BTreeMap::new();
+            for _ in 0..d.count()? {
+                if fields.insert(d.field()?, UpdateId(d.fixed()?)).is_some() {
+                    return Err(CodecError::Duplicate);
+                }
+            }
+            Command::RestoreFrom {
+                token: token.unwrap(),
+                body,
+                fields,
+            }
+        }
     };
     d.finish()?;
     let request = SaveRequest {

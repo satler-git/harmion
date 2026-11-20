@@ -5,6 +5,7 @@ Unix用のnative管理CLIで、署名付き参加・退役・却下証明をノ�
 ## 起動と参加
 
 ```sh
+npm ci --prefix apps/admin/ui
 cargo build --workspace
 target/debug/harmiond init ./node-a
 ```
@@ -120,6 +121,38 @@ target/debug/harmion --node ./recovery approve ./node-b/peer.json
 
 自ノードからの自動同期は起動時、Contentの新規保存が確定したとき、および周期照合で行う。周期は標準30秒で、`--sync-seconds 1`等で変更できる。0では自ノードからの開始は手動操作に限り、認証済みPeerからの同期は受け付ける。到達不能なPeerは保存後も最大1時間のbackoffとjitterに従い、状態が変化した時だけstderrへ記録する。SIGINT/SIGTERMで接続taskと同期taskを停止する。再起動後もID・鍵・ログ・cursor・編集token・再送結果を保持する。
 
+## 管理 Web アプリ
+
+フロントエンドは Svelte・TypeScript・Vite で構成する。開発時は Node.js 22.12以降または24系と npm を使い、初回に `npm ci --prefix apps/admin/ui` を実行する。Cargo が UI をビルドして管理アプリの実行ファイルに同梱する。利用時には Node.js プロセスは不要。型チェックは `npm --prefix apps/admin/ui run check` で実行できる。
+
+UI を更新した後は `cargo build --workspace` を実行し、起動中のノードと管理アプリを停止して再起動する。既存のノード・管理アプリの状態ディレクトリを指定する。
+
+`harmiond` を起動した状態で、管理アプリ専用の CA を一度発行する。管理アプリの秘密鍵は新しい所有者専用ディレクトリに格納される。
+
+```sh
+target/debug/harmion-admin provision ./admin-ui > harmion-admin-root.pem
+target/debug/harmion-admin run ./node-a ./admin-ui
+```
+
+ブラウザに `harmion-admin-root.pem` を Web サイト用 CA として登録し、端末に表示された単回リンクを開く。リンクは2分、セッションは30分有効。再読込後は、新しいセッションを作るために管理アプリを再起動する。特定の Content を開く場合は `run` の末尾に Content ID を指定する。公開 CA は `harmion-admin root ./admin-ui` で再取得できる。OAuth の認可画面を開く場合は、[ノードの OAuth 専用 CA](#oauthを有効にする) も登録する。
+
+画面はダークテーマを標準とし、概要・コンテンツ・競合解決・Peer・アプリ・Export を分ける。コンテンツ画面で本文と属性を読み、競合解決画面で候補を比較・編集・選択する。画面の切替中も編集内容と保存の再試行要求を保持する。ノードの管理資格情報は管理アプリのプロセスが使用する。 [管理 Web アプリの契約](specification.md#64-ローカル管理-web-アプリ)
+
+概要にはローカルの Content 数、受理更新数、レコードのバイト数、有効なアプリ登録数を表示する。「最新の状態に更新」で再取得する。参加状態の Active は到達可能性の表示とは分け、手動同期の結果に送受信件数と実行時刻を表示する。
+
+Peer 画面では自身の接続情報を QR と接続コードで共有できる。相手の管理画面でカメラ・QR画像・貼り付けのいずれかで読み込み、操作・Cluster ID・Node ID・署名公開鍵を確認して承認する。読み取りでは参加状態は変化しない。確認は2分有効で1回限り。相手と同じ Cluster ID で初期化し、既存ノードで相手の参加を承認した後、新ノード側で「このノードを相手のクラスタに参加させる」を行う。登録情報が QR の容量を超える場合は接続コードをコピーする。
+
+アプリ画面は1行の要求コードを受け取る。OAuth の認可画面に表示された `harmion-auth:v1:REQUEST_ID` を貼り付けると、ノードに保存されたアプリ名・コールバック・要求権限を表示する。その後に準備した認可画面で許可または拒否する。初回のアプリ登録には `harmion-app:v1:BASE64URL` を使う。`BASE64URL` は `{"name":"My app","redirect_uri":"http://127.0.0.1/callback"}` の UTF-8 JSON をパディングなしで符号化した値。登録結果の client ID と endpoint を含む1行の JSON を要求元へコピーする。
+
+CLI で本文の共通祖先とマージ案を取得する場合は、`inspect` の管理トークンと、表示された本文候補の版 ID を2つ指定する。
+
+```sh
+target/debug/harmion --node ./node-a merge-base CONTENT_ID TOKEN LEFT_VERSION RIGHT_VERSION
+target/debug/harmion --node ./node-a merge-plan CONTENT_ID TOKEN LEFT_VERSION RIGHT_VERSION
+```
+
+共通の本文版が複数なら候補 ID が返る。利用する版 ID を最後の引数に指定できる。案を確認した後、既存の `resolve` で保存する。属性・kind を CLI から選択するには `select CONTENT_ID TOKEN SELECTIONS_JSON REQUEST_FILE` を使う。`SELECTIONS_JSON` は `field`・`version`・`replaces` のオブジェクトを並べた配列。例は [App API の競合解決](app-api.md#競合候補の選択と本文の三者マージ) を参照。
+
 ## 古いノードバックアップからの復元
 
 停止したノードのディレクトリのバックアップから、受理済みのContent履歴を新しいノードに復元する。手順では復元先に新しいNode ID・ログ世代・鍵を作る。元のNode IDと受領済みログ位置を再利用すると、相手が更新を受領済みと扱うことがある。
@@ -152,6 +185,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
 python3 design_checks/two_process_sync.py
 python3 design_checks/restore_process.py
+python3 design_checks/admin_process.py
 cargo build -p harmion-net-native --example local_relay
 python3 design_checks/two_process_sync.py --iroh
 python3 design_checks/multi_process_sync.py --iroh

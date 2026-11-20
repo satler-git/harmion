@@ -248,6 +248,25 @@ impl<V: Eq> Graph<V> {
         self.updates.values()
     }
 
+    /// Body versions visible in the shared causal history of two updates.
+    pub fn common_body_versions(
+        &self,
+        left: UpdateId,
+        right: UpdateId,
+    ) -> Result<BTreeSet<UpdateId>, Error> {
+        let left_scope = self.closure(&BTreeSet::from([left]))?;
+        let right_scope = self.closure(&BTreeSet::from([right]))?;
+        if self.updates[&left].content_id != self.updates[&right].content_id {
+            return Err(Error::InvalidBasis);
+        }
+        let shared = left_scope.intersection(&right_scope).copied().collect();
+        Ok(self
+            .project(&shared)
+            .fields
+            .remove(&Field::Body)
+            .unwrap_or_default())
+    }
+
     fn closure(&self, basis: &BTreeSet<UpdateId>) -> Result<BTreeSet<UpdateId>, Error> {
         let mut found = BTreeSet::new();
         let mut pending: Vec<_> = basis.iter().copied().collect();

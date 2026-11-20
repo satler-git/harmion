@@ -7,6 +7,10 @@ use crate::{
 };
 use harmion_domain::*;
 use harmion_protocol::{AppId, Command, EditToken, Record, SaveRequest, encode_save_request};
+use harmion_protocol::{
+    hex,
+    resolution::{MergeInput, MergeInputRequest, MergePart},
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Host-provided entropy and UTC clock; neither is inferred from untrusted requests.
@@ -186,6 +190,23 @@ pub fn inspect(
 ) -> Result<ConflictView, Error> {
     read_conflicts(store, host, credential, id, true)
 }
+
+pub fn metrics(
+    store: &mut impl Store,
+    credential: &Credential,
+    now: i64,
+) -> Result<harmion_protocol::metrics::NodeMetrics, Error> {
+    store.transaction(|tx| {
+        if !authenticate(tx, credential, now)?
+            .app
+            .grants
+            .is_administrator()
+        {
+            return Err(Error::Forbidden);
+        }
+        tx.node_metrics(now)
+    })
+}
 fn read_conflicts(
     store: &mut impl Store,
     host: &mut impl Host,
@@ -235,6 +256,84 @@ fn token_snapshot(
         return Err(Error::InvalidToken);
     }
     Ok((state.purpose, graph.snapshot_at(content, &state.basis)?))
+}
+
+fn candidate_value<'a>(
+    snapshot: &'a ContentSnapshot,
+    field: &Field,
+    version: UpdateId,
+) -> Option<&'a Value> {
+    let state = snapshot.fields.get(field)?;
+    state
+        .candidates
+        .iter()
+        .find(|candidate| candidate.versions.contains(&version))
+        .map(|candidate| &candidate.value)
+}
+
+/// Historical bodies are available only to the owner for two body versions in
+/// the fixed management snapshot. Concurrent arrivals cannot change the pair.
+pub fn merge_input(
+    store: &mut impl Store,
+    credential: &Credential,
+    now: i64,
+    request: MergeInputRequest,
+) -> Result<MergeInput, Error> {
+    store.transaction(|tx| {
+        if !authenticate(tx, credential, now)?
+            .app
+            .grants
+            .is_administrator()
+        {
+            return Err(Error::Forbidden);
+        }
+        let graph = read_content_graph(tx, request.content)?;
+        let (purpose, snapshot) = token_snapshot(tx, &graph, request.token, request.content)?;
+        if purpose != TokenPurpose::Manage {
+            return Err(Error::InvalidToken);
+        }
+        let body = snapshot.fields.get(&Field::Body).ok_or(Error::CorruptLog)?;
+        let is_candidate = |version| {
+            body.candidates
+                .iter()
+                .any(|c| c.versions.contains(&version))
+        };
+        if request.left == request.right
+            || !is_candidate(request.left)
+            || !is_candidate(request.right)
+        {
+            return Err(Error::InvalidRequest);
+        }
+        let version = match request.part {
+            MergePart::Left => request.left,
+            MergePart::Right => request.right,
+            MergePart::Base(selected) => {
+                let bases = graph.common_body_versions(request.left, request.right)?;
+                match selected {
+                    Some(version) if bases.contains(&version) => version,
+                    Some(_) => return Err(Error::InvalidRequest),
+                    None if bases.is_empty() => return Ok(MergeInput::NoBase),
+                    None if bases.len() == 1 => *bases.first().expect("one base"),
+                    None => {
+                        return Ok(MergeInput::ChooseBase {
+                            versions: bases.into_iter().map(|version| hex(&version.0)).collect(),
+                        });
+                    }
+                }
+            }
+        };
+        let Some(Value::Body(text)) = graph
+            .update(version)
+            .and_then(|update| update.changes.get(&Field::Body))
+            .map(|change| &change.value)
+        else {
+            return Err(Error::CorruptLog);
+        };
+        Ok(MergeInput::Body {
+            version: hex(&version.0),
+            text: text.clone(),
+        })
+    })
 }
 
 fn save_response(
@@ -370,15 +469,37 @@ pub fn save_with_outcome(
                     );
                 }
             }
-            Command::Resolve { changes, .. } => {
+            Command::Resolve { .. } | Command::Select { .. } => {
                 let (purpose, snapshot) = fixed.as_ref().ok_or(Error::InvalidToken)?;
                 if !matches!(purpose, TokenPurpose::Resolve | TokenPurpose::Manage) {
                     return Err(Error::InvalidToken);
                 }
+                let changes = match &request.command {
+                    Command::Resolve { changes, .. } => changes.clone(),
+                    Command::Select { selections, .. } => selections
+                        .iter()
+                        .map(|(field, selection)| {
+                            if matches!(field, Field::Kind(_)) && !grants.is_administrator() {
+                                return Err(Error::Forbidden);
+                            }
+                            let value = candidate_value(snapshot, field, selection.version)
+                                .filter(|_| selection.replaces.contains(&selection.version))
+                                .ok_or(Error::InvalidRequest)?;
+                            Ok((
+                                field.clone(),
+                                Change {
+                                    value: value.clone(),
+                                    replaces: selection.replaces.clone(),
+                                },
+                            ))
+                        })
+                        .collect::<Result<_, Error>>()?,
+                    _ => unreachable!(),
+                };
                 if changes.is_empty() {
                     return Err(Error::InvalidRequest);
                 }
-                for (field, change) in changes {
+                for (field, change) in &changes {
                     if matches!(field, Field::Kind(_)) && !grants.is_administrator() {
                         return Err(Error::Forbidden);
                     }
@@ -393,7 +514,7 @@ pub fn save_with_outcome(
                     }
                 }
                 update.action = Action::Edit;
-                update.changes = changes.clone();
+                update.changes = changes;
             }
             Command::Delete { .. } => {
                 let (_, snapshot) = fixed.as_ref().ok_or(Error::InvalidToken)?;
@@ -405,8 +526,8 @@ pub fn save_with_outcome(
                 }
                 update.action = Action::Delete;
             }
-            Command::Keep { .. } | Command::Restore { .. } => {
-                let (purpose, _) = fixed.as_ref().ok_or(Error::InvalidToken)?;
+            Command::Keep { .. } | Command::Restore { .. } | Command::RestoreFrom { .. } => {
+                let (purpose, snapshot) = fixed.as_ref().ok_or(Error::InvalidToken)?;
                 if !grants.is_administrator() {
                     return Err(Error::Forbidden);
                 }
@@ -417,6 +538,16 @@ pub fn save_with_outcome(
                     Command::Restore { fields, .. } => {
                         update.action = Action::Restore;
                         update.changes = graph.restore_changes(&update.basis, fields.clone())?;
+                    }
+                    Command::RestoreFrom { body, fields, .. } => {
+                        let mut values = BTreeMap::from([(Field::Body, Value::Body(body.clone()))]);
+                        for (field, version) in fields {
+                            let value = candidate_value(snapshot, field, *version)
+                                .ok_or(Error::InvalidRequest)?;
+                            values.insert(field.clone(), value.clone());
+                        }
+                        update.action = Action::Restore;
+                        update.changes = graph.restore_changes(&update.basis, values)?;
                     }
                     _ => update.action = Action::Keep,
                 }

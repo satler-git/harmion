@@ -34,6 +34,26 @@ editはContent ID、編集トークン、request_id、変更項目を受け取�
 
 get_conflictsは権限内の候補と解決トークンを返す。resolveは解決する項目と候補を明示して新しい更新を作る。候補の一つをそのまま選ぶ場合も新しい解決更新とする。複数項目を一度に解決できるが、取得した全競合を自動的に対象にしない。未確認の並行更新は残す。
 
+### 競合候補の選択と本文の三者マージ
+
+保存の `Select` は、解決または管理トークンが固定した候補の版 ID を指定する。置き換える版 ID も列挙し、選択した版をそこに含める。属性の unset と null、kind の所属と非所属はそれぞれ候補の値をそのまま使う。kind の選択と削除済み Content の復元には全権限と管理画面で取得した範囲が必要。保存要求の形式は[HRQ-v1](../contracts/app-save-v1.md)を参照。
+
+CLI の選択 JSON は次の形を使う。版 ID は実際の64桁の16進値に置き換える。
+
+```json
+[
+  {
+    "field": {"type": "attribute", "namespace": "wiki", "key": "title"},
+    "version": "SELECTED_VERSION",
+    "replaces": ["SELECTED_VERSION", "OTHER_VERSION"]
+  }
+]
+```
+
+`POST /app/v1/merge-input` は所有者専用。32バイトずつの Content ID、`inspect` のトークン、左・右の本文候補の版 ID、取得対象を指定する1バイトが続く。取得対象は `0` が共通本文版、`1` が明示した共通本文版（追加の32バイトが続く）、`2` が左、`3` が右。いずれもトークンが固定した2つの本文候補を検査する。
+
+共通本文版は、2候補の因果履歴の共通部分における本文候補。返却は `status: "body"`、`version`、`text`。複数ある場合は `status: "choose_base"` と `versions` を返し、共通本文版がなければ `status: "no_base"` を返す。Rust SDK は取得した3つの本文から行単位の三者マージ案を作り、重なる変更を競合マーカーで示す。案の生成は履歴を更新せず、利用者が確認した本文と置換対象を指定して既存の `Resolve` で保存する。
+
 ## 3. QueryとSubscribe
 
 queryは一回の固定スナップショットをページ取得し、購読を作らない。期限切れなら最初から取り直す。Query ASTと基本演算子はspecificationの6.1を参照。
@@ -95,6 +115,16 @@ SDKは通知を適用してから対応カーソルを保存する。購読キ�
 - Rust SDK は `subscribe`、`subscription_next`、`unsubscribe` を提供する。初回取得中のキャッシュは仮状態として保持し、完了時に公開する。`checkpoint` は適用済みのカーソルとキャッシュを一緒に取得する。初回取得中に通信が失敗・中断した場合は、新しい購読で取り直す。[SDKの購読](../crates/client/src/subscription.rs)
 
 ## 4. その他のAPI
+
+### ノードの状態指標
+
+`POST /app/v1/metrics` は本文なしで呼び、全管理権限を必要とする。Content の総数 `contents`、表示中の数 `visible_contents`、受理済み更新数 `accepted_updates`、更新レコードのバイト合計 `record_bytes`、期限内かつ失効していないアプリ登録数 `active_apps` を返す。数は精度を保つため10進文字列。ノードの同一トランザクションで集計し、DB の余白・索引サイズやプロセスの CPU・メモリ使用量は集計範囲外。
+
+### 管理 Web アプリの接続コード
+
+Peer の接続コードは `harmion-peer:v1:z:BASE64URL`。ペイロードは公開 `PeerRegistration` の UTF-8 JSON を gzip 圧縮し、パディングなし Base64url で符号化したもの。展開後のデータは1 MiBまで。圧縮なしの `harmion-peer:v1:BASE64URL` も読み取れる。管理 Web アプリの `peer-preview` はクラスタ・Node ID・公開鍵を表示する単回の確認値を作る。変更を行う `peer-confirm` はその値を消費し、既存の App API の参加・承認処理を呼ぶ。読み取り・プレビューだけでは参加状態を更新しない。
+
+アプリの登録コードは `harmion-app:v1:BASE64URL`。`name` と `redirect_uri` の JSON を同じ方式で符号化する。アプリが認可を開始した後は、認可画面の `harmion-auth:v1:REQUEST_ID` を所有者が管理画面に貼り付ける。`POST /app/v1/oauth-preview` は32バイトの要求IDを受け取り、ManageApps 権限を検査した上で要求元と権限を返す。所有者の確認後は既存の認可画面で許可・拒否し、登録済み callback へ戻る。
 
 capabilitiesはAPI版・対応操作・上限、permissionsは自分のgrantを返す。sync_statusは到達状況や複製確認を返し、ローカル保存成功と区別する。
 

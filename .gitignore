@@ -1,2 +1,11 @@
 /target/
 __pycache__/
+node/
+/node-a/
+/node-b/
+/admin-ui/
+/harmion-admin-root.pem
+/node-a-oauth-root.pem
+
+/apps/admin/ui/node_modules/
+/apps/admin/ui/dist/

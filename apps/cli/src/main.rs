@@ -1,7 +1,7 @@
 use domain::{Change, ContentId, Field, UpdateId, Value};
 use harmion_client::{Client, ProtectedDir, protocol::*, random_id};
+use resolution::{MergeInputRequest, MergePart, parse_selections};
 use std::{collections::BTreeMap, fs::File, io::Read, path::Path};
-mod export;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 fn read(path: &str, max: usize) -> Result<Vec<u8>> {
@@ -62,16 +62,17 @@ async fn execute(args: &[String]) -> Result<serde_json::Value> {
     }
     let client = Client::from_directory(directory)?;
     match (command.as_str(), rest) {
-        ("join" | "join-recovery", [path]) => {
-            let registration = client.call(command, &read(path, MAX_RECORD_BYTES)?).await?;
-            ProtectedDir::open(directory)?
-                .replace("peer.json", &serde_json::to_vec(&registration)?)?;
-            Ok(registration)
-        }
+        ("join" | "join-recovery", [path]) => Ok(client
+            .join_directory(
+                &ProtectedDir::open(directory)?,
+                &read(path, MAX_RECORD_BYTES)?,
+                command == "join-recovery",
+            )
+            .await?),
         ("identity" | "capabilities" | "permissions" | "members", []) => {
             Ok(client.call(command, &[]).await?)
         }
-        ("export", [path]) => Ok(export::run(&client, path).await?),
+        ("export", [path]) => Ok(client.export_directory(path).await?),
         ("oauth-register", [name, redirect]) => Ok(client
             .call(
                 command,
@@ -139,10 +140,35 @@ async fn execute(args: &[String]) -> Result<serde_json::Value> {
             };
             save(&client, ContentId(unhex(id)?), command, request_file).await
         }
+        ("select", [id, token, selections, request_file]) => {
+            let selections = parse_selections(serde_json::from_slice(&read(
+                selections,
+                MAX_RECORD_BYTES,
+            )?)?)?;
+            let command = Command::Select {
+                token: EditToken(unhex(token)?),
+                selections,
+            };
+            save(&client, ContentId(unhex(id)?), command, request_file).await
+        }
+        ("merge-base" | "merge-plan", [id, token, left, right, base @ ..]) if base.len() <= 1 => {
+            let request = MergeInputRequest {
+                content: ContentId(unhex(id)?),
+                token: EditToken(unhex(token)?),
+                left: UpdateId(unhex(left)?),
+                right: UpdateId(unhex(right)?),
+                part: MergePart::Base(base.first().map(|id| unhex(id).map(UpdateId)).transpose()?),
+            };
+            if command == "merge-base" {
+                Ok(serde_json::to_value(client.merge_input(request).await?)?)
+            } else {
+                Ok(serde_json::to_value(client.merge_plan(request).await?)?)
+            }
+        }
         _ => Err(USAGE.into()),
     }
 }
-const USAGE: &str = "usage: harmion --node DIR COMMAND ...\nidentity | capabilities | permissions | members\napprove|join PEER_JSON | sync|retire NODE_ID | change-grants JSON\nconfirm-retirement|dismiss-retirement CERTIFICATE_ID\njoin-recovery|trust-recovery-peer PEER_JSON (explicit local owner recovery)\nget|conflicts|inspect CONTENT_ID\nexport NEW_DIRECTORY\noauth-register NAME REDIRECT_URI | oauth-consent REQUEST_ID\ncreate BODY_FILE REQUEST_FILE [KIND...]\nedit|restore CONTENT_ID TOKEN BODY_FILE REQUEST_FILE\ndelete|keep CONTENT_ID TOKEN REQUEST_FILE\nresolve CONTENT_ID TOKEN BODY_FILE REQUEST_FILE VERSION_ID...\nsave REQUEST_FILE\nRequest files require an owner-only parent directory and must not exist. Restore replaces all known fields; this command supplies only body.";
+const USAGE: &str = "usage: harmion --node DIR COMMAND ...\nidentity | capabilities | permissions | members\napprove|join PEER_JSON | sync|retire NODE_ID | change-grants JSON\nconfirm-retirement|dismiss-retirement CERTIFICATE_ID\njoin-recovery|trust-recovery-peer PEER_JSON (explicit local owner recovery)\nget|conflicts|inspect CONTENT_ID\nexport NEW_DIRECTORY\noauth-register NAME REDIRECT_URI | oauth-consent REQUEST_ID\ncreate BODY_FILE REQUEST_FILE [KIND...]\nedit|restore CONTENT_ID TOKEN BODY_FILE REQUEST_FILE\ndelete|keep CONTENT_ID TOKEN REQUEST_FILE\nresolve CONTENT_ID TOKEN BODY_FILE REQUEST_FILE VERSION_ID...\nselect CONTENT_ID TOKEN SELECTIONS_JSON REQUEST_FILE\nmerge-base|merge-plan CONTENT_ID TOKEN LEFT_VERSION RIGHT_VERSION [BASE_VERSION]\nsave REQUEST_FILE\nRequest files require an owner-only parent directory and must not exist. Restore replaces all known fields; this command supplies only body.";
 #[tokio::main]
 async fn main() {
     match execute(&std::env::args().skip(1).collect::<Vec<_>>()).await {

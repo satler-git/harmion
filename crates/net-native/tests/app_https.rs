@@ -125,6 +125,14 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
         .await
         .unwrap();
     let reader = Client::new(info, unhex(issued["credential"].as_str().unwrap()).unwrap()).unwrap();
+    assert!(matches!(
+        reader.call("metrics", &[]).await,
+        Err(harmion_client::Error::Http(403))
+    ));
+    let metrics = client.call("metrics", &[]).await.unwrap();
+    assert_eq!(metrics["contents"], "2");
+    assert_eq!(metrics["visible_contents"], "2");
+    assert_eq!(metrics["accepted_updates"], "2");
     let mut export_records = 0;
     let export = reader
         .export(|_| {
