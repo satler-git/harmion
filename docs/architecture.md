@@ -38,7 +38,7 @@ flowchart TD
 | Cloudflare | Worker入口＋クラスタに対応するDurable Object | 永続レプリカ、認証済みPeer API、必要な管理経路 |
 | Wiki等 | 別アプリ | Contentの意味、編集・表示、Queryの選択 |
 | Interpreter提供元 | 別プロセスまたは別アプリ | 入力スナップショットの計算 |
-| 管理ツール | 初期はharmion CLI | 認可、参加、退役、export、競合解決 |
+| 管理ツール | harmion CLI・ローカル管理 Web アプリ | 認可、参加、退役、export、競合解決 |
 
 CloudflareのDOは初期構成で1クラスタにつき1つとし、その中のHarmion Node IDを永続化する。DOの再起動で新ノードにしない。DOのルーティングIDやURL自体は認証情報ではない。Cloudflareだけをprimaryにしない。
 
@@ -59,7 +59,7 @@ access等は当初一つのnode crate内のモジュールとする。責任が�
 
 ## 4. Cargo workspaceの分割
 
-初期構成は以下の9パッケージ。外部公開するcrateを9つ作るという意味ではなく、workspace内のビルド・依存境界とする。
+workspaceの主要なビルド・依存境界を示す。
 
 | 配置 / package | 内容 | 直接依存するHarmion package |
 |---|---|---|
@@ -67,9 +67,11 @@ access等は当初一つのnode crate内のモジュールとする。責任が�
 | crates/protocol / harmion-protocol | App/Provider/Peer APIとOAuthのDTO、codec、形式バージョン | domain |
 | crates/node / harmion-node | application、access、membership、interpreter、replication、storage port | domain、protocol |
 | crates/store-sqlite / harmion-store-sqlite | nativeのDB接続・transaction・migration | domain、node |
-| crates/net-native / harmion-net-native | nativeのHTTP/WS、iroh、bootstrap用OS接続 | node、protocol |
+| crates/net-native / harmion-net-native | nativeのHTTP/WS、iroh、bootstrap用OS接続 | node、protocol、domain、local-web |
+| crates/local-web / harmion-local-web | ブラウザ用loopback TLS証明書発行 | なし |
 | crates/client / harmion-client | Rustのアプリ用SDK・Provider SDK・管理クライアント | protocol |
 | apps/daemon / harmiond | nativeノードの構成・起動・設定 | node、store-sqlite、net-native |
+| apps/admin / harmion-admin | 所有者セッション、標準競合解決UI、管理操作 | client、local-web |
 | apps/cli / harmion | 管理・診断・export等のCLI | client |
 | apps/worker / harmion-worker | Workers入口、DOホスト、DOストレージアダプタ | domain、node、protocol |
 

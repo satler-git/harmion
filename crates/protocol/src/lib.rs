@@ -3,6 +3,7 @@ mod app;
 mod app_view;
 mod json;
 pub mod membership;
+pub mod metrics;
 pub use json::decode_app_json;
 mod discovery;
 pub mod export;
@@ -18,10 +19,12 @@ pub use discovery::{
 pub use harmion_domain as domain;
 mod peer;
 pub use app::{
-    AppId, Command, EditToken, RequestId, SaveRequest, decode_save_request, encode_save_request,
+    AppId, Command, EditToken, FieldSelection, RequestId, SaveRequest, decode_save_request,
+    encode_save_request,
 };
 pub mod query;
 mod record;
+pub mod resolution;
 pub mod subscription;
 pub use peer::{
     LogEntry, LogEpoch, MAX_PAGE_ENTRIES, MAX_PAGE_RECORD_BYTES, MAX_PEER_BYTES, Page, PeerCommand,

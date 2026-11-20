@@ -91,6 +91,7 @@ pub trait Transaction: crate::oauth::Storage {
         through: Option<u64>,
     ) -> Result<Vec<LogEntry>, Error>;
     fn accepted_high(&mut self) -> Result<u64, Error>;
+    fn node_metrics(&mut self, now: i64) -> Result<harmion_protocol::metrics::NodeMetrics, Error>;
     /// Ordered prefix of (after, high] within the replication count and byte budgets.
     fn accepted_page(&mut self, after: u64, high: u64) -> Result<Vec<LogEntry>, Error>;
     fn accepted_record(&mut self, id: UpdateId) -> Result<Option<Record>, Error>;

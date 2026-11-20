@@ -409,6 +409,7 @@ async fn dispatch<S: Store + Send + 'static>(
     store.run(move |s| {
         let mut host = SystemHost;
         match operation.as_str() {
+            "metrics" if body.is_empty() => Ok(json!(application::metrics(s, &credential, host.now_micros())?)),
             "members" if body.is_empty() => {
                 let now = host.now_micros();
                 {
@@ -438,6 +439,11 @@ async fn dispatch<S: Store + Send + 'static>(
             },
             "conflicts" => Ok(conflict_view_json(&application::get_conflicts(s, &mut host, &credential, ContentId(id(&body)?))?)),
             "inspect" => Ok(conflict_view_json(&application::inspect(s, &mut host, &credential, ContentId(id(&body)?))?)),
+            "merge-input" => {
+                let request = harmion_protocol::resolution::MergeInputRequest::decode(&body)?;
+                let input = application::merge_input(s, &credential, host.now_micros(), request)?;
+                Ok(json!(input))
+            },
             "save" => {
                 let request = decode_save_request(&body)?;
                 let (result, inserted) = application::save_with_outcome(s, &mut host, &credential, &request)?;
@@ -477,6 +483,13 @@ async fn dispatch<S: Store + Send + 'static>(
             "oauth-consent" => {
                 oauth.ok_or_else(invalid)?.consent_link(s, credential, id(&body)?)
             },
+            "oauth-preview" => {
+                oauth.ok_or_else(invalid)?;
+                let (client, pending) = harmion_node::oauth::pending(s, &credential, host.now_micros(), id(&body)?)?;
+                Ok(json!({"client_id":hex(&client.id.0),"name":client.name,
+                    "redirect_uri":pending.redirect,"grants":GrantSpec::from(pending.grants),
+                    "expires_at":pending.expires_at.to_string()}))
+            },
             "change-grants" => {
                 let request: ChangeGrantsRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
                 application::change_grants(s, host.now_micros(), &credential, AppId(unhex(&request.app_id)?), request.grants.into(), request.revoked)?;
@@ -493,8 +506,9 @@ async fn dispatch<S: Store + Send + 'static>(
                     },
                     "permissions" => json!(GrantSpec::from(permissions)),
                     _ => {
-                        let mut methods = vec!["get","query","subscribe","resume","unsubscribe","export","conflicts","inspect","save","identity","permissions","capabilities","members","approve","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants"];
-                        if oauth.is_some() { methods.extend(["oauth-register","oauth-consent"]); }
+                        let mut methods = vec!["get","query","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants"];
+                        methods.push("metrics");
+                        if oauth.is_some() { methods.extend(["oauth-register","oauth-consent","oauth-preview"]); }
                         json!({"version":1,"oauth":oauth.is_some(),"query":true,"subscriptions":true,
                         "oauth_origin":oauth.as_ref().map(|service| service.origin()),
                         "query_max_page_items":harmion_protocol::query::MAX_QUERY_PAGE_ITEMS,

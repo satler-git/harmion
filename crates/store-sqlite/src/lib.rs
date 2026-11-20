@@ -550,6 +550,27 @@ impl Transaction for SqlTransaction<'_> {
             .map_err(db)?;
         high.try_into().map_err(|_| Error::CorruptLog)
     }
+    fn node_metrics(&mut self, now: i64) -> Result<harmion_protocol::metrics::NodeMetrics, Error> {
+        self.sql
+            .query_row(
+                "SELECT (SELECT COUNT(DISTINCT content) FROM content_records),
+                    (SELECT COUNT(*) FROM search_contents),
+                    (SELECT COUNT(*) FROM accept_log),
+                    (SELECT COALESCE(SUM(length(bytes)),0) FROM accept_log),
+                    (SELECT COUNT(*) FROM apps WHERE revoked=0 AND expires_at>?1)",
+                [now],
+                |row| {
+                    Ok(harmion_protocol::metrics::NodeMetrics {
+                        contents: row.get::<_, i64>(0)?.to_string(),
+                        visible_contents: row.get::<_, i64>(1)?.to_string(),
+                        accepted_updates: row.get::<_, i64>(2)?.to_string(),
+                        record_bytes: row.get::<_, i64>(3)?.to_string(),
+                        active_apps: row.get::<_, i64>(4)?.to_string(),
+                    })
+                },
+            )
+            .map_err(db)
+    }
     fn accepted_page(&mut self, after: u64, high: u64) -> Result<Vec<LogEntry>, Error> {
         self.read_entries(
             "WITH candidates AS (

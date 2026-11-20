@@ -685,6 +685,188 @@ fn kind_conflicts_are_hidden_and_cannot_be_changed_by_general_apps() {
 }
 
 #[test]
+fn selects_attribute_and_kind_from_fixed_candidates() {
+    use harmion_protocol::FieldSelection;
+    let mut t = Test::new();
+    let token = t.create().view.unwrap().edit_token;
+    let admin = t.admin.clone();
+    let attribute = Field::Attribute {
+        namespace: "wiki".into(),
+        key: "title".into(),
+    };
+    let kind = Field::Kind("wiki".into());
+    let absent = t
+        .save(
+            &admin,
+            2,
+            Command::Edit {
+                token,
+                fields: BTreeMap::from([
+                    (attribute.clone(), Value::Absent),
+                    (kind.clone(), Value::Kind(false)),
+                ]),
+            },
+        )
+        .unwrap();
+    let present = t
+        .save(
+            &admin,
+            3,
+            Command::Edit {
+                token,
+                fields: BTreeMap::from([
+                    (attribute.clone(), Value::Attribute(AttributeValue::Null)),
+                    (kind.clone(), Value::Kind(true)),
+                ]),
+            },
+        )
+        .unwrap();
+    let inspect = app::inspect(&mut t.store, &mut t.host, &admin, content()).unwrap();
+    let late = t
+        .save(
+            &admin,
+            4,
+            Command::Edit {
+                token,
+                fields: BTreeMap::from([(
+                    attribute.clone(),
+                    Value::Attribute(AttributeValue::String("late".into())),
+                )]),
+            },
+        )
+        .unwrap();
+    let command = Command::Select {
+        token: inspect.view.edit_token,
+        selections: [attribute.clone(), kind.clone()]
+            .into_iter()
+            .map(|field| {
+                (
+                    field,
+                    FieldSelection {
+                        version: absent.update_id,
+                        replaces: BTreeSet::from([absent.update_id, present.update_id]),
+                    },
+                )
+            })
+            .collect(),
+    };
+    let encoded = harmion_protocol::encode_save_request(&request(5, command.clone())).unwrap();
+    assert_eq!(
+        harmion_protocol::decode_save_request(&encoded).unwrap(),
+        request(5, command.clone())
+    );
+    let (_, regular) = t.issue(read_write());
+    assert!(matches!(
+        t.save(&regular, 5, command.clone()),
+        Err(Error::Forbidden)
+    ));
+    let resolution = t.save(&admin, 5, command.clone()).unwrap();
+    assert_eq!(t.save(&admin, 5, command).unwrap(), resolution);
+    let snapshot = t.snapshot();
+    assert!(!snapshot.content.kinds.contains("wiki"));
+    assert_eq!(snapshot.fields[&kind].candidates.len(), 1);
+    assert!(
+        snapshot.fields[&attribute]
+            .candidates
+            .iter()
+            .any(|candidate| {
+                candidate.value == Value::Absent
+                    && candidate.versions.contains(&resolution.update_id)
+            })
+    );
+    assert!(
+        snapshot.fields[&attribute]
+            .candidates
+            .iter()
+            .any(|candidate| { candidate.versions.contains(&late.update_id) })
+    );
+}
+
+#[test]
+fn merge_base_is_scoped_to_the_fixed_owner_snapshot_and_reports_ambiguity() {
+    use harmion_protocol::resolution::{MergeInput, MergeInputRequest, MergePart};
+    let mut t = Test::new();
+    let root = t.create();
+    let initial = root.view.unwrap().edit_token;
+    let admin = t.admin.clone();
+    let a = t
+        .save(
+            &admin,
+            2,
+            Command::Edit {
+                token: initial,
+                fields: body("A"),
+            },
+        )
+        .unwrap();
+    let b = t
+        .save(
+            &admin,
+            3,
+            Command::Edit {
+                token: initial,
+                fields: body("B"),
+            },
+        )
+        .unwrap();
+    let first = app::inspect(&mut t.store, &mut t.host, &admin, content()).unwrap();
+    let resolve = |value: &str| Command::Resolve {
+        token: first.view.edit_token,
+        changes: BTreeMap::from([(
+            Field::Body,
+            Change {
+                value: Value::Body(value.into()),
+                replaces: BTreeSet::from([a.update_id, b.update_id]),
+            },
+        )]),
+    };
+    let x = t.save(&admin, 4, resolve("X")).unwrap();
+    let y = t.save(&admin, 5, resolve("Y")).unwrap();
+    let saved = app::inspect(&mut t.store, &mut t.host, &admin, content()).unwrap();
+    let request = MergeInputRequest {
+        content: content(),
+        token: saved.view.edit_token,
+        left: x.update_id,
+        right: y.update_id,
+        part: MergePart::Base(None),
+    };
+    let (_, user) = t.issue(read_write());
+    assert!(matches!(
+        app::merge_input(&mut t.store, &user, t.host.now, request),
+        Err(Error::Forbidden)
+    ));
+    assert!(
+        matches!(app::merge_input(&mut t.store, &admin, t.host.now, request).unwrap(),
+        MergeInput::ChooseBase { versions } if versions.iter().cloned().collect::<BTreeSet<_>>() ==
+        [a.update_id, b.update_id].into_iter().map(|id| harmion_protocol::hex(&id.0)).collect())
+    );
+    let choose = |version| MergeInputRequest {
+        part: MergePart::Base(Some(version)),
+        ..request
+    };
+    assert!(
+        matches!(app::merge_input(&mut t.store, &admin, t.host.now, choose(a.update_id)).unwrap(),
+        MergeInput::Body { text, .. } if text == "A")
+    );
+    assert!(matches!(
+        app::merge_input(&mut t.store, &admin, t.host.now, choose(root.update_id)),
+        Err(Error::InvalidRequest)
+    ));
+    assert!(matches!(
+        app::merge_input(
+            &mut t.store,
+            &admin,
+            t.host.now,
+            MergeInputRequest {
+                token: first.view.edit_token,
+                ..request
+            }
+        ),
+        Err(Error::InvalidRequest)
+    ));
+}
+
+#[test]
 fn resolution_only_replaces_explicit_candidates_and_leaves_late_edits() {
     let mut t = Test::new();
     let token = t.create().view.unwrap().edit_token;

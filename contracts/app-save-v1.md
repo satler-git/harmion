@@ -23,9 +23,12 @@ Editの省略項目は未変更。Restoreの省略した既知属性は不存在
 
 1. magic `48 52 51 00`（HRQ＋NUL）、u32 version=1。
 2. request_idとcontent_id、それぞれ32 bytes。
-3. u8 command: Create=0、Edit=1、Resolve=2、Delete=3、Keep=4、Restore=5。
+3. u8 command: Create=0、Edit=1、Resolve=2、Delete=3、Keep=4、Restore=5、Select=6、RestoreFrom=7。
 4. Create以外は32 bytesの編集/解決/管理トークン。
 5. Create/Edit/Restoreはu32個数＋field/value列。Resolveはu32個数＋field/value/replaces列。Delete/Keepは追加データなし。
+   Selectはu32個数＋field・選択した版ID・replaces列。RestoreFromは本文文字列＋u32個数＋本文以外のfield・選択した版IDの列。
+
+`Select` はトークンが固定した候補から値を取得する。選んだ版は明示された置換対象にも含める。kind の選択には全権限が必要。`RestoreFrom` は管理トークンで取得した削除済み状態から値を選択する。本文を明示し、既知の属性・kindを省略した場合はRestoreと同じ規則で未設定・非所属にする。
 
 重複・非canonical順序・未知version/tag・末尾bytesは拒否する。生成済み更新ID・時刻・認証credentialを要求比較に混ぜない。request_idはapp_idと組にして保存し、同じappの別要求への使い回しはRequestIdReuseとする。
 

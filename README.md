@@ -25,6 +25,7 @@ Rustで初期実装を進めています。Content・SQLite保存・App HTTPS AP
 `crates/domain` は外部依存なしの純粋なRustライブラリです。型で区別したID、create/edit/delete/keep/restore、項目と存在の候補、通常値選択、重複受理と不正参照の検証を扱います。Python意味モデルの10シナリオに対応する到着順テストと、追加の境界テストを用意しています。
 
 ```sh
+npm ci --prefix apps/admin/ui
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

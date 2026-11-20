@@ -1,4 +1,4 @@
-use harmion_client::{
+use crate::{
     Client, Error, ProtectedDir,
     protocol::{export as format, hex, unhex},
 };
@@ -8,10 +8,11 @@ use std::{
     io::{self, BufWriter, Write},
 };
 
-pub async fn run(client: &Client, path: &str) -> Result<Value, Error> {
-    let mut output = None;
-    client
-        .export(|record| {
+impl Client {
+    /// Write a completed owner export to a new local directory.
+    pub async fn export_directory(&self, path: &str) -> Result<Value, Error> {
+        let mut output = None;
+        self.export(|record| {
             if record["type"] == "header" {
                 output = Some(Output::new(path)?);
                 Ok(())
@@ -20,8 +21,9 @@ pub async fn run(client: &Client, path: &str) -> Result<Value, Error> {
             }
         })
         .await?;
-    let manifest = output.ok_or_else(invalid)?.finish()?;
-    Ok(json!({"directory":path, "export":manifest}))
+        let manifest = output.ok_or_else(invalid)?.finish()?;
+        Ok(json!({"directory":path, "export":manifest}))
+    }
 }
 
 struct Output {

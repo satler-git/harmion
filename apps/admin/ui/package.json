@@ -1,0 +1,26 @@
+{
+  "name": "harmion-admin-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "build": "vite build",
+    "format": "prettier --write src vite.config.ts",
+    "format:check": "prettier --check src vite.config.ts"
+  },
+  "dependencies": {
+    "jsqr": "^1.4.0",
+    "qrcode": "^1.5.4",
+    "svelte": "^5.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.0.0",
+    "@types/qrcode": "^1.5.5",
+    "prettier": "^3.10.1",
+    "prettier-plugin-svelte": "^4.2.0",
+    "svelte-check": "^4.0.0",
+    "typescript": "^5.8.0",
+    "vite": "^7.0.0"
+  }
+}

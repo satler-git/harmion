@@ -10,7 +10,7 @@
 
 - §9.3 のローカル保存後の同期は R16 に記録した。OS復帰・ネットワーク復帰・相手の更新通知は未実装。
 - §6.1 の Query は条件と参照評価器を R17、保存層の検索を R18、固定スナップショットと App API・SDK への接続を R19 に記録する。Subscribe は R20 に記録する。
-- §6 のnative OAuthはR22に記録する。§4.3・§5 の標準解決ツール、§7 のInterpreter、§9 のCloudflareノードは実装作業が残る。Cloudflareのノード認証と初期管理資格情報は設計が残る。[未解決の設計論点](review.md#4-残る境界注意点新たな確定仕様ではない)
+- §6 のnative OAuthはR22、§4.3・§5 の標準解決ツールとローカル管理 Web アプリはR24に記録する。§7 のInterpreterと§9 のCloudflareノードは実装作業が残る。Cloudflareのノード認証と初期管理資格情報は設計が残る。[未解決の設計論点](review.md#4-残る境界注意点新たな確定仕様ではない)
 
 ## 確認範囲
 
@@ -22,8 +22,8 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 |---|---|---|
 | §3 Content、項目別原子保存、固定編集元 | 実装 | `domain::{Graph,ContentSnapshot}`、`node::application::save`。tokenは保存済みbasisを復元する |
 | §3.2 複製状況の確認 | 部分実装 | 手動`sync`はそのラウンドの送受信件数とログ位置を返す。保存した更新の複製先やPeerの到達状況を読む`sync_status`は未実装 |
-| §4 競合・削除・keep/restore | Core実装、管理ツール部分実装 | `Graph::accept/project`。CLIは本文中心。比較UI、属性/kind選択、三者マージ案はない |
-| §5 全履歴保持・管理向け取得 | 部分実装 | 不変recordは保持。inspectは現在の削除状態と候補を返すが、共通祖先の専用取得はない |
+| §4 競合・削除・keep/restore | Coreと標準解決ツールを実装 | `Graph::accept/project`。Webで本文比較・編集、属性/kind選択、三者マージ案、削除と復元を扱う。R24参照 |
+| §5 全履歴保持・管理向け取得 | 実装 | 不変recordを保持。管理トークンの候補に対する共通本文版と、削除済みContentの復元候補を取得できる。R24参照 |
 | §6 Query/Subscribe | native App API・Rust SDKを実装 | R17〜R20参照。固定結果のページ取得、初回取得、変更の再開、再認可、キャッシュを実装 |
 | §6 Read/Write/Manage権限 | 実装 | `node::access/application`。grant/credential/token/request_resultは同期対象外 |
 | §6 OAuth | native実装 | R22参照。HTTPS、登録、所有者承認、PKCE、refreshと失効。ブラウザでCAの設定が必要 |
@@ -96,7 +96,7 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 ### R08 — 管理CLIは本文中心で、一般アプリSDKも薄い
 
 - 種別: 未実装／暫定UX。状態: 残す。
-- 根拠: CLIのedit/resolve/restoreはBodyのみ。restoreは既知属性/kindを消す。SDKの個別Contentの取得結果はJSON Value。型付きQuery要求、購読の状態管理とキャッシュはR19・R20で追加。
+- 根拠: CLIのedit/resolve/restoreはBodyを直接入力する。既存のrestoreは省略した既知属性/kindを消す。R24でCLIの候補選択と共通祖先取得、およびWebでの型を保持する復元を追加した。SDKの個別Contentの取得結果はJSON Value。型付きQuery要求、購読の状態管理とキャッシュはR19・R20で追加。
 - 影響: Coreの属性/kind操作が存在しても、標準ツールで全操作できるわけではない。restoreの省略値を保持するようCoreの意味を変えて隠さず、現在の制約をhelp/手順に明記する。
 
 ### R09 — エラーの診断情報がAPI境界で失われる
@@ -217,6 +217,22 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - 古いノードディレクトリを元の Node ID のまま起動すると、新しい保存が相手の受領済みログ位置に入り、同期成功後も相手へ届かないことを2ノードで確認した。
 - 仕様§8に従い、`harmiond restore BACKUP_DIR NEW_DIR` はバックアップの受理済み履歴を読み、新しい Node ID、ログ世代、鍵、資格情報で復元する。元のノードディレクトリの直接起動にはこの復旧処理が適用されない。[復元手順](native-quickstart.md#古いノードバックアップからの復元)
 - 実daemonで、有効なノードから再承認を受け、バックアップにだけある更新と既存ノードにだけある更新を双方で取得し、復元先の新規保存も同期できることを確認した。[実プロセス検証](../design_checks/restore_process.py)
+
+### R24 — 標準解決ツールとローカル管理 Web アプリ
+
+- 属性・kind・本文の候補を版 ID で指定し、固定トークンに含まれる候補と明示した置換対象を照合する。復元では本文と選択した属性・kind を指定する。正確な属性値はノードが固定候補から取得する。
+- 共通本文版を取得できるのは所有者の管理トークンで指定した本文候補に限る。曖昧な共通本文版は一覧を返す。SDKが行単位の三者マージ案を生成し、所有者が内容と置換対象を確認して保存する。
+- `harmion-admin` は既存SDKでHarmionに接続する独立アプリ。ブラウザは専用のloopback HTTPSで単回リンクを短命なセッションへ交換する。Host・Originとセッションを確認し、外部オリジンと一般アプリからの資格情報なしの操作を拒否する。 [起動方法](native-quickstart.md#管理-web-アプリ)
+- 固定候補の選択、共通本文版の曖昧さ、権限外の拒否をRustテストで確認した。実daemonと管理Webプロセスでは、単回リンク、別オリジンの拒否、マージ案生成時の無更新、明示保存、後着版の保持、正確な数値を含む復元、参加承認、OAuth登録・失効とExportを確認した。一時Firefoxプロファイルでの起動とマージ保存も確認した。 [実プロセス検証](../design_checks/admin_process.py)
+
+### R25 — 管理 UI の画面構成・Peer とアプリの接続
+
+- 管理 UI を Svelte・TypeScript・Vite に移行し、ダークテーマを標準とした。コンテンツ閲覧と競合編集、概要・Peer・アプリ・Export を分け、同一セッション中の画面移動では編集内容を保持する。保存結果が不明なときは同一 request ID の再試行を画面上部に残す。
+- 所有者専用 Metrics API で Content 数・更新数・レコード量・有効登録数を集計する。Peer の Active は参加状態として表示し、到達性については手動同期の結果と時刻を表示する。
+- Peer は QR の生成・画像読み取り・カメラ読み取りと接続コードの貼り付けに対応する。登録前に Node ID・Cluster ID・公開鍵を表示し、2分以内の単回確認値を使って承認する。
+- アプリは登録・認可を1行のコードから開始する。要求のプレビューに保存済みのアプリ名・callback・要求権限を表示し、ノードの認可画面へ引き継ぐ。grant の変更も JSON 入力からフィルターの選択へ移行した。
+- 実プロセス検証で、プレビューだけでは Peer を登録しないこと、確認値の再利用拒否、クラスタ違いの拒否、1行のアプリ要求と実際の権限の一致を確認した。Metrics の一般アプリからの拒否も回帰テストで確認した。
+- Firefox の一時プロファイルで、ダークテーマ、コンテンツと競合解決の切替、編集保持、マージ保存、QR画像の読み取りから確認後のPeer登録、1行のアプリ登録・認可要求、モバイル幅の表示を確認した。カメラ実機の検証は残る。Rustの103テストとSvelteの型・整形チェック、Clippyが通過した。
 
 ## 基準時点の複数ノード同期の検証条件
 

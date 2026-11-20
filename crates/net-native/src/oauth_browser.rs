@@ -246,9 +246,10 @@ async fn dispatch<S: Store + Send + 'static>(
                 .await?;
             let page = format!(
                 "<!doctype html><meta charset=utf-8><title>Harmion authorization</title>\
-                <h1>Harmion authorization</h1><p>Review this request with the Harmion owner CLI.</p>\
+                <h1>Harmion authorization</h1><p>Paste this request into the Apps page of Harmion Admin.</p><pre>harmion-auth:v1:{}</pre><p>You can also use the owner CLI.</p>\
                 <pre>harmion --node NODE_DIRECTORY oauth-consent {}</pre>\
                 <p>Open the consent link returned by the command in this browser.</p>",
+                hex(&pending.request),
                 hex(&pending.request),
             );
             Ok(response(StatusCode::OK, "text/html; charset=utf-8", page))
