@@ -14,10 +14,11 @@ use std::sync::{Arc, Mutex};
 type RoundLocks =
     std::collections::BTreeMap<harmion_domain::NodeId, std::sync::Weak<tokio::sync::Mutex<()>>>;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{self:?}")]
 pub enum Error {
-    Node(harmion_node::Error),
-    Io(std::io::Error),
+    Node(#[from] harmion_node::Error),
+    Io(#[from] std::io::Error),
     Transport(String),
     InvalidResponse,
     Timeout,
@@ -26,27 +27,23 @@ pub enum Error {
         reason: harmion_protocol::Rejection,
     },
 }
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-impl std::error::Error for Error {}
-impl From<harmion_node::Error> for Error {
-    fn from(e: harmion_node::Error) -> Self {
-        Self::Node(e)
-    }
-}
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
-    }
-}
 impl From<harmion_protocol::CodecError> for Error {
     fn from(e: harmion_protocol::CodecError) -> Self {
         Self::Node(e.into())
     }
 }
+/// Record transport failures without logging request headers or bodies.
+fn trace_connection(
+    service: &'static str,
+    result: Result<Result<(), Error>, tokio::time::error::Elapsed>,
+) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::debug!(service, %error, "connection failed"),
+        Err(_) => tracing::debug!(service, "connection timed out"),
+    }
+}
+
 fn transport(error: impl std::fmt::Display) -> Error {
     Error::Transport(error.to_string())
 }

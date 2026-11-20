@@ -6,6 +6,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+tracing.workspace = true
+thiserror.workspace = true
 harmion-domain = { path = "../domain" }
 harmion-node = { path = "../node" }
 harmion-protocol = { path = "../protocol" }

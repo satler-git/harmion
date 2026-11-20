@@ -1075,6 +1075,7 @@ dependencies = [
 name = "harmion"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "harmion-client",
  "serde_json",
  "tokio",
@@ -1086,6 +1087,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "clap",
  "flate2",
  "harmion-client",
  "harmion-local-web",
@@ -1113,6 +1115,7 @@ dependencies = [
  "hyper-util",
  "rustls",
  "serde_json",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
 ]
@@ -1120,6 +1123,9 @@ dependencies = [
 [[package]]
 name = "harmion-domain"
 version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "harmion-local"
@@ -1160,8 +1166,10 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde_json",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
+ "tracing",
  "url",
 ]
 
@@ -1175,6 +1183,7 @@ dependencies = [
  "harmion-protocol",
  "sha2 0.10.9",
  "subtle",
+ "thiserror 2.0.21",
  "url",
 ]
 
@@ -1186,6 +1195,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1203,6 +1213,7 @@ dependencies = [
 name = "harmiond"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "harmion-domain",
  "harmion-local",
  "harmion-net-native",
@@ -1211,7 +1222,10 @@ dependencies = [
  "harmion-store-sqlite",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

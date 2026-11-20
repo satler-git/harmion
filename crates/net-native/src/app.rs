@@ -110,8 +110,10 @@ pub async fn serve_with_transport<S: Store + Send + 'static>(
                     .map_err(transport)
             };
             tokio::select! {
-                _ = serve => {},
-                _ = idle => {},
+                result = serve => {
+                    crate::trace_connection("App HTTPS", Ok(result));
+                },
+                _ = idle => tracing::debug!(service = "App HTTPS", "connection idle timeout"),
             }
         });
     }

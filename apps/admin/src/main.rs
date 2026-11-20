@@ -2,6 +2,7 @@ mod api;
 mod server;
 mod transfer;
 
+use clap::{Parser, Subcommand};
 use harmion_client::{Client, ProtectedDir, protocol::unhex};
 use harmion_local_web::BrowserTls;
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,27 @@ use tokio::net::TcpListener;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 const IDENTITY_FILE: &str = "web-tls.json";
+
+#[derive(Parser)]
+#[command(version, about = "Harmion browser administration")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Provision a browser TLS identity.
+    Provision { ui_dir: String },
+    /// Print the browser trust root as PEM.
+    Root { ui_dir: String },
+    /// Serve the administration UI on loopback HTTPS.
+    Run {
+        node_dir: String,
+        ui_dir: String,
+        content_id: Option<String>,
+    },
+}
 
 #[derive(Serialize, Deserialize)]
 struct Identity {
@@ -73,15 +95,17 @@ async fn run(node: &str, state: &str, content: Option<&str>) -> Result<()> {
 
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.as_slice() {
-        [op, state] if op == "provision" => provision(state),
-        [op, state] if op == "root" => ProtectedDir::open(state).map_err(Into::into)
-            .and_then(|state| identity(&state)).map(|tls| print!("{}", tls.root_pem())),
-        [op, node, state, content @ ..] if op == "run" && content.len() <= 1 => {
-            run(node, state, content.first().map(String::as_str)).await
-        }
-        _ => Err("usage: harmion-admin provision UI_DIR | root UI_DIR | run NODE_DIR UI_DIR [CONTENT_ID]".into()),
+    let result = match Cli::parse().command {
+        Command::Provision { ui_dir } => provision(&ui_dir),
+        Command::Root { ui_dir } => ProtectedDir::open(&ui_dir)
+            .map_err(Into::into)
+            .and_then(|state| identity(&state))
+            .map(|tls| print!("{}", tls.root_pem())),
+        Command::Run {
+            node_dir,
+            ui_dir,
+            content_id,
+        } => run(&node_dir, &ui_dir, content_id.as_deref()).await,
     };
     if let Err(error) = result {
         eprintln!("harmion-admin: {error}");

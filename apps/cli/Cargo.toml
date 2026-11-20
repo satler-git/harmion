@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+clap.workspace = true
 harmion-client = { path = "../../crates/client" }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

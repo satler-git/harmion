@@ -22,7 +22,7 @@ Rustで初期実装を進めています。Content・SQLite保存・App HTTPS AP
 - [App保存要求・認可・ローカル状態](contracts/app-save-v1.md)
 - [HTTPS Peerと直接承認の契約](contracts/peer-v1.md)
 
-`crates/domain` は外部依存なしの純粋なRustライブラリです。型で区別したID、create/edit/delete/keep/restore、項目と存在の候補、通常値選択、重複受理と不正参照の検証を扱います。Python意味モデルの10シナリオに対応する到着順テストと、追加の境界テストを用意しています。
+`crates/domain` はI/Oや非同期ランタイムに依存しないRustライブラリです。エラー型の定義には `thiserror` を使います。型で区別したID、create/edit/delete/keep/restore、項目と存在の候補、通常値選択、重複受理と不正参照の検証を扱います。Python意味モデルの10シナリオに対応する到着順テストと、追加の境界テストを用意しています。
 
 ```sh
 npm ci --prefix apps/admin/ui
@@ -30,6 +30,8 @@ cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+`harmion`・`harmiond`・`harmion-admin` の引数・サブコマンドは `--help` で確認できます。引数エラーは終了コード2、実行時エラーは終了コード1を返します。daemonのログは標準エラー出力に書き、`RUST_LOG=harmiond=debug,harmion_net_native=debug` で同期の再試行間隔・転送件数・接続エラーも確認できます。JSONやPEMの結果は標準出力に返します。
 
 `Content` はID・本文・名前空間付き属性・kindsをまとめた通常値です。`Graph::snapshot(id)` は存在状態、固定basis、値ごとにまとめた競合候補と版IDも持つ、所有された `ContentSnapshot` を返します。同じ値の版IDを保持するため、その値を編集しても他の競合値を解決しません。snapshotは後から更新を受理しても変わりません。
 

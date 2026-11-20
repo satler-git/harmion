@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+clap.workspace = true
 harmion-client = { path = "../../crates/client" }
 harmion-local-web = { path = "../../crates/local-web" }
 bytes = "1"

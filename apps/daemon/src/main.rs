@@ -1,3 +1,7 @@
+mod cli;
+
+use clap::Parser;
+use cli::{Cli, Command, Discovery, PeerTransport, RunOptions};
 use harmion_domain::{ClusterId, NodeId};
 use harmion_local::ProtectedDir;
 use harmion_net_native::{
@@ -21,6 +25,24 @@ use std::{
 use tokio::{net::TcpListener, sync::watch, time::Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+#[derive(Debug, thiserror::Error)]
+enum DaemonError {
+    #[error("unsupported node config version: {0}")]
+    UnsupportedConfig(u32),
+    #[error("App must be loopback; Peer needs a concrete IP; sync seconds must be 0..3600")]
+    InvalidListenerConfig,
+    #[error("OAuth must listen on 127.0.0.1")]
+    InvalidOAuthListener,
+    #[error("discovery none requires at least one explicit relay URL")]
+    MissingRelay,
+    #[error("invalid {0} key length")]
+    InvalidKeyLength(&'static str),
+    #[error("sync task missing")]
+    MissingSyncTask,
+    #[error("{0} stopped unexpectedly")]
+    ServiceStopped(&'static str),
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -48,7 +70,7 @@ fn enabled() -> bool {
 impl Config {
     fn identity(&self) -> Result<Identity> {
         if self.version != 1 {
-            return Err("unsupported node config".into());
+            return Err(DaemonError::UnsupportedConfig(self.version).into());
         }
         Ok(Identity {
             cluster: ClusterId(unhex(&self.cluster_id)?),
@@ -244,16 +266,29 @@ async fn automatic_sync(
         }
         tokio::select! {
             completed=rounds.join_next(), if !rounds.is_empty() => {
-                let (node,result)=completed.ok_or("sync task missing")??;
-                let previous=schedule.retries.get(&node).map_or(0,|(failures,_)|*failures);
-                let failed=match result {
-                    Ok(_) => {if previous!=0 {eprintln!("peer {} reconnected",hex(&node.0));} 0},
-                    Err(harmion_net_native::Error::Node(harmion_node::Error::PeerRetired | harmion_node::Error::MembershipConflict)) => 0,
-                    Err(_) => {if previous==0 {eprintln!("peer {} unavailable; retrying",hex(&node.0));} previous.saturating_add(1)},
+                let (node, result) = completed.ok_or(DaemonError::MissingSyncTask)??;
+                let previous = schedule.retries.get(&node).map_or(0, |(failures, _)| *failures);
+                let failed = match result {
+                    Ok(_) => {
+                        if previous != 0 {
+                            tracing::info!(peer = %hex(&node.0), "peer reconnected");
+                        }
+                        0
+                    }
+                    Err(harmion_net_native::Error::Node(
+                        harmion_node::Error::PeerRetired | harmion_node::Error::MembershipConflict,
+                    )) => 0,
+                    Err(_) => {
+                        if previous == 0 {
+                            tracing::warn!(peer = %hex(&node.0), "peer unavailable; retrying");
+                        }
+                        previous.saturating_add(1)
+                    }
                 };
-                let delay=base.saturating_mul(1u32<<failed.min(5)).min(Duration::from_secs(3600));
-                let jitter=u16::from_be_bytes(SystemHost.random_bytes()?[..2].try_into()?) as u64 % 1000;
-                schedule.complete(node,failed,Instant::now()+delay+Duration::from_millis(jitter));
+                let delay = base.saturating_mul(1u32 << failed.min(5)).min(Duration::from_secs(3600));
+                let jitter = u16::from_be_bytes(SystemHost.random_bytes()?[..2].try_into()?) as u64 % 1000;
+                tracing::debug!(peer = %hex(&node.0), failures = failed, delay_ms = delay.as_millis() + u128::from(jitter), "next sync scheduled");
+                schedule.complete(node, failed, Instant::now() + delay + Duration::from_millis(jitter));
             },
             _ = store.local_save_notified() => local_save = true,
             _=tokio::time::sleep(base.min(Duration::from_secs(1))) => {},
@@ -272,57 +307,45 @@ async fn shutdown_signal() -> io::Result<()> {
         tokio::signal::ctrl_c().await
     }
 }
-async fn run(path: &str, options: &[String]) -> Result<()> {
+async fn run(path: &str, options: RunOptions) -> Result<()> {
     let directory = ProtectedDir::open(path)?;
     let _lock = directory.lock()?;
     let mut config: Config = serde_json::from_slice(&directory.read("node.json", 4096)?)?;
-    if !options.len().is_multiple_of(2) {
-        return Err("run options need values".into());
+    if let Some(address) = options.app_listen {
+        config.app_listen = address;
     }
-    for pair in options.as_chunks::<2>().0 {
-        match pair[0].as_str() {
-            "--app-listen" => config.app_listen = pair[1].parse()?,
-            "--oauth-listen" => {
-                config.oauth_listen = if pair[1] == "off" {
-                    None
-                } else {
-                    Some(pair[1].parse()?)
-                };
-            }
-            "--peer-listen" => config.peer_listen = pair[1].parse()?,
-            "--sync-seconds" => config.sync_seconds = pair[1].parse()?,
-            "--bootstrap-cluster-root" => config.founder = pair[1].parse()?,
-            "--peer-transport" => {
-                config.use_iroh = match pair[1].as_str() {
-                    "iroh" => true,
-                    "https" => false,
-                    _ => return Err("expected iroh or https transport".into()),
-                }
-            }
-            "--relay-url" => config.relay_urls = Some(vec![pair[1].clone()]),
-            "--discovery" => {
-                config.public_lookup = match pair[1].as_str() {
-                    "public" => true,
-                    "none" => false,
-                    _ => return Err("discovery must be public or none".into()),
-                }
-            }
-            _ => return Err("unknown run option".into()),
-        }
+    if let Some(address) = options.oauth_listen {
+        config.oauth_listen = address.address();
+    }
+    if let Some(address) = options.peer_listen {
+        config.peer_listen = address;
+    }
+    if let Some(seconds) = options.sync_seconds {
+        config.sync_seconds = seconds;
+    }
+    if let Some(founder) = options.bootstrap_cluster_root {
+        config.founder = founder;
+    }
+    if let Some(transport) = options.peer_transport {
+        config.use_iroh = matches!(transport, PeerTransport::Iroh);
+    }
+    if let Some(url) = options.relay_url {
+        config.relay_urls = Some(vec![url]);
+    }
+    if let Some(discovery) = options.discovery {
+        config.public_lookup = matches!(discovery, Discovery::Public);
     }
     if !config.app_listen.ip().is_loopback()
         || config.peer_listen.ip().is_unspecified()
         || config.sync_seconds > 3600
     {
-        return Err(
-            "App must be loopback; Peer needs a concrete IP; sync seconds must be 0..3600".into(),
-        );
+        return Err(DaemonError::InvalidListenerConfig.into());
     }
     if config
         .oauth_listen
         .is_some_and(|address| address.ip() != std::net::Ipv4Addr::LOCALHOST)
     {
-        return Err("OAuth must listen on 127.0.0.1".into());
+        return Err(DaemonError::InvalidOAuthListener.into());
     }
     let identity = config.identity()?;
     if config.use_iroh
@@ -332,7 +355,7 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
             .as_ref()
             .is_none_or(|urls| urls.is_empty())
     {
-        return Err("discovery none requires at least one explicit relay URL".into());
+        return Err(DaemonError::MissingRelay.into());
     }
     let tls = Arc::new(TlsIdentity::from_der(
         directory.read("certificate.der", 65536)?,
@@ -362,7 +385,7 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
     let membership_seed: [u8; 32] = directory
         .read("iroh.secret", 32)?
         .try_into()
-        .map_err(|_| "invalid membership key length")?;
+        .map_err(|_| DaemonError::InvalidKeyLength("membership"))?;
     let membership_signer =
         Arc::new(harmion_node::membership_state::MembershipSigner::from_bytes(&membership_seed));
     let iroh_endpoint = if config.use_iroh {
@@ -370,7 +393,7 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
         let secret = directory
             .read("iroh.secret", 32)?
             .try_into()
-            .map_err(|_| "invalid iroh key length")?;
+            .map_err(|_| DaemonError::InvalidKeyLength("iroh"))?;
         Some(iroh_peer::bind(secret, config.relay_urls.clone(), config.public_lookup).await?)
     } else {
         None
@@ -476,8 +499,8 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
     io::stdout().flush()?;
     let outcome: Result<()> = tokio::select! {
         signal = shutdown_signal() => signal.map_err(Into::into),
-        ended = tasks.join_next() => match ended { Some(Ok(Err(e))) => Err(e.into()), _ => Err("HTTP server stopped unexpectedly".into()) },
-        ended = background.join_next(), if !background.is_empty() => match ended { Some(Ok(Err(e))) => Err(e), _ => Err("automatic sync stopped unexpectedly".into()) },
+        ended = tasks.join_next() => match ended { Some(Ok(Err(e))) => Err(e.into()), Some(Err(e)) => Err(e.into()), _ => Err(DaemonError::ServiceStopped("HTTP server").into()) },
+        ended = background.join_next(), if !background.is_empty() => match ended { Some(Ok(Err(e))) => Err(e), Some(Err(e)) => Err(e.into()), _ => Err(DaemonError::ServiceStopped("automatic sync").into()) },
     };
     let _ = stop.send(true);
     background.abort_all();
@@ -492,20 +515,30 @@ async fn run(path: &str, options: &[String]) -> Result<()> {
 }
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.as_slice() {
-        [command, path] if command == "init" => initialize(path, None, None),
-        [command, path, flag, cluster] if command == "init" && flag == "--cluster" => initialize(path, Some(cluster), None),
-        [command, backup, destination] if command == "restore" => restore(backup, destination),
-        [command, path] if command == "oauth-provision" => provision_oauth(path, false),
-        [command, path, flag] if command == "oauth-provision" && flag == "--replace" => provision_oauth(path, true),
-        [command, path] if command == "oauth-root" => ProtectedDir::open(path)
-            .map_err(Into::into).and_then(|directory| browser_tls(&directory)).map(|tls| print!("{}", tls.root_pem())),
-        [command, path, options @ ..] if command == "run" => run(path, options).await,
-        _ => Err("usage: harmiond init DIR [--cluster HEX] | restore BACKUP_DIR NEW_DIR | oauth-provision DIR [--replace] | oauth-root DIR | run DIR [--app-listen IP:PORT] [--oauth-listen 127.0.0.1:PORT|off] [--peer-listen IP:PORT] [--sync-seconds N] [--peer-transport iroh|https] [--relay-url URL] [--discovery public|none] [--bootstrap-cluster-root true|false]".into()),
+    let cli = Cli::parse();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "harmiond=info".into()),
+        )
+        .with_writer(io::stderr)
+        .with_ansi(false)
+        .init();
+    let result = match cli.command {
+        Command::Init { dir, cluster } => initialize(&dir, cluster.as_deref(), None),
+        Command::Restore {
+            backup_dir,
+            new_dir,
+        } => restore(&backup_dir, &new_dir),
+        Command::OauthProvision { dir, replace } => provision_oauth(&dir, replace),
+        Command::OauthRoot { dir } => ProtectedDir::open(&dir)
+            .map_err(Into::into)
+            .and_then(|directory| browser_tls(&directory))
+            .map(|tls| print!("{}", tls.root_pem())),
+        Command::Run { dir, options } => run(&dir, options).await,
     };
     if let Err(error) = result {
-        eprintln!("harmiond: {error}");
+        tracing::error!(%error, "harmiond failed");
         std::process::exit(1);
     }
 }

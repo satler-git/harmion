@@ -52,6 +52,7 @@ async fn check_remote_cursor(
     }
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(peer = %hex(&node.0)))]
 pub async fn sync_once<S: Store + Send + 'static>(
     store: &SharedStore<S>,
     transport: &(impl PeerTransport + ?Sized),
@@ -211,5 +212,12 @@ pub async fn sync_once<S: Store + Send + 'static>(
             }
         }
     }
+    tracing::debug!(
+        uploaded = report.uploaded,
+        downloaded = report.downloaded,
+        local_high = report.local_high,
+        remote_high = report.remote_high,
+        "sync completed"
+    );
     Ok(report)
 }

@@ -83,7 +83,8 @@ pub struct Update<V = AttributeValue> {
     pub changes: BTreeMap<Field, Change<V>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{self:?}")]
 pub enum Error {
     UnsupportedVersion,
     WrongCluster,
@@ -96,13 +97,6 @@ pub enum Error {
     InvalidReplacement(Field),
     IncompleteRestore,
 }
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-impl std::error::Error for Error {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Acceptance {

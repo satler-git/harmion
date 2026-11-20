@@ -15,11 +15,12 @@ pub mod subscription;
 use harmion_domain as domain;
 use harmion_protocol as protocol;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{self:?}")]
 pub enum Error {
     Storage(String),
-    Codec(protocol::CodecError),
-    Domain(domain::Error),
+    Codec(#[from] protocol::CodecError),
+    Domain(#[from] domain::Error),
     IdentityMismatch,
     CorruptLog,
     InvalidPage,
@@ -46,22 +47,7 @@ pub enum Error {
     InvalidSignature,
     RecordRejected {
         update_id: domain::UpdateId,
+        #[source]
         reason: domain::Error,
     },
-}
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-impl std::error::Error for Error {}
-impl From<protocol::CodecError> for Error {
-    fn from(e: protocol::CodecError) -> Self {
-        Self::Codec(e)
-    }
-}
-impl From<domain::Error> for Error {
-    fn from(e: domain::Error) -> Self {
-        Self::Domain(e)
-    }
 }

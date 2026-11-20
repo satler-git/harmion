@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+thiserror.workspace = true
 harmion-domain = { path = "../domain" }
 sha2 = "0.10.9"
 serde = { version = "1", features = ["derive"] }

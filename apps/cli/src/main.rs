@@ -1,3 +1,7 @@
+mod cli;
+
+use clap::Parser;
+use cli::{Cli, Command as CliCommand};
 use domain::{Change, ContentId, Field, UpdateId, Value};
 use harmion_client::{Client, ProtectedDir, protocol::*, random_id};
 use resolution::{MergeInputRequest, MergePart, parse_selections};
@@ -53,27 +57,24 @@ async fn save(
         serde_json::json!({"content_id":hex(&content_id.0),"request_id":hex(&request.request_id.0),"request_file":path,"result":result}),
     )
 }
-async fn execute(args: &[String]) -> Result<serde_json::Value> {
-    let [flag, directory, command, rest @ ..] = args else {
-        return Err(USAGE.into());
-    };
-    if flag != "--node" {
-        return Err(USAGE.into());
-    }
+async fn execute(cli: &Cli) -> Result<serde_json::Value> {
+    let directory = &cli.node;
     let client = Client::from_directory(directory)?;
-    match (command.as_str(), rest) {
-        ("join" | "join-recovery", [path]) => Ok(client
+    let command = cli.command.operation();
+    match &cli.command {
+        CliCommand::Join { path } | CliCommand::JoinRecovery { path } => Ok(client
             .join_directory(
                 &ProtectedDir::open(directory)?,
                 &read(path, MAX_RECORD_BYTES)?,
                 command == "join-recovery",
             )
             .await?),
-        ("identity" | "capabilities" | "permissions" | "members", []) => {
-            Ok(client.call(command, &[]).await?)
-        }
-        ("export", [path]) => Ok(client.export_directory(path).await?),
-        ("oauth-register", [name, redirect]) => Ok(client
+        CliCommand::Identity
+        | CliCommand::Capabilities
+        | CliCommand::Permissions
+        | CliCommand::Members => Ok(client.call(command, &[]).await?),
+        CliCommand::Export { path } => Ok(client.export_directory(path).await?),
+        CliCommand::OauthRegister { name, redirect } => Ok(client
             .call(
                 command,
                 &serde_json::to_vec(&OAuthRegistration {
@@ -82,21 +83,33 @@ async fn execute(args: &[String]) -> Result<serde_json::Value> {
                 })?,
             )
             .await?),
-        ("oauth-consent", [request]) => Ok(client.call(command, &unhex::<32>(request)?).await?),
-        (
-            "get" | "conflicts" | "inspect" | "sync" | "retire" | "dismiss-retirement"
-            | "confirm-retirement",
-            [id],
-        ) => Ok(client.call(command, &unhex::<32>(id)?).await?),
-        ("approve" | "change-grants" | "trust-recovery-peer", [path]) => {
+        CliCommand::OauthConsent { request } => {
+            Ok(client.call(command, &unhex::<32>(request)?).await?)
+        }
+        CliCommand::Get { id }
+        | CliCommand::Conflicts { id }
+        | CliCommand::Inspect { id }
+        | CliCommand::Sync { id }
+        | CliCommand::Retire { id }
+        | CliCommand::DismissRetirement { id }
+        | CliCommand::ConfirmRetirement { id } => {
+            Ok(client.call(command, &unhex::<32>(id)?).await?)
+        }
+        CliCommand::Approve { path }
+        | CliCommand::ChangeGrants { path }
+        | CliCommand::TrustRecoveryPeer { path } => {
             Ok(client.call(command, &read(path, MAX_RECORD_BYTES)?).await?)
         }
-        ("save", [path]) => {
+        CliCommand::Save { path } => {
             let bytes = read(path, MAX_RECORD_BYTES)?;
             decode_save_request(&bytes)?;
             Ok(client.call("save", &bytes).await?)
         }
-        ("create", [source, request_file, kinds @ ..]) => {
+        CliCommand::Create {
+            source,
+            request_file,
+            kinds,
+        } => {
             let mut fields = body(source)?;
             for kind in kinds {
                 fields.insert(Field::Kind(kind.clone()), Value::Kind(true));
@@ -109,7 +122,18 @@ async fn execute(args: &[String]) -> Result<serde_json::Value> {
             )
             .await
         }
-        ("edit" | "restore", [id, token, source, request_file]) => {
+        CliCommand::Edit {
+            id,
+            token,
+            source,
+            request_file,
+        }
+        | CliCommand::Restore {
+            id,
+            token,
+            source,
+            request_file,
+        } => {
             let token = EditToken(unhex(token)?);
             let fields = body(source)?;
             let command = if command == "edit" {
@@ -119,7 +143,16 @@ async fn execute(args: &[String]) -> Result<serde_json::Value> {
             };
             save(&client, ContentId(unhex(id)?), command, request_file).await
         }
-        ("delete" | "keep", [id, token, request_file]) => {
+        CliCommand::Delete {
+            id,
+            token,
+            request_file,
+        }
+        | CliCommand::Keep {
+            id,
+            token,
+            request_file,
+        } => {
             let token = EditToken(unhex(token)?);
             let command = if command == "delete" {
                 Command::Delete { token }
@@ -128,7 +161,13 @@ async fn execute(args: &[String]) -> Result<serde_json::Value> {
             };
             save(&client, ContentId(unhex(id)?), command, request_file).await
         }
-        ("resolve", [id, token, source, request_file, versions @ ..]) if !versions.is_empty() => {
+        CliCommand::Resolve {
+            id,
+            token,
+            source,
+            request_file,
+            versions,
+        } => {
             let value = body(source)?.remove(&Field::Body).expect("body field");
             let replaces = versions
                 .iter()
@@ -140,7 +179,12 @@ async fn execute(args: &[String]) -> Result<serde_json::Value> {
             };
             save(&client, ContentId(unhex(id)?), command, request_file).await
         }
-        ("select", [id, token, selections, request_file]) => {
+        CliCommand::Select {
+            id,
+            token,
+            selections,
+            request_file,
+        } => {
             let selections = parse_selections(serde_json::from_slice(&read(
                 selections,
                 MAX_RECORD_BYTES,
@@ -151,13 +195,30 @@ async fn execute(args: &[String]) -> Result<serde_json::Value> {
             };
             save(&client, ContentId(unhex(id)?), command, request_file).await
         }
-        ("merge-base" | "merge-plan", [id, token, left, right, base @ ..]) if base.len() <= 1 => {
+        CliCommand::MergeBase {
+            id,
+            token,
+            left,
+            right,
+            base,
+        }
+        | CliCommand::MergePlan {
+            id,
+            token,
+            left,
+            right,
+            base,
+        } => {
             let request = MergeInputRequest {
                 content: ContentId(unhex(id)?),
                 token: EditToken(unhex(token)?),
                 left: UpdateId(unhex(left)?),
                 right: UpdateId(unhex(right)?),
-                part: MergePart::Base(base.first().map(|id| unhex(id).map(UpdateId)).transpose()?),
+                part: MergePart::Base(
+                    base.as_ref()
+                        .map(|id| unhex(id).map(UpdateId))
+                        .transpose()?,
+                ),
             };
             if command == "merge-base" {
                 Ok(serde_json::to_value(client.merge_input(request).await?)?)
@@ -165,13 +226,11 @@ async fn execute(args: &[String]) -> Result<serde_json::Value> {
                 Ok(serde_json::to_value(client.merge_plan(request).await?)?)
             }
         }
-        _ => Err(USAGE.into()),
     }
 }
-const USAGE: &str = "usage: harmion --node DIR COMMAND ...\nidentity | capabilities | permissions | members\napprove|join PEER_JSON | sync|retire NODE_ID | change-grants JSON\nconfirm-retirement|dismiss-retirement CERTIFICATE_ID\njoin-recovery|trust-recovery-peer PEER_JSON (explicit local owner recovery)\nget|conflicts|inspect CONTENT_ID\nexport NEW_DIRECTORY\noauth-register NAME REDIRECT_URI | oauth-consent REQUEST_ID\ncreate BODY_FILE REQUEST_FILE [KIND...]\nedit|restore CONTENT_ID TOKEN BODY_FILE REQUEST_FILE\ndelete|keep CONTENT_ID TOKEN REQUEST_FILE\nresolve CONTENT_ID TOKEN BODY_FILE REQUEST_FILE VERSION_ID...\nselect CONTENT_ID TOKEN SELECTIONS_JSON REQUEST_FILE\nmerge-base|merge-plan CONTENT_ID TOKEN LEFT_VERSION RIGHT_VERSION [BASE_VERSION]\nsave REQUEST_FILE\nRequest files require an owner-only parent directory and must not exist. Restore replaces all known fields; this command supplies only body.";
 #[tokio::main]
 async fn main() {
-    match execute(&std::env::args().skip(1).collect::<Vec<_>>()).await {
+    match execute(&Cli::parse()).await {
         Ok(result) => println!("{result}"),
         Err(error) => {
             eprintln!("harmion: {error}");

@@ -159,7 +159,7 @@ pub async fn serve<S: Store + Send + 'static>(
         let (acceptor, store, state) = (acceptor.clone(), store.clone(), state.clone());
         tasks.spawn(async move {
             let _permit = permit;
-            let _ = timeout(Duration::from_secs(30), async {
+            let result = timeout(Duration::from_secs(30), async {
                 let stream = acceptor.accept(tcp).await.map_err(transport)?;
                 hyper::server::conn::http1::Builder::new()
                     .max_headers(32)
@@ -172,6 +172,7 @@ pub async fn serve<S: Store + Send + 'static>(
                     .map_err(transport)
             })
             .await;
+            crate::trace_connection("OAuth HTTPS", result);
         });
     }
 }
