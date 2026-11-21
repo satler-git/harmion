@@ -1,6 +1,6 @@
 # native 複数ノード同期の実行
 
-Unix用のnative管理CLIで、署名付き参加・退役・却下証明をノード間で伝播する。Query/Subscribeと、任意で有効化するブラウザOAuthを提供する。InterpreterとDOは未実装。CLIは所有者限定ファイルから接続先と管理資格情報を読み、証明書を固定したloopback HTTPSで操作する。
+Unix用のnative管理CLIで、署名付き参加・退役・却下証明をノード間で伝播する。Query/Subscribeと、任意で有効化するブラウザOAuthを提供する。Interpreterは未実装。Worker/DOはローカルworkerdまで実装・検証済みで、実Cloudflareには未配置。CLIは所有者限定ファイルから接続先と管理資格情報を読み、証明書を固定したloopback HTTPSで操作する。
 
 ## 起動と参加
 
@@ -43,7 +43,24 @@ target/debug/harmion --node ./node-a sync NODE_B_ID
 
 `admin.secret`・`private-key.der`・`iroh.secret`は交換しない。管理資格情報は所有者bootstrap用で、OAuth access tokenではない。
 
-起動時にSQLite DBをschema v12へ移行する。同期状態の新しい観測領域は空で作り、過去の同期成功を推測で補わない。既知署名identityのpinは、現に有効な参加者とtrust rootだけを移行時にseedし、鍵を検証できない旧 peer は unknown のまま残す。旧DBの検索索引と項目の版参照は保持している更新から作る。Subscribeの変更履歴には移行後の更新を記録する。schema v4以前から移行した旧クラスタでは、起点にする1台だけを所有者が選び、`run DIR --bootstrap-cluster-root true`で共通の初期信頼証明を作る。他ノードは新しいv3登録でapprove/joinし直す。無署名だった既存Peerを、署名検証鍵を確認せず自動的に他端末へ紹介しない。データ・アプリ資格情報・データcursorは維持する。署名HTTPS（登録v4）は[署名HTTPSのdraft](../contracts/https-peer-v2-draft.md)を参照する。
+起動時にSQLite DBをschema v13へ移行する。編集トークンとrequest receiptには作成時刻を付け、30日より古い行をdaemonが起動時と6時間ごとに回収する。方針導入前の行は削除しない。回収済みトークンでの保存はHTTP 410 `token_expired` を返すので、アプリは取得し直す。同期状態の新しい観測領域は空で作り、過去の同期成功を推測で補わない。既知署名identityのpinは、現に有効な参加者とtrust rootだけを移行時にseedし、鍵を検証できない旧 peer は unknown のまま残す。旧DBの検索索引と項目の版参照は保持している更新から作る。Subscribeの変更履歴には移行後の更新を記録する。schema v4以前から移行した旧クラスタでは、起点にする1台だけを所有者が選び、`run DIR --bootstrap-cluster-root true`で共通の初期信頼証明を作る。他ノードは新しいv3登録でapprove/joinし直す。無署名だった既存Peerを、署名検証鍵を確認せず自動的に他端末へ紹介しない。データ・アプリ資格情報・データcursorは維持する。署名HTTPS（登録v4）は[署名HTTPSのdraft](../contracts/https-peer-v2-draft.md)を参照する。
+
+## Workerレプリカを追加する
+
+すでに動いているクラスタのfounderで、Workerの登録を承認し、Workerの`/provision`へ渡すmanifestを生成する。Workerの管理APIから`harmion-peer:v1:z:`コードまたは登録JSONを得ておく。
+
+```sh
+target/debug/harmion --node ./node-a approve ./worker-registration.json
+target/debug/harmion --node ./node-a provision-manifest ./worker-registration.json --out manifest.json
+```
+
+manifestは対象member、root anchor、root-firstのAdmission証明書列、Activeなcontactsを含む公開情報だけで、`admin.secret`は含まない。対象は先にapprove済みでActiveである必要がある。生成したJSONをWorkerの`/provision`へ`x-harmion-bootstrap`付きでPOSTし、以後は通常の`sync`で同期する。
+
+```sh
+target/debug/harmion --node ./node-a sync WORKER_NODE_ID
+```
+
+manifestの生成と投入はhost専用のbootstrap操作であり、通常のApp APIからは対象の登録・承認以上の権限を広げない。実CloudflareのTLS・Access配下では、Workerの公開originを登録JSONのoriginに一致させる。ローカルのworkerd検証では`--signed-https-root`で使い捨てCAを追加する。
 
 ## Linuxのユーザーサービスとして運用する
 
@@ -221,7 +238,12 @@ cargo build -p harmion-net-native --example local_relay
 python3 design_checks/two_process_sync.py --iroh
 python3 design_checks/multi_process_sync.py --iroh
 python3 design_checks/membership_process_sync.py --iroh
+cargo build -p harmion-net-native --example tls_forward
+# deploy/cloudflare/build.sh 済みのWorker成果物と、design_checks/worker_sql のnpm ciが必要
+python3 design_checks/worker_daemon.py
 ```
+
+worker_daemon.py は実`harmiond`のfounderと2台目のdaemonを起動し、Workerの登録コードを承認、`provision-manifest`で生成したmanifestをworkerdの`/provision`へ投入する。AからWorkerへのpush、Bの参加とAからのpull、BがWorkerだけから新規recordをpullする経路、A/B再起動、2回目のprovision拒否を確認する。TLSはlocalhostの使い捨てCAで終端し、`--signed-https-root`でそのCAだけを追加trust anchorにする。公開CloudflareのTLS・Access・課金は対象外。
 
 引数なしのテストはHTTPS経路を明示的に選び、一時directoryに独立したdaemonを2つ起動し、CLI経由で分断編集、競合解決中の追加更新、削除競合、クラッシュ後の再送、周期同期、退役を検証する。localhostの待受け権限が必要。
 

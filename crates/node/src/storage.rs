@@ -44,6 +44,12 @@ pub trait Store {
         &mut self,
         f: impl FnOnce(&mut dyn Transaction) -> Result<T, Error>,
     ) -> Result<T, Error>;
+    /// Reclaims edit tokens and request receipts older than `cutoff` (micros).
+    /// Rows created before the retention policy (created_at = 0) are kept.
+    /// Returns the number of edit tokens removed.
+    fn gc_tokens(&mut self, cutoff: i64) -> Result<u64, Error> {
+        self.transaction(|tx| tx.gc_tokens(cutoff))
+    }
 }
 
 /// Storage operations, not application policy. Called only within a transaction.
@@ -179,6 +185,8 @@ pub trait Transaction: crate::oauth::Storage {
         request: RequestId,
         result: &RequestResult,
     ) -> Result<(), Error>;
+    /// Deletes receipts first, then basis rows, then unreferenced tokens.
+    fn gc_tokens(&mut self, cutoff: i64) -> Result<u64, Error>;
     fn peer(&mut self, node: NodeId) -> Result<Option<Peer>, Error>;
     fn peers(&mut self) -> Result<Vec<Peer>, Error>;
     fn put_peer(&mut self, peer: &Peer) -> Result<(), Error>;

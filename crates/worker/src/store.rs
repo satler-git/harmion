@@ -762,6 +762,9 @@ impl Transaction for WorkerTransaction<'_> {
     ) -> Result<(), Error> {
         Err(Error::Storage(UNSUPPORTED.into()))
     }
+    fn gc_tokens(&mut self, _cutoff: i64) -> Result<u64, Error> {
+        Ok(0)
+    }
 }
 
 // Peer-only replica: no OAuth surface is exposed.

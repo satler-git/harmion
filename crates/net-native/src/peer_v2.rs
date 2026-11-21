@@ -425,7 +425,7 @@ impl SignedHttpsClient {
                     if let Body::ChallengeError { error, .. } = &frame.body
                         && error.code == ErrorCode::Capacity
                     {
-                        return Err(Error::Transport("signed peer capacity".into()));
+                        return Err(Error::Capacity);
                     }
                 }
                 return Err(Error::InvalidResponse);

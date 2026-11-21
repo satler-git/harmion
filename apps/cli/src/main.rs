@@ -18,6 +18,28 @@ fn read(path: &str, max: usize) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+/// Accept either a JSON file or the compressed `harmion-peer:v1:z:` code that
+/// the Worker UI displays. The daemon re-validates the registration.
+fn peer_registration(input: &str) -> Result<Vec<u8>> {
+    let bytes = match input.strip_prefix("harmion-peer:v1:z:") {
+        Some(encoded) => {
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            let compressed = URL_SAFE_NO_PAD.decode(encoded)?;
+            let decoder = flate2::read::GzDecoder::new(compressed.as_slice());
+            let mut bytes = Vec::new();
+            decoder
+                .take(MAX_RECORD_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            bytes
+        }
+        None => read(input, MAX_RECORD_BYTES)?,
+    };
+    if bytes.len() > MAX_RECORD_BYTES {
+        return Err("registration exceeds request limit".into());
+    }
+    let _: PeerRegistration = serde_json::from_slice(&bytes)?;
+    Ok(bytes)
+}
 fn body(path: &str) -> Result<BTreeMap<Field, Value>> {
     Ok([(
         Field::Body,
@@ -106,6 +128,18 @@ async fn execute(cli: &Cli) -> Result<serde_json::Value> {
         | CliCommand::ChangeGrants { path }
         | CliCommand::TrustRecoveryPeer { path } => {
             Ok(client.call(command, &read(path, MAX_RECORD_BYTES)?).await?)
+        }
+        CliCommand::ProvisionManifest { peer, out } => {
+            let manifest = client.call(command, &peer_registration(peer)?).await?;
+            match out {
+                Some(path) => {
+                    let mut text = serde_json::to_string_pretty(&manifest)?;
+                    text.push('\n');
+                    std::fs::write(path, text)?;
+                    Ok(serde_json::json!({"written":path}))
+                }
+                None => Ok(manifest),
+            }
         }
         CliCommand::Save { path } => {
             let bytes = read(path, MAX_RECORD_BYTES)?;
@@ -243,5 +277,45 @@ async fn main() {
             eprintln!("harmion: {error}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+
+    fn registration_code() -> (Vec<u8>, String) {
+        let registration = serde_json::json!({
+            "version": 4,
+            "cluster_id": hex(&[1; 32]),
+            "node_id": hex(&[2; 32]),
+            "binding": {"transport": "signed_https", "origin": "https://worker.example"},
+            "signing_key": hex(&[3; 32]),
+        });
+        let bytes = serde_json::to_vec(&registration).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&bytes).unwrap();
+        let compressed = encoder.finish().unwrap();
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let code = format!("harmion-peer:v1:z:{}", URL_SAFE_NO_PAD.encode(compressed));
+        (bytes, code)
+    }
+
+    #[test]
+    fn peer_code_is_decompressed_and_validated() {
+        let (bytes, code) = registration_code();
+        assert_eq!(peer_registration(&code).unwrap(), bytes);
+        assert!(peer_registration("harmion-peer:v1:z:not-base64!").is_err());
+        assert!(peer_registration("harmion-peer:v1:z:").is_err());
+    }
+
+    #[test]
+    fn malformed_registration_file_is_rejected() {
+        let path = std::env::temp_dir().join(format!("harmion-peer-{}", std::process::id()));
+        std::fs::write(&path, b"{\"version\":4}").unwrap();
+        let result = peer_registration(path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err());
     }
 }

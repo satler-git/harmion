@@ -30,6 +30,9 @@ pub struct TokenState {
     pub content_id: ContentId,
     pub basis: BTreeSet<UpdateId>,
     pub purpose: TokenPurpose,
+    /// Creation wall time in microseconds; zero marks rows that predate the
+    /// retention policy and are kept.
+    pub created_at: i64,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestResult {
@@ -37,6 +40,7 @@ pub struct RequestResult {
     pub update_id: UpdateId,
     pub snapshot_token: EditToken,
     pub return_view: bool,
+    pub created_at: i64,
 }
 
 pub use harmion_protocol::{ConflictView, ReadView, SaveResult};
@@ -71,6 +75,7 @@ pub(crate) fn mint_token(
             content_id: snapshot.content.id,
             basis: snapshot.basis.clone(),
             purpose,
+            created_at: host.now_micros(),
         },
     )?;
     Ok(token)
@@ -265,7 +270,7 @@ fn token_snapshot(
     token: EditToken,
     content: ContentId,
 ) -> Result<(TokenPurpose, ContentSnapshot), Error> {
-    let state = tx.token(token)?.ok_or(Error::InvalidToken)?;
+    let state = tx.token(token)?.ok_or(Error::TokenExpired)?;
     if state.content_id != content {
         return Err(Error::InvalidToken);
     }
@@ -586,6 +591,7 @@ pub fn save_with_outcome(
             update_id,
             snapshot_token: token,
             return_view: after.life != Life::Deleted && grants.can_read(&after.content),
+            created_at: host.now_micros(),
         };
         tx.insert_request(principal.app.id, request.request_id, &result)?;
         Ok((

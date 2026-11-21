@@ -29,10 +29,13 @@ editはContent ID、編集トークン、request_id、変更項目を受け取�
 - 編集トークンは使い捨てにしない。同じ編集元から別要求を保存すると別の枝になり得る。
 - 同一request_idでの同じ要求は元の保存結果を返す。別要求への使い回しはエラー。
 - トークンは権限を付与しない。保存時に現在のWriteを検査する。
+- 編集トークンとrequest receiptは、作成から30日を下限に保持し、その後回収する。回収済みまたは不明なトークンでの保存は HTTP 410 と `{"error":"token_expired"}` を返すので、アプリはgetで取り直す。receiptが回収された後の同じrequest_idの再送は、元の結果を返せず新しい更新になり得る。方針導入前の既存行は削除しない。
 
 保存成功はローカル永続化の成功であり、その値が通常表示に選ばれることを保証しない。HTTP 200 の保存結果は `update_id` と `saved: true` を返す。Readがあり、応答の上限内に収まるときは、`view` に保存直後の通常値・新しい編集トークン・競合情報を返す。閲覧できる `view` が上限を超える場合は `view: null` と `view_error: "response_too_large"` を返す。同じ要求を再送しても、元の更新IDと保存完了を取得できる。SDKは編集バッファを保持する。
 
 nativeのget・conflicts・inspectは、認可・可視性を検査した後、返す内容全体のJSONサイズを編集トークン発行前に計測する。8 MiBを超える場合は HTTP 413 と `{"error":"response_too_large"}` を返し、新しい編集トークンやそのbasisを保存しない。本文・属性・競合候補を一部落として成功にはしない。最終JSONの符号化も書き込みごとに上限を検査する。これは応答生成と失敗した取得によるDB増加の制限であり、Contentの全履歴読込みやprojection全体のメモリ上限を保証するものではない。保存要求は上記のとおりreceiptを返し、大きなviewを理由に保存済み結果を失敗扱いしない。
+
+保存要求の本文はrecord上限の1 MiBまでとする。単一Contentのストリーム／ページ取得はv1では提供せず、応答上限を超えるContentは413で失敗する。これは未実装の契約であり、部分的な取得を成功として扱わない。
 
 get_conflictsは権限内の候補と解決トークンを返す。resolveは解決する項目と候補を明示して新しい更新を作る。候補の一つをそのまま選ぶ場合も新しい解決更新とする。複数項目を一度に解決できるが、取得した全競合を自動的に対象にしない。未確認の並行更新は残す。
 
@@ -130,6 +133,12 @@ Peer の接続コードは `harmion-peer:v1:z:BASE64URL`。ペイロードは公
 
 アプリの登録コードは `harmion-app:v1:BASE64URL`。`name` と `redirect_uri` の JSON を同じ方式で符号化する。アプリが認可を開始した後は、認可画面の `harmion-auth:v1:REQUEST_ID` を所有者が管理画面に貼り付ける。`POST /app/v1/oauth-preview` は32バイトの要求IDを受け取り、ManageApps 権限を検査した上で要求元と権限を返す。所有者の確認後は既存の認可画面で許可・拒否し、登録済み callback へ戻る。
 
+### Worker向けprovisioning manifest
+
+`POST /app/v1/provision-manifest` は、ManageNodes を持つ所有者が、すでに承認済みでActiveな SignedHttps Peer の v4 登録JSONを本文に指定して呼ぶ。応答は Worker の `/provision` にそのまま渡せる JSON で、`own`（対象のmember）、`root`（クラスタanchorの証明書、16進）、`evidence`（anchorから対象までのAdmit証明書列、root-first、16進の配列）、`contacts`（現在Activeな他のmember）を含む。秘密は含まない。
+
+対象が未承認・未Active・別identityの場合は発行しない。権限不足は HTTP 403、資格情報の失効は HTTP 401。CLI は `harmion provision-manifest <登録JSONファイル|harmion-peer:v1:z:コード> [--out PATH]` で、`--out` を省略すると標準出力へ返す。承認（`approve`）の後に実行し、得たJSONを `/provision` のbootstrap要求へ渡す。再適用の冪等性と競合拒否は `/provision` 側の契約に従う。
+
 capabilitiesはAPI版・対応操作・上限、permissionsは自分のgrantを返す。
 
 ### 所有者向け同期状態・更新の受領確認
@@ -142,7 +151,7 @@ capabilitiesはAPI版・対応操作・上限、permissionsは自分のgrantを�
 - `update_confirmed: true` は、指定更新の自分のログ位置まで、そのPeerが永続受理したことを最後の成功ラウンドで確認できた、という意味。`false` は確認位置が足りないこと、`null` は更新未指定または有効な観測がないこと。`false`／`null` は未受領の証明ではない。中継経由での受領やACK喪失があり得る。
 - `unconfirmed_local` は確認位置より後にある自分の受理済み更新の件数。ログには中継更新も入り、欠番もあり得るため、ログ位置の差ではなく件数を数える。実際の未配達数ではない。初回同期やpullでラウンド開始後に増えた更新は、成功したラウンドの直後でも未確認になり得る。
 - 最新の自発同期が失敗した場合、`last_failure` に `attempted_at`（失敗を記録した時刻）と限定された `code` を残す。過去の成功観測は消さない。次の成功で `last_failure` を消す。時刻の大小で成否を決めないため、時計が戻っても最新の完了結果を区別できる。
-- `code` は `transport_error`、`timeout`、`invalid_response`、`record_rejected`、`peer_retired`、`membership_conflict`、`unauthenticated`、`identity_mismatch`、`storage_error`、`sync_error`。資格情報、本文、接続先、外部由来のエラーメッセージは保存・公開しない。
+- `code` は `transport_error`、`capacity`、`timeout`、`invalid_response`、`record_rejected`、`peer_retired`、`membership_conflict`、`unauthenticated`、`identity_mismatch`、`storage_error`、`sync_error`。資格情報、本文、接続先、外部由来のエラーメッセージは保存・公開しない。
 - 取得はローカル状態を読み、ネットワーク接続や同期を起こさない。手動・自動の自発同期が観測を更新する。途中失敗したラウンドの一部ACKは初版では新しい成功観測にしない。観測のDB保存要求を出す前のキャンセルや、保存がコミットされない終了・保存失敗では以前の観測が残る。DB workerへ保存を依頼した後は、呼出し元がキャンセルされても保存が完了し得る。その場合も実際の保存完了まで同一Peerの自発同期を直列化し、古い結果が新しい試行を上書きしない。受領済みの更新や受信cursorを取り消す処理ではない。
 - 観測はSQLite schema v10で保持し再起動後も取得できる。バックアップを新しい Node ID で復元したノードには引き継がない。過去の受領確認は現在オンラインであること、第三ノードへの伝播、将来のバックアップ耐久性、クラスタ全体の最新性を保証しない。何台で保存完了とするかというポリシーも追加しない。
 

@@ -91,6 +91,7 @@ fn failure_code(error: &Error) -> &'static str {
     use harmion_node::Error as N;
     match error {
         Error::Timeout => "timeout",
+        Error::Capacity => "capacity",
         Error::Io(_) | Error::Transport(_) => "transport_error",
         Error::InvalidResponse => "invalid_response",
         Error::RemoteRejected { .. } | Error::Node(N::RecordRejected { .. }) => "record_rejected",

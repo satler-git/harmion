@@ -76,8 +76,18 @@ root/identity/key. After the first successful apply the route returns
 deliberate identical repair, then remove it. Rotate or remove
 `BOOTSTRAP_TOKEN` after provisioning.
 
-A manifest-generation CLI is not implemented yet; the local probe composes one
-from existing certificates.
+Generate this manifest from an active cluster instead of composing it by hand.
+On the native founder, approve the Worker's `registration-code` first, then:
+
+```sh
+harmion --node /path/to/node provision-manifest worker-registration.json \
+  --out manifest.json
+```
+
+The command requires ManageNodes, refuses a registration that is not Active,
+and emits only public membership material (own member, root anchor,
+root-first admission chain, active contacts) — never `admin.secret`. Its output
+is the JSON above. Post it with `x-harmion-bootstrap`; then sync normally.
 
 The Worker's own `harmion-peer:v1:` code is available at
 `POST /admin/registration-code` (bearer) so an owner can approve it from a

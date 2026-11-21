@@ -25,6 +25,10 @@ use std::{
 use tokio::{net::TcpListener, sync::watch, time::Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+/// Edit tokens and request receipts older than this are reclaimed. Rows that
+/// predate the retention policy keep created_at=0 and are grandfathered.
+const TOKEN_RETENTION_MICROS: i64 = 30 * 24 * 60 * 60 * 1_000_000;
+const TOKEN_GC_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 #[derive(Debug, thiserror::Error)]
 enum DaemonError {
     #[error("unsupported node config version: {0}")]
@@ -537,6 +541,24 @@ async fn run(path: &str, options: RunOptions) -> Result<()> {
         tasks.spawn(iroh_peer::serve(endpoint.clone(), store.clone(), receiver));
     }
     let mut background = tokio::task::JoinSet::new();
+    {
+        // Maintenance runs detached: a failure must not stop the HTTP services.
+        let store = store.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(TOKEN_GC_INTERVAL);
+            loop {
+                ticker.tick().await;
+                let cutoff = SystemHost.now_micros() - TOKEN_RETENTION_MICROS;
+                match store.run(move |s| s.gc_tokens(cutoff)).await {
+                    Ok(deleted) if deleted > 0 => {
+                        tracing::info!(deleted, "reclaimed expired edit tokens");
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, "edit token cleanup failed"),
+                }
+            }
+        });
+    }
     if config.sync_seconds != 0 {
         let (recovery, hints) = watch::channel(None);
         let endpoint = iroh_endpoint.clone();

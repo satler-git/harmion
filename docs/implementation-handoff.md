@@ -31,12 +31,23 @@ quota節約のため、**Cloudflareレプリカ本体・Android・Windowsの新�
 
 2026-11-22: ここまでの作業を commit `174bc2f` に記録した（未コミット差分なし）。直ちにデプロイする予定はないため、次はInterpreterのローカル実装に進む。
 
+### 2026-11-22 追記（Interpreter前の穴埋め）
+
+所有者との合意に基づき、Interpreterの前に残っていた穴を塞いだ。詳細は[R49〜R51](implementation-review.md)。
+
+- **9（Worker参加の配線）**: `harmion_node::provisioning::export_manifest`、App API `provision-manifest`、CLI `harmion provision-manifest`を追加した。承認済みのSignedHttps Peerについて、root anchor・root-firstのAdmission列・Activeなcontactsを出力する。実`harmiond`2台とworkerd DOをTLS越しにつなぐ[E2E](../design_checks/worker_daemon.py)で、provision→push→参加→Workerからのpull→再起動→再provision拒否を確認した。
+- **10b（保持）**: schema v13で編集トークンとrequest receiptに作成時刻を付け、30日より古い行をGCする。回収済みトークンはHTTP 410 `token_expired`。方針前の行は削除しない。daemonが起動時と6時間ごとに回収する。
+- **8（nativeのv2入口）**: nativeはiroh/HTTPSのまま。WorkerのoutboundはSignedHttps以外をスキップするため現行の端末起点同期は成立する。`peer_v2::serve`は未配線で、nativeへv4 SignedHttps登録を使うと同期だけ失敗する点を運用上の注意として明記した。公開Linuxピアが必要になった時点で実装する。
+- **10a（大容量）**: 保存要求1 MiB・応答8 MiBの上限を明記し、単一Contentのstream/page取得はv1で提供しない。
+- **11（鍵変更・遠隔管理）**: v1対象外として明記。端末交換は新Node IDでの復元を使う。
+- **未実施のまま**: 実CloudflareのAccess/TLS/secret/課金、workerd自体の再起動を含むE2E、Android/Windows、Interpreter。
+
 次の実装順:
 
 1. Interpreter（契約確定 → registry/provider_session/invocation → App/Provider API → SDK/CLI → 管理UI）
-2. native daemonを設定から起動するE2E（App/管理API・管理画面の初期化を含む）
-3. 所有者が必要とした時点でWorkersの本番運用準備（Accessポリシー、secret配布、TLS終端、isolate単位のschemaキャッシュ）
-4. Android → WindowsのOSホスト
+2. 所有者が必要とした時点でWorkersの本番運用準備（Accessポリシー、secret配布、TLS終端、isolate単位のschemaキャッシュ）
+3. Android → WindowsのOSホスト
+4. E2Eの残り（workerd再起動を含むDO耐久、管理画面を含むdaemon起動の通し確認）
 
 ### Interpreterを始めるための準備
 

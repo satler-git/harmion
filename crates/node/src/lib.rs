@@ -35,6 +35,9 @@ pub enum Error {
     Forbidden,
     NotFound,
     InvalidToken,
+    /// The edit basis is absent or was reclaimed by retention. Get the Content
+    /// again; retrying the same basis cannot succeed.
+    TokenExpired,
     RequestIdReuse,
     AlreadyBootstrapped,
     InvalidRequest,

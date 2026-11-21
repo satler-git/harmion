@@ -67,6 +67,22 @@ pub struct SqliteStore {
     auth_clock: harmion_node::https_peer::AuthClock,
 }
 
+/// A partial or simulated upgrade can already carry the retention column.
+/// Table and column names here are fixed literals, never user input.
+fn has_column(tx: &rusqlite::Transaction<'_>, table: &str, column: &str) -> Result<bool, Error> {
+    let mut statement = tx
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(db)?;
+    let mut rows = statement.query([]).map_err(db)?;
+    while let Some(row) = rows.next().map_err(db)? {
+        let name: String = row.get(1).map_err(db)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Allow `key_kind` 2 (signed HTTPS) in the routing projection. SQLite cannot
 /// change a CHECK in place, and the sync-status tables carry a foreign key to
 /// `peers`, so the documented 12-step rebuild must run with foreign-key
@@ -127,7 +143,7 @@ impl SqliteStore {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(db)?;
-        if !(0..=12).contains(&version) {
+        if !(0..=13).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
@@ -244,6 +260,23 @@ impl SqliteStore {
         if version < 12 {
             challenge::initialize(&tx)?;
         }
+        if version < 13 {
+            // Retention metadata. Existing rows keep 0 and are grandfathered;
+            // only newly created tokens/receipts are reclaimed after 30 days.
+            if !has_column(&tx, "edit_tokens", "created_at")? {
+                tx.execute_batch(
+                    "ALTER TABLE edit_tokens ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;",
+                )
+                .map_err(db)?;
+            }
+            if !has_column(&tx, "request_results", "created_at")? {
+                tx.execute_batch(
+                    "ALTER TABLE request_results ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;",
+                )
+                .map_err(db)?;
+            }
+            tx.pragma_update(None, "user_version", 13).map_err(db)?;
+        }
         {
             let mut storage = SqlTransaction { sql: &tx, identity };
             // Reject broken bytes/dependencies at startup; never salvage only the
@@ -300,7 +333,7 @@ impl SqliteStore {
         let version: i64 = tx
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db)?;
-        if !(1..=12).contains(&version) {
+        if !(1..=13).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
@@ -1017,13 +1050,19 @@ impl Transaction for SqlTransaction<'_> {
         let row = self
             .sql
             .query_row(
-                "SELECT content,purpose FROM edit_tokens WHERE token=?1",
+                "SELECT content,purpose,created_at FROM edit_tokens WHERE token=?1",
                 [token.0],
-                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, Vec<u8>>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(db)?;
-        let Some((content, purpose)) = row else {
+        let Some((content, purpose, created_at)) = row else {
             return Ok(None);
         };
         let purpose = match purpose {
@@ -1047,6 +1086,7 @@ impl Transaction for SqlTransaction<'_> {
             content_id: ContentId(fixed(content)?),
             basis,
             purpose,
+            created_at,
         }))
     }
     fn insert_token(&mut self, token: EditToken, state: &TokenState) -> Result<(), Error> {
@@ -1057,8 +1097,8 @@ impl Transaction for SqlTransaction<'_> {
         };
         self.sql
             .execute(
-                "INSERT INTO edit_tokens VALUES(?1,?2,?3)",
-                params![token.0, state.content_id.0, purpose],
+                "INSERT INTO edit_tokens(token,content,purpose,created_at) VALUES(?1,?2,?3,?4)",
+                params![token.0, state.content_id.0, purpose, state.created_at],
             )
             .map_err(db)?;
         for id in &state.basis {
@@ -1072,14 +1112,15 @@ impl Transaction for SqlTransaction<'_> {
         Ok(())
     }
     fn request(&mut self, app: AppId, request: RequestId) -> Result<Option<RequestResult>, Error> {
-        let row = self.sql.query_row("SELECT request,update_id,snapshot_token,return_view FROM request_results WHERE app_id=?1 AND request_id=?2",
-            params![app.0, request.0], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, Vec<u8>>(2)?, r.get::<_, bool>(3)?))).optional().map_err(db)?;
-        row.map(|(request, update, token, return_view)| {
+        let row = self.sql.query_row("SELECT request,update_id,snapshot_token,return_view,created_at FROM request_results WHERE app_id=?1 AND request_id=?2",
+            params![app.0, request.0], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, Vec<u8>>(2)?, r.get::<_, bool>(3)?, r.get::<_, i64>(4)?))).optional().map_err(db)?;
+        row.map(|(request, update, token, return_view, created_at)| {
             Ok(RequestResult {
                 request,
                 update_id: UpdateId(fixed(update)?),
                 snapshot_token: EditToken(fixed(token)?),
                 return_view,
+                created_at,
             })
         })
         .transpose()
@@ -1092,18 +1133,49 @@ impl Transaction for SqlTransaction<'_> {
     ) -> Result<(), Error> {
         self.sql
             .execute(
-                "INSERT INTO request_results VALUES(?1,?2,?3,?4,?5,?6)",
+                "INSERT INTO request_results(app_id,request_id,request,update_id,snapshot_token,return_view,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
                 params![
                     app.0,
                     request.0,
                     result.request,
                     result.update_id.0,
                     result.snapshot_token.0,
-                    result.return_view
+                    result.return_view,
+                    result.created_at
                 ],
             )
             .map_err(db)?;
         Ok(())
+    }
+    fn gc_tokens(&mut self, cutoff: i64) -> Result<u64, Error> {
+        // Receipts first: a live receipt keeps its snapshot token and basis.
+        // Rows created before the retention policy carry created_at = 0 and are
+        // deliberately kept rather than silently deleted.
+        self.sql
+            .execute(
+                "DELETE FROM request_results WHERE created_at > 0 AND created_at < ?1",
+                [cutoff],
+            )
+            .map_err(db)?;
+        self.sql
+            .execute(
+                "DELETE FROM token_basis WHERE token IN (
+                    SELECT token FROM edit_tokens
+                    WHERE created_at > 0 AND created_at < ?1
+                      AND NOT EXISTS (SELECT 1 FROM request_results WHERE snapshot_token=edit_tokens.token)
+                )",
+                [cutoff],
+            )
+            .map_err(db)?;
+        self.sql
+            .execute(
+                "DELETE FROM edit_tokens
+                 WHERE created_at > 0 AND created_at < ?1
+                   AND NOT EXISTS (SELECT 1 FROM request_results WHERE snapshot_token=edit_tokens.token)",
+                [cutoff],
+            )
+            .map_err(db)
+            .map(|count| count as u64)
     }
 }
 

@@ -34,6 +34,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 fn oauth_expiry_uses_persisted_deadlines_and_ipv6_loopback_callback() {
     use harmion_node::{access, oauth};
     let mut t = Test::new();
+    let admin = t.admin.clone();
     let registered = "http://[::1]/callback";
     let callback = "http://[::1]:49152/callback";
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
@@ -42,7 +43,7 @@ fn oauth_expiry_uses_persisted_deadlines_and_ipv6_loopback_callback() {
     let client = oauth::register(
         &mut t.store,
         &mut t.host,
-        &t.admin,
+        &admin,
         "example".into(),
         registered.into(),
     )
@@ -63,7 +64,7 @@ fn oauth_expiry_uses_persisted_deadlines_and_ipv6_loopback_callback() {
         oauth::decide(
             &mut t.store,
             &mut t.host,
-            &t.admin,
+            &admin,
             authorization.request,
             true,
         )
@@ -117,6 +118,7 @@ fn oauth_expiry_uses_persisted_deadlines_and_ipv6_loopback_callback() {
 fn v3_peer_migration_preserves_tls_binding_and_separates_iroh_keys() {
     use harmion_node::membership::{self, Peer, PeerKey};
     let mut t = Test::new();
+    let admin = t.admin.clone();
     // Simulate a deployed v3 database, retaining all other state.
     let db = rusqlite::Connection::open(t.path.join("node.db")).unwrap();
     db.execute_batch("DROP TABLE sync_failures; DROP TABLE sync_observations;
@@ -146,14 +148,7 @@ fn v3_peer_migration_preserves_tls_binding_and_separates_iroh_keys() {
         endpoint: String::new(),
         retired: false,
     };
-    membership::approve(
-        &mut t.store,
-        100,
-        &t.admin,
-        identity().cluster,
-        peer.clone(),
-    )
-    .unwrap();
+    membership::approve(&mut t.store, 100, &admin, identity().cluster, peer.clone()).unwrap();
     t.restart();
     assert_eq!(
         t.store.transaction(|tx| tx.peer(peer.node)).unwrap(),
@@ -164,12 +159,12 @@ fn v3_peer_migration_preserves_tls_binding_and_separates_iroh_keys() {
         ..peer.clone()
     };
     assert!(matches!(
-        membership::approve(&mut t.store, 100, &t.admin, identity().cluster, replacement),
+        membership::approve(&mut t.store, 100, &admin, identity().cluster, replacement),
         Err(Error::IdentityMismatch)
     ));
-    membership::retire(&mut t.store, 100, &t.admin, peer.node).unwrap();
+    membership::retire(&mut t.store, 100, &admin, peer.node).unwrap();
     assert!(matches!(
-        membership::approve(&mut t.store, 100, &t.admin, identity().cluster, peer),
+        membership::approve(&mut t.store, 100, &admin, identity().cluster, peer),
         Err(Error::PeerRetired)
     ));
 }
@@ -403,7 +398,7 @@ fn reusable_stale_token_keeps_independent_branches_and_invalid_tokens_never_reba
                 fields: body("bad")
             }
         ),
-        Err(Error::InvalidToken)
+        Err(Error::TokenExpired)
     ));
     let mut wrong_content = request(
         5,
@@ -1064,6 +1059,7 @@ fn request_result_failure_rolls_back_update_token_and_result() {
 fn synchronized_content_does_not_transfer_credentials_tokens_or_request_results() {
     use harmion_node::replication;
     let mut t = Test::new();
+    let admin = t.admin.clone();
     let original = t.create();
     let token = original.view.unwrap().edit_token;
     let remote_id = Identity {
@@ -1085,7 +1081,7 @@ fn synchronized_content_does_not_transfer_credentials_tokens_or_request_results(
         .transaction(|tx| replication::receive(tx, identity().node, &page))
         .unwrap();
     assert!(matches!(
-        app::get(&mut remote, &mut t.host, &t.admin, content()),
+        app::get(&mut remote, &mut t.host, &admin, content()),
         Err(Error::Unauthenticated)
     ));
     assert!(remote.transaction(|tx| tx.token(token)).unwrap().is_none());
@@ -1104,7 +1100,7 @@ fn synchronized_content_does_not_transfer_credentials_tokens_or_request_results(
     );
     assert!(matches!(
         app::save(&mut remote, &mut t.host, &remote_admin, &req),
-        Err(Error::InvalidToken)
+        Err(Error::TokenExpired)
     ));
     let remote_token = app::get(&mut remote, &mut t.host, &remote_admin, content())
         .unwrap()
@@ -1581,12 +1577,13 @@ fn migration_preserves_v1_records_and_cursor_generation() {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
 }
 
 #[test]
 fn granting_read_later_does_not_add_historical_content_to_a_write_only_receipt() {
     let mut t = Test::new();
+    let admin = t.admin.clone();
     let (writer_id, writer) = t.issue(Grants {
         write: Some(Filter::All),
         ..Grants::default()
@@ -1597,7 +1594,7 @@ fn granting_read_later_does_not_add_historical_content_to_a_write_only_receipt()
     app::change_grants(
         &mut t.store,
         t.host.now,
-        &t.admin,
+        &admin,
         writer_id,
         read_write(),
         false,
@@ -1609,4 +1606,73 @@ fn granting_read_later_does_not_add_historical_content_to_a_write_only_receipt()
         receipt
     );
     assert_eq!(t.get(&writer).content.body, "base");
+}
+
+#[test]
+fn retention_reclaims_old_tokens_and_receipts_and_keeps_grandfathered_rows() {
+    use harmion_node::application::{TokenPurpose, TokenState};
+    let mut t = Test::new();
+    let admin = t.admin.clone();
+    t.host.now = 1_000;
+    let created = t.create();
+    let token = created.view.unwrap().edit_token;
+    t.host.now = 3_000;
+    t.save(
+        &admin,
+        2,
+        Command::Edit {
+            token,
+            fields: body("edited"),
+        },
+    )
+    .unwrap();
+    // A row created before the retention policy carries created_at = 0.
+    t.store
+        .transaction(|tx| {
+            tx.insert_token(
+                EditToken([7; 32]),
+                &TokenState {
+                    content_id: content(),
+                    basis: BTreeSet::new(),
+                    purpose: TokenPurpose::Edit,
+                    created_at: 0,
+                },
+            )
+        })
+        .unwrap();
+
+    let deleted = t.store.gc_tokens(2_000).unwrap();
+    assert_eq!(deleted, 1);
+    t.store
+        .transaction(|tx| {
+            assert!(tx.token(token)?.is_none());
+            assert!(tx.token(EditToken([7; 32]))?.is_some());
+            Ok(())
+        })
+        .unwrap();
+
+    // A live receipt still answers the same request without the reclaimed basis.
+    let replay = t
+        .save(
+            &admin,
+            2,
+            Command::Edit {
+                token,
+                fields: body("edited"),
+            },
+        )
+        .unwrap();
+    assert!(replay.view.is_some());
+    // A new request with the reclaimed basis must ask the app to get again.
+    assert!(matches!(
+        t.save(
+            &admin,
+            3,
+            Command::Edit {
+                token,
+                fields: body("new"),
+            },
+        ),
+        Err(Error::TokenExpired)
+    ));
 }

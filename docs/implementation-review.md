@@ -33,7 +33,7 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 | §8 古いノードバックアップからの復元 | native 実装 | 新しい Node ID で Content 履歴を復元し、有効なノードから承認を受けて再参加する。R23参照 |
 | §9 端末間iroh・通信と意味の分離 | 実装、検証範囲限定 | `sync::PeerTransport`とHTTPS/iroh adapter。ローカルIP変更、リレーのみ、独立2プロセスを検証 |
 | §9 同期契機 | 部分実装 | 起動・周期・手動・ローカル保存（R16）に加え、Linuxの復帰推定、実行再開、ネットワーク構成変化、iroh relay接続を同期ヒントにする（R27）。相手の更新通知と全OSの復帰検知は残る |
-| §9 Cloudflare | 未実装 | worker crate/DO adapterなし。現在のHTTPSをCloudflare対応済みと呼ばない |
+| §9 Cloudflare | ローカルworkerdまで実装、実配置なし | Worker/DO adapter、Peer v2、管理UI、provisioning、outboundをworkerdで検証（R33〜R51）。実CloudflareのAccess/TLS/secret/課金とDO起動時の全履歴検証は未実施 |
 | §10 Export | ネイティブ App API・管理CLI実装 | R21参照。本文、通常値、競合候補、削除記録を固定時点で出力 |
 
 ## 指摘・暫定対応の台帳
@@ -427,6 +427,25 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - `harmiond run --signed-https-root <PATH>`（繰り返し可能）を追加し、DER証明書を追加のWebPKI trust anchorとして`NativeTransport`へ渡すようにした。空・過大・読めないファイルは起動前に拒否する。CLIのパーステストを追加した。
 - これはprivate CA配下のreplicaにnativeノードから接続するための運用機能で、通常のCloudflare公開証明書では不要。
 - 限界: daemonバイナリを実際に起動してpeer承認・同期まで通すE2Eは未実施（同期コアはR45/R46で検証済み）。
+
+### R49 — Worker向けprovisioning manifestの生成と実daemon E2E
+
+- `harmion_node::provisioning::export_manifest` と App API `provision-manifest`、CLI `harmion provision-manifest <JSON|code> [--out PATH]` を追加した。承認済みでActiveなSignedHttps Peerについて、root anchor、root-firstのAdmit証明書列、Activeなcontactsを返す。未承認・identity不一致・権限不足では発行しない。
+- 実バイナリE2E [worker_daemon.py](../design_checks/worker_daemon.py) を追加した。実`harmiond`のfounder Aを起動し、Workerの登録コードをAで承認、manifestを生成してworkerdの`/provision`へ投入、Aからrecordをpush、別の実`harmiond` BがAから参加・pull、AがBのadmissionをWorkerへ伝播した後、BがWorkerだけから新規recordをpullする。A/B再起動後の同期と、2回目の`/provision`拒否も確認する。
+- 限界: ローカルworkerdとloopback TLSで、実CloudflareのAccess/TLS/課金は未検証。E2Eはworkerd自体の再起動を含まない（DOの保存耐久はR41のprobeで別途確認）。Workerの`/provision`はhost専用のまま。連続した手動syncはprovisionalなchallenge/rate上限（burst 16、2/s）に達し得る。その場合App APIは429 `peer_capacity`を返し、E2Eは6秒待って再試行する。定期syncはバックオフで再試行する。
+
+### R50 — edit tokenとrequest receiptの30日保持
+
+- schema v13で`edit_tokens.created_at`と`request_results.created_at`を追加した。新規行はホスト時刻を保存し、30日より古い行をGCで回収する。receiptを先に削除し、basis、未参照のtokenの順で消す。方針導入前の`created_at=0`行は削除しない。
+- 回収済み・不明なtokenでの保存は`TokenExpired`（HTTP 410 `token_expired`）にした。liveなreceiptが参照するtokenは保持し、同じrequest_idの再送は元の結果を返す。receipt回収後の再送は新しい更新になり得る。
+- daemonは起動時と6時間ごとにGCする。テストは回収、live receiptの保持、方針前行の保持、回収後の再取得要求を確認する。
+- 限界: 30日は所有者が選んだ下限方針で、tokenが実際に消えるのは次のGC。GCはログのみで管理APIの指標には出さない。旧行は回収しない。長期的なDBサイズ上限を保証するものではない。
+
+### R51 — nativeのv2入口・大容量・鍵変更の扱い
+
+- nativeはiroh/HTTPSのまま公開SignedHttpsピアにしない。WorkerのoutboundはSignedHttps以外をスキップするため現行の端末起点同期は成立する。`peer_v2::serve`は実装済みだがdaemonには配線せず、nativeへv4 SignedHttps登録を使ってadmitすると同期だけ失敗する点を運用上の注意として残す。単一`Member.binding`のためSignedHttpsとirohの併用はできない。公開Linuxピアが必要になった時点で実装する。
+- 単一Contentは保存要求1 MiB、応答8 MiBを上限とし、stream/page取得はv1で提供しない。上限超過は413で失敗し、部分的な成功にしない。
+- v1は署名鍵ローテーションを提供しない。既知identity pinは同一ノードの鍵変更を拒否するため、端末交換は新しいNode IDでの復元（R23）を使う。遠隔管理grantも提供しない（Peer資格を管理grantへ昇格しない）。これらは欠陥ではなくv1の対象外として明示する。
 
 ## 基準時点の複数ノード同期の検証条件
 

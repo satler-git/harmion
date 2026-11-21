@@ -2,7 +2,7 @@
 
 一人のユーザーが所有する、アプリから独立した個人データ基盤。
 
-Rustで初期実装を進めています。Content・SQLite保存・App HTTPS API・daemon/CLI・HTTPS/irohのPeer同期、署名付き参加・退役・却下証明の伝播を実装しています。nativeではQuery/Subscribe、所有者向けExport、専用CAを使うブラウザOAuthも利用できます。5つの独立プロセスで中継・分断・再起動・周期同期を検証し、管理情報の伝播・保留・所有者回復は別の実プロセステストで確認しています。DOは未実装です。各機能の範囲は[実装全体レビュー](docs/implementation-review.md)を参照してください。
+Rustで初期実装を進めています。Content・SQLite保存・App HTTPS API・daemon/CLI・HTTPS/irohのPeer同期、署名付き参加・退役・却下証明の伝播を実装しています。nativeではQuery/Subscribe、所有者向けExport、専用CAを使うブラウザOAuthも利用できます。5つの独立プロセスで中継・分断・再起動・周期同期を検証し、管理情報の伝播・保留・所有者回復は別の実プロセステストで確認しています。Workers/DOはローカルworkerdまで実装・検証済みで、実Cloudflareには未配置です。各機能の範囲は[実装全体レビュー](docs/implementation-review.md)を参照してください。
 
 ネイティブの App HTTPS と Rust SDK は、固定スナップショットの Query、初回取得と変更通知をつなぐ Subscribe、購読キャッシュを提供します。所有者向けの `sync-status` では、最後の自発同期の成功・失敗と、保存した更新のPeerごとの受領確認を取得できます。ローカル保存成功・過去の受領確認・現在の到達性は区別します。
 

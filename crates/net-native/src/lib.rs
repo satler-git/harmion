@@ -22,6 +22,9 @@ pub enum Error {
     Node(#[from] harmion_node::Error),
     Io(#[from] std::io::Error),
     Transport(String),
+    /// The peer's signed-HTTPS replica is at its provisional challenge/rate
+    /// capacity; retrying after a delay is appropriate.
+    Capacity,
     InvalidResponse,
     Timeout,
     RemoteRejected {

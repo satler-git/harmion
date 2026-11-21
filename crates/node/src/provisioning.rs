@@ -6,12 +6,15 @@
 //! identical manifest is idempotent; any conflicting identity or root fails.
 use crate::{
     Error,
+    access::{Credential, authenticate},
     identity::{self, Provenance},
     membership::MAX_CERTIFICATE_BYTES,
     membership_state::{self, MembershipSigner, Status},
     storage::Store,
 };
+use harmion_domain::NodeId;
 use harmion_protocol::membership::{Action, Binding, Certificate, Member, Statement};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
 pub struct Manifest<'a> {
@@ -111,6 +114,101 @@ pub fn provision(
             _ if manifest.evidence.is_empty() => Ok(()),
             _ => Err(Error::InvalidRequest),
         }
+    })
+}
+
+/// Owner-facing inputs needed to provision another host with this node's cluster.
+///
+/// This is the inverse of [`provision`]: the owner approves the target on this
+/// node, then hands the exported anchor, admission chain and contacts to the
+/// target host. It contains only public membership material.
+#[derive(Clone, Debug)]
+pub struct ExportManifest {
+    pub own: Member,
+    pub root: Certificate,
+    pub evidence: Vec<Certificate>,
+    pub contacts: Vec<Member>,
+}
+
+/// Build the provisioning manifest for an already-approved member.
+///
+/// The target must be active on this node; exporting an unapproved
+/// registration would publish an anchor the target cannot use. The admission
+/// chain is emitted root-first because `provision` applies the anchor before
+/// the evidence.
+pub fn export_manifest(
+    store: &mut impl Store,
+    credential: &Credential,
+    now: i64,
+    cluster: harmion_domain::ClusterId,
+    requested: Member,
+) -> Result<ExportManifest, Error> {
+    store.transaction(|tx| {
+        if !authenticate(tx, credential, now)?.app.grants.manage_nodes {
+            return Err(Error::Forbidden);
+        }
+        let local = tx.identity();
+        if cluster != local.cluster || requested.node == local.node {
+            return Err(Error::InvalidRequest);
+        }
+        validate_member(&requested)?;
+        let state = membership_state::state(tx)?.ok_or(Error::InvalidRequest)?;
+        let active = match state.nodes.get(&requested.node) {
+            Some(Status::Active(member)) => member.clone(),
+            _ => return Err(Error::InvalidRequest),
+        };
+        // The owner must have approved exactly this registration. A different
+        // endpoint or key is a conflict, not a silent rewrite.
+        if active != requested {
+            return Err(Error::IdentityMismatch);
+        }
+        let root = tx.membership_root()?.ok_or(Error::InvalidRequest)?;
+        let Action::Admit(anchor) = root.statement().action.clone() else {
+            return Err(Error::CorruptLog);
+        };
+        let mut admits: BTreeMap<NodeId, Certificate> = BTreeMap::new();
+        for entry in tx.membership_entries()? {
+            if let Action::Admit(member) = &entry.record.statement().action {
+                admits.insert(member.node, entry.record);
+            }
+        }
+        let mut chain = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut current = active.node;
+        loop {
+            if !seen.insert(current) {
+                return Err(Error::CorruptLog);
+            }
+            let certificate = admits.get(&current).ok_or(Error::InvalidRequest)?;
+            chain.push(certificate.clone());
+            let issuer = certificate.statement().issuer;
+            if issuer == anchor.node {
+                break;
+            }
+            current = issuer;
+        }
+        chain.reverse();
+        if chain
+            .first()
+            .map(|certificate| certificate.statement().issuer)
+            != Some(anchor.node)
+        {
+            return Err(Error::CorruptLog);
+        }
+        let contacts = state
+            .nodes
+            .iter()
+            .filter_map(|(node, status)| match status {
+                Status::Active(member) if *node != active.node => Some(member.clone()),
+                _ => None,
+            })
+            .collect();
+        Ok(ExportManifest {
+            own: active,
+            root,
+            evidence: chain,
+            contacts,
+        })
     })
 }
 

@@ -214,3 +214,97 @@ fn provisioning_rejects_invalid_inputs() {
         .unwrap();
     let _ = std::fs::remove_dir_all(&path);
 }
+
+struct Entropy(u64);
+impl harmion_node::application::Host for Entropy {
+    fn random_bytes(&mut self) -> Result<[u8; 32], Error> {
+        self.0 += 1;
+        Ok([self.0 as u8; 32])
+    }
+    fn now_micros(&self) -> i64 {
+        0
+    }
+}
+
+#[test]
+fn export_manifest_builds_the_root_and_admission_chain() {
+    let path = std::env::temp_dir().join(format!("harmion-export-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
+    let mut store = SqliteStore::open(path.join("db"), identity(2)).unwrap();
+    let mut host = Entropy(10);
+    let (_, admin) =
+        harmion_node::application::bootstrap_admin(&mut store, &mut host, i64::MAX).unwrap();
+    membership_state::initialize(&mut store, &signer(2), member(2), true).unwrap();
+    membership_state::approve(
+        &mut store,
+        0,
+        &admin,
+        &signer(2),
+        CLUSTER,
+        member(3),
+        [7; 32],
+    )
+    .unwrap();
+
+    let export = provisioning::export_manifest(&mut store, &admin, 0, CLUSTER, member(3)).unwrap();
+    assert_eq!(export.own, member(3));
+    // The founder's root is its deterministic self-admission (nonce zero), not
+    // the helper's synthetic admit certificate.
+    assert_eq!(export.root.statement().issuer, node(2));
+    assert!(matches!(
+        &export.root.statement().action,
+        Action::Admit(anchor) if anchor == &member(2)
+    ));
+    assert_eq!(export.evidence.len(), 1);
+    let evidence = &export.evidence[0];
+    assert_eq!(evidence.statement().issuer, node(2));
+    assert!(matches!(
+        &evidence.statement().action,
+        Action::Admit(admitted) if admitted == &member(3)
+    ));
+    assert!(export.contacts.contains(&member(2)));
+    assert!(!export.contacts.contains(&member(3)));
+
+    // Another host can be provisioned from exactly this exported material.
+    let mut target = SqliteStore::open(path.join("target"), identity(3)).unwrap();
+    provisioning::provision(
+        &mut target,
+        &signer(3),
+        &Manifest {
+            own: export.own.clone(),
+            root: export.root.clone(),
+            evidence: &export.evidence,
+            contacts: &export.contacts,
+        },
+    )
+    .unwrap();
+    target
+        .transaction(|tx| {
+            let state = membership_state::state(tx)?.unwrap();
+            assert!(matches!(state.nodes[&node(3)], Status::Active(_)));
+            assert!(matches!(state.nodes[&node(2)], Status::Active(_)));
+            Ok(())
+        })
+        .unwrap();
+
+    // Unapproved, mismatched and unauthenticated requests never export an anchor.
+    assert!(matches!(
+        provisioning::export_manifest(&mut store, &admin, 0, CLUSTER, member(4)),
+        Err(Error::InvalidRequest)
+    ));
+    let mut changed = member(3);
+    changed.endpoint = "https://other.example".to_owned();
+    assert!(matches!(
+        provisioning::export_manifest(&mut store, &admin, 0, CLUSTER, changed),
+        Err(Error::IdentityMismatch)
+    ));
+    let stranger = harmion_node::access::Credential::from_bytes([0; 32]);
+    assert!(provisioning::export_manifest(&mut store, &stranger, 0, CLUSTER, member(3)).is_err());
+    assert!(matches!(
+        provisioning::export_manifest(&mut store, &admin, 0, ClusterId([9; 32]), member(3)),
+        Err(Error::InvalidRequest)
+    ));
+
+    let _ = std::fs::remove_dir_all(&path);
+}

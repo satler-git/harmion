@@ -174,6 +174,7 @@ fn failure(error: Error) -> Response<Body> {
         Error::Node(N::MembershipConflict) => (StatusCode::CONFLICT, "membership_conflict"),
         Error::Node(N::NotFound) => (StatusCode::NOT_FOUND, "not_found"),
         Error::Node(N::RequestIdReuse) => (StatusCode::CONFLICT, "request_id_reuse"),
+        Error::Node(N::TokenExpired) => (StatusCode::GONE, "token_expired"),
         Error::Node(N::QueryExpired) => (StatusCode::GONE, "query_expired"),
         Error::Node(N::QueryCapacity) => (StatusCode::TOO_MANY_REQUESTS, "query_capacity"),
         Error::Node(N::ExportBusy) => (StatusCode::TOO_MANY_REQUESTS, "export_busy"),
@@ -188,6 +189,7 @@ fn failure(error: Error) -> Response<Body> {
         Error::Node(N::Storage(_) | N::CorruptLog | N::Entropy(_)) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
         }
+        Error::Capacity => (StatusCode::TOO_MANY_REQUESTS, "peer_capacity"),
         Error::Transport(_) | Error::Io(_) | Error::Timeout | Error::RemoteRejected { .. } => {
             (StatusCode::BAD_GATEWAY, "peer_unavailable")
         }
@@ -278,6 +280,33 @@ fn invalid() -> harmion_node::Error {
 fn id(bytes: &[u8]) -> Result<[u8; 32], harmion_node::Error> {
     bytes.try_into().map_err(|_| invalid())
 }
+fn member_json(member: &harmion_protocol::membership::Member) -> Json {
+    let binding = match &member.binding {
+        harmion_protocol::membership::Binding::Https(bytes) => {
+            json!({"transport":"https","certificate":hex(bytes)})
+        }
+        harmion_protocol::membership::Binding::Iroh(key) => {
+            json!({"transport":"iroh","endpoint_id":hex(key)})
+        }
+        harmion_protocol::membership::Binding::SignedHttps(key) => {
+            json!({"transport":"signed_https","key":hex(key)})
+        }
+    };
+    json!({
+        "node": hex(&member.node.0),
+        "signing_key": hex(&member.signing_key),
+        "binding": binding,
+        "endpoint": member.endpoint,
+    })
+}
+fn manifest_json(manifest: &harmion_node::provisioning::ExportManifest) -> Json {
+    json!({
+        "own": member_json(&manifest.own),
+        "root": hex(manifest.root.bytes()),
+        "evidence": manifest.evidence.iter().map(|certificate| hex(certificate.bytes())).collect::<Vec<_>>(),
+        "contacts": manifest.contacts.iter().map(member_json).collect::<Vec<_>>(),
+    })
+}
 async fn dispatch<S: Store + Send + 'static>(
     store: &SharedStore<S>,
     identity: &crate::NativeTransport,
@@ -304,6 +333,36 @@ async fn dispatch<S: Store + Send + 'static>(
         return Ok(
             json!({"uploaded":report.uploaded.to_string(),"downloaded":report.downloaded.to_string(),"local_high":report.local_high.to_string(),"remote_high":report.remote_high.to_string()}),
         );
+    }
+    if operation == "provision-manifest" {
+        let info: PeerRegistration = serde_json::from_slice(&body).map_err(|_| invalid())?;
+        if info.version != 4 {
+            return Err(invalid().into());
+        }
+        let PeerBinding::SignedHttps { origin } = info.binding else {
+            return Err(invalid().into());
+        };
+        let signing_key: [u8; 32] = unhex(info.signing_key.as_deref().ok_or_else(invalid)?)?;
+        harmion_node::identity::validate_signing_key(&signing_key).map_err(|_| invalid())?;
+        let member = harmion_protocol::membership::Member {
+            node: NodeId(unhex(&info.node_id)?),
+            signing_key,
+            binding: harmion_protocol::membership::Binding::SignedHttps(signing_key),
+            endpoint: origin,
+        };
+        let cluster = ClusterId(unhex(&info.cluster_id)?);
+        let manifest = store
+            .run(move |s| {
+                harmion_node::provisioning::export_manifest(
+                    s,
+                    &credential,
+                    SystemHost.now_micros(),
+                    cluster,
+                    member,
+                )
+            })
+            .await?;
+        return Ok(manifest_json(&manifest));
     }
     if matches!(
         operation.as_str(),
@@ -554,7 +613,7 @@ async fn dispatch<S: Store + Send + 'static>(
                     },
                     "permissions" => json!(GrantSpec::from(permissions)),
                     _ => {
-                        let mut methods = vec!["get","query","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants"];
+                        let mut methods = vec!["get","query","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","provision-manifest","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants"];
                         methods.extend(["metrics", "sync-status"]);
                         if oauth.is_some() { methods.extend(["oauth-register","oauth-consent","oauth-preview"]); }
                         json!({"version":1,"oauth":oauth.is_some(),"query":true,"subscriptions":true,
@@ -600,6 +659,14 @@ mod response_tests {
         assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let bytes = oversized.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(bytes.as_ref(), br#"{"error":"response_too_large"}"#);
+    }
+
+    #[tokio::test]
+    async fn capacity_is_reported_as_a_retryable_peer_error() {
+        let response = failure(Error::Capacity);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), br#"{"error":"peer_capacity"}"#);
     }
 
     #[test]

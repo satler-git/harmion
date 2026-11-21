@@ -55,6 +55,14 @@ pub(crate) enum Command {
     ConfirmRetirement { id: String },
     /// Approve a peer registration.
     Approve { path: String },
+    /// Export the provisioning manifest for an approved signed-HTTPS peer.
+    ProvisionManifest {
+        /// Peer registration JSON file, or a harmion-peer:v1:z: code.
+        peer: String,
+        /// Write the manifest to this file instead of stdout.
+        #[arg(long, value_name = "PATH")]
+        out: Option<String>,
+    },
     /// Change application grants.
     ChangeGrants { path: String },
     /// Trust a peer for explicit local owner recovery.
@@ -148,6 +156,7 @@ impl Command {
             Self::DismissRetirement { .. } => "dismiss-retirement",
             Self::ConfirmRetirement { .. } => "confirm-retirement",
             Self::Approve { .. } => "approve",
+            Self::ProvisionManifest { .. } => "provision-manifest",
             Self::ChangeGrants { .. } => "change-grants",
             Self::TrustRecoveryPeer { .. } => "trust-recovery-peer",
             Self::Save { .. } => "save",
@@ -205,6 +214,28 @@ mod tests {
             assert!(parse(&[operation, "id", "token", "left", "right", "base"]).is_ok());
             assert!(parse(&[operation, "id", "token", "left", "right", "base", "extra"]).is_err());
         }
+    }
+
+    #[test]
+    fn provision_manifest_accepts_a_file_or_code_and_optional_output() {
+        let cli = parse(&["provision-manifest", "peer.json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::ProvisionManifest { out: None, .. }
+        ));
+        let cli = parse(&[
+            "provision-manifest",
+            "harmion-peer:v1:z:abc",
+            "--out",
+            "manifest.json",
+        ])
+        .unwrap();
+        let Command::ProvisionManifest { peer, out } = cli.command else {
+            panic!("expected provision-manifest")
+        };
+        assert_eq!(peer, "harmion-peer:v1:z:abc");
+        assert_eq!(out.as_deref(), Some("manifest.json"));
+        assert!(parse(&["provision-manifest", "peer", "extra"]).is_err());
     }
 
     #[test]
