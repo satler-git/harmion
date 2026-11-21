@@ -33,7 +33,7 @@ quota節約のため、**Cloudflareレプリカ本体・Android・Windowsの新�
 
 ### 2026-11-22 追記（Interpreter前の穴埋め）
 
-所有者との合意に基づき、Interpreterの前に残っていた穴を塞いだ。詳細は[R49〜R51](implementation-review.md)。
+所有者との合意に基づき、Interpreterの前に残っていた穴を塞いだ。詳細は[R49〜R51](implementation-review.md)。この節の作業は commit `b82adfd` に記録した。作業ツリーはクリーンで、公開デプロイは行っていない。
 
 - **9（Worker参加の配線）**: `harmion_node::provisioning::export_manifest`、App API `provision-manifest`、CLI `harmion provision-manifest`を追加した。承認済みのSignedHttps Peerについて、root anchor・root-firstのAdmission列・Activeなcontactsを出力する。実`harmiond`2台とworkerd DOをTLS越しにつなぐ[E2E](../design_checks/worker_daemon.py)で、provision→push→参加→Workerからのpull→再起動→再provision拒否を確認した。
 - **10b（保持）**: schema v13で編集トークンとrequest receiptに作成時刻を付け、30日より古い行をGCする。回収済みトークンはHTTP 410 `token_expired`。方針前の行は削除しない。daemonが起動時と6時間ごとに回収する。
