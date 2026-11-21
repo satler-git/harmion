@@ -4,7 +4,9 @@ use harmion_client::{
     protocol::{
         ChangeGrantsRequest, Command, EditToken, OAuthRegistration, PeerBinding, PeerRegistration,
         RequestId, SaveRequest,
+        connect::ConnectionApproval,
         domain::{Change, ContentId, Field, UpdateId, Value as FieldValue},
+        interpreter::ProviderId,
         query::{Condition, QueryCursor},
         resolution::{
             MergeInputRequest, MergePart, SelectionField, SelectionSpec, parse_selections,
@@ -62,6 +64,20 @@ struct PeerPreview {
 #[serde(deny_unknown_fields)]
 struct Confirmation {
     ticket: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DescribeProvider {
+    provider: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApproveProvider {
+    provider: String,
+    #[serde(default)]
+    replace: bool,
 }
 
 #[derive(Deserialize)]
@@ -194,6 +210,34 @@ pub(crate) async fn dispatch(
             }
         }
         "/members" => client.call("members", &[]).await.map_err(remote),
+        "/connect-list" => client.call("connect-list", &[]).await.map_err(remote),
+        "/connect-approve" => {
+            let request: ConnectionApproval = parse(body)?;
+            client
+                .call("connect-approve", &encode(&request)?)
+                .await
+                .map_err(remote)
+        }
+        "/interpreter-list" => client.interpreter_list().await.map_err(remote),
+        "/interpreter-describe" => {
+            let request: DescribeProvider = parse(body)?;
+            client
+                .interpreter_describe(ProviderId(
+                    unhex(&request.provider).map_err(|_| StatusCode::BAD_REQUEST)?,
+                ))
+                .await
+                .map_err(remote)
+        }
+        "/interpreter-approve" => {
+            let request: ApproveProvider = parse(body)?;
+            client
+                .interpreter_approve(
+                    ProviderId(unhex(&request.provider).map_err(|_| StatusCode::BAD_REQUEST)?),
+                    request.replace,
+                )
+                .await
+                .map_err(remote)
+        }
         "/node" => node_operation(client, node, parse(body)?).await,
         "/oauth-register" => {
             let request: OAuthRegistration = parse(body)?;

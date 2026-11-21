@@ -173,9 +173,84 @@ pub trait Transaction: crate::oauth::Storage {
     fn app_by_id(&mut self, id: AppId) -> Result<Option<App>, Error>;
     fn insert_app(&mut self, app: &App) -> Result<(), Error>;
     fn update_app(&mut self, app: &App) -> Result<(), Error>;
+    /// Interpreter registration is an optional host capability. Peer-only hosts
+    /// fail closed instead of pretending an approvable local registry exists.
+    fn interpreter_registration(
+        &mut self,
+        _provider: harmion_protocol::interpreter::ProviderId,
+    ) -> Result<Option<crate::interpreter::Registration>, Error> {
+        Err(Error::Unsupported)
+    }
+    fn interpreter_registration_by_app_name(
+        &mut self,
+        _app: AppId,
+        _name: &str,
+    ) -> Result<Option<crate::interpreter::Registration>, Error> {
+        Err(Error::Unsupported)
+    }
+    fn interpreter_registrations(
+        &mut self,
+    ) -> Result<Vec<crate::interpreter::Registration>, Error> {
+        Err(Error::Unsupported)
+    }
+    fn insert_interpreter_registration(
+        &mut self,
+        _registration: &crate::interpreter::Registration,
+    ) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+    /// Updates manifest, name, and contract version, preserving approval state.
+    fn update_interpreter_registration(
+        &mut self,
+        _registration: &crate::interpreter::Registration,
+    ) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+    fn approved_interpreter_by_name(
+        &mut self,
+        _name: &str,
+    ) -> Result<Option<crate::interpreter::Registration>, Error> {
+        Err(Error::Unsupported)
+    }
+    fn set_interpreter_status(
+        &mut self,
+        _provider: harmion_protocol::interpreter::ProviderId,
+        _status: harmion_protocol::interpreter::ProviderStatus,
+        _approved_at: Option<i64>,
+    ) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
     /// Monotonic local authorization generation, including grant changes that
     /// later restore the original values.
     fn grant_generation(&mut self, app: AppId) -> Result<u64, Error>;
+    /// Integrated OAuth connection requests are a local App capability.
+    fn connection_request(
+        &mut self,
+        _id: harmion_protocol::connect::ConnectionId,
+    ) -> Result<Option<crate::connect::ConnectionRequest>, Error> {
+        Err(Error::Unsupported)
+    }
+    fn connection_requests(&mut self) -> Result<Vec<crate::connect::ConnectionRequest>, Error> {
+        Err(Error::Unsupported)
+    }
+    fn insert_connection_request(
+        &mut self,
+        _request: &crate::connect::ConnectionRequest,
+    ) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+    fn update_connection_request(
+        &mut self,
+        _request: &crate::connect::ConnectionRequest,
+    ) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+    fn connection_request_count(&mut self, _now: i64) -> Result<usize, Error> {
+        Err(Error::Unsupported)
+    }
+    fn prune_connection_requests(&mut self, _before: i64) -> Result<usize, Error> {
+        Err(Error::Unsupported)
+    }
     fn token(&mut self, token: EditToken) -> Result<Option<TokenState>, Error>;
     fn insert_token(&mut self, token: EditToken, state: &TokenState) -> Result<(), Error>;
     fn request(&mut self, app: AppId, request: RequestId) -> Result<Option<RequestResult>, Error>;

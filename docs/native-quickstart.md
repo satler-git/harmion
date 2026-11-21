@@ -1,6 +1,6 @@
 # native 複数ノード同期の実行
 
-Unix用のnative管理CLIで、署名付き参加・退役・却下証明をノード間で伝播する。Query/Subscribeと、任意で有効化するブラウザOAuthを提供する。Interpreterは未実装。Worker/DOはローカルworkerdまで実装・検証済みで、実Cloudflareには未配置。CLIは所有者限定ファイルから接続先と管理資格情報を読み、証明書を固定したloopback HTTPSで操作する。
+Unix用のnative管理CLIで、署名付き参加・退役・却下証明をノード間で伝播する。Query/Subscribeと、任意で有効化するブラウザOAuthを提供する。Interpreterはnativeで登録・承認・Provider WebSocket・呼び出し仲介を実装する。Worker/DOはローカルworkerdまで実装・検証済みで、実Cloudflareには未配置。CLIは所有者限定ファイルから接続先と管理資格情報を読み、証明書を固定したloopback HTTPSで操作する。
 
 ## 起動と参加
 
@@ -84,7 +84,25 @@ target/debug/harmion --node ./node-a oauth-register "My app" http://127.0.0.1/ca
 target/debug/harmion --node ./node-a oauth-consent REQUEST_ID
 ```
 
-アプリは登録時に返された認可URLを [App APIのOAuth契約](app-api.md#5-oauthとローカル構成) に沿って開く。2つ目のコマンドは、所有者がブラウザに表示された要求IDを確認して実行する。表示されたリンクは所有者が承認または拒否のためにそのブラウザで開く。Rust SDKでのApp API接続には、ノードディレクトリーとaccess tokenを `Client::from_directory_with_token` に渡す。
+アプリは登録時に返された認可URLを [App APIのOAuth契約](app-api.md#6-oauthとローカル構成) に沿って開く。2つ目のコマンドは、所有者がブラウザに表示された要求IDを確認して実行する。表示されたリンクは所有者が承認または拒否のためにそのブラウザで開く。Rust SDKでのApp API接続には、ノードディレクトリーとaccess tokenを `Client::from_directory_with_token` に渡す。
+
+### 統合接続（推奨）
+
+初回接続は個別のOAuth登録・同意とProvider承認を分けず、1回の所有者承認にまとめられる。アプリは`connect-start`（App APIは証明書固定、WebはOAuth originの`/connect/start`）へ、アプリ名・loopback callback・PKCE challenge・state・grant・任意のProvider manifestを送る。応答の`connection_id`と`request_secret`を保持し、`verification_url`があればWebアプリのポップアップで開く。
+
+所有者は管理UI（`harmion-admin run`）の「接続」画面に現れる要求を確認し、承認または拒否する。承認するとアプリのgrant、OAuthクライアント、Provider登録が同じtransactionで確定する。`provide_names`に含まれるProvider名は追加承認なしでapprovedになる。同名Providerの置換は画面で明示的に選ぶ。
+
+アプリは`connect-status`をポーリングし、`approved`後に`connect-complete`へsecretとPKCE verifierを送る。応答にはaccess token、refresh token、Providerの`ticket`と`websocket_url`が含まれる。ticketを失った場合はOAuth originの`/connect/ticket`へaccess tokenと`{"provider_id":"hex"}`を送ると再発行できる（30秒・単回・アプリごと8件）。Webアプリのヘルパーページは`window.opener.postMessage`で承認だけを通知し、secretやトークンは渡さない。完了は単回なので、応答を失ったら要求を作り直す。`connection.json`の`oauth_origin`はOAuth originが有効なときだけ入る。
+
+CLIでは保留要求の確認と承認ができる。
+
+```sh
+harmion --node ./node-a connect-list
+harmion --node ./node-a connect-approve CONNECTION_ID
+harmion --node ./node-a connect-approve CONNECTION_ID --deny
+```
+
+`--replace`はCLIでは未提供。置換が必要な場合は管理UIで明示する。
 
 証明書の有効期間は発行から1年。期限前にノードを停止し、`harmiond oauth-provision ./node-a --replace > node-a-oauth-root.pem` で入れ替える。新しいPEMをブラウザとアプリに登録し、古いCAを信頼ストアから削除する。OAuthの待受けを停止するには `run DIR --oauth-listen off` を使う。発行済み資格情報はApp APIの `change-grants` で失効できる。
 
@@ -212,6 +230,36 @@ target/debug/harmiond run ./restored-node
 
 既存クラスタへは、有効なノードで `approve`、復元先で `join` してから `sync` する。この同期でバックアップにだけあった更新とクラスタ側にだけあった更新も突き合わせる。有効なノードが残っていない場合でもローカルのContentは復元できる。元クラスタへの再参加には有効な承認元が必要。
 
+
+## Interpreter
+
+Interpreterはノード内の登録・承認・呼び出し仲介だけを行い、計算は別プロセスのProviderが行う。契約と上限は[Interpreter v1](../contracts/interpreter-v1.md)を参照する。
+
+1. Providerアプリは`provide`（と任意の`provide_names`）、呼び出し元アプリは`call`（と必要な`read`）を持つよう、所有者が`issue-app`または`change-grants`で付与する。`provide_names`は許可するProvider名だけを列挙し、空なら全名前を許可する。
+2. Providerアプリは`POST /app/v1/interpreter-register`へmanifestを送る。grantが名前を事前許可していれば`approved`、そうでなければ`pending`。
+3. 所有者が`harmion --node NODE_DIR interpreter-list`で確認し、必要なら`harmion --node NODE_DIR interpreter-approve PROVIDER_ID`で承認する。同名の承認済みProviderを置き換えるときだけ`--replace`を付ける。統合接続では手順1〜3が管理UIの「接続」承認にまとまる。
+4. ProviderはRust SDKの`ProviderClient::connect`で`/provider/v1/connect`へ接続し、`next()`で`interpreter.invoke`を受けて`succeed`/`fail`を返す。ブラウザProviderは`interpreter-ticket`または統合接続完了応答の`websocket_url`へticket付きで接続する。
+5. 呼び出し元は`interpreter-call`へ、Provider名・明示入力・`get`/`query`で得たContent IDと編集トークン・timeoutを渡す。CLIでは次の形。
+
+```sh
+harmion --node NODE_DIR interpreter-list
+harmion --node NODE_DIR interpreter-describe PROVIDER_ID
+harmion --node NODE_DIR interpreter-call call.json
+harmion --node NODE_DIR interpreter-cancel INVOCATION_ID
+```
+
+`call.json`の例。`TOKEN`は呼び出し元が取得した編集トークンで、Providerへは渡らない。`timeout_ms`は100〜30000。
+
+```json
+{
+  "provider": "ledger/balance",
+  "input": {"currency": "JPY"},
+  "contents": [{"id": "CONTENT_ID", "token": "TOKEN"}],
+  "timeout_ms": 5000
+}
+```
+
+Providerが未接続なら503、timeoutなら504、明示cancelなら409を返す。callは冪等ではない。管理UIは一覧・定義表示・承認と「接続」画面を提供し、callの入力組み立ては行わない。
 ## Export
 
 新しい出力ディレクトリを指定して管理者用 CLI から実行する。

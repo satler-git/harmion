@@ -22,12 +22,16 @@
   import Peers from './pages/Peers.svelte';
   import Apps from './pages/Apps.svelte';
   import Export from './pages/Export.svelte';
+  import Interpreters from './pages/Interpreters.svelte';
+  import Connections from './pages/Connections.svelte';
   const links: { id: Page; label: string; icon: string }[] = [
     { id: 'overview', label: '概要', icon: '◈' },
     { id: 'contents', label: 'コンテンツ', icon: '▤' },
     { id: 'conflicts', label: '競合解決', icon: '⇄' },
     { id: 'peers', label: 'Peer', icon: '⌘' },
     { id: 'apps', label: 'アプリ', icon: '▦' },
+    { id: 'interpreters', label: 'Interpreter', icon: '⚙' },
+    { id: 'connections', label: '接続', icon: '⇄' },
     { id: 'export', label: 'Export', icon: '↗' },
   ];
   let page = $state<Page>('overview'),
@@ -243,6 +247,8 @@
         </div>
         {#if !readOnly}
           <div class:hidden={page !== 'apps'}><Apps {overview} /></div>
+          <div class:hidden={page !== 'interpreters'}><Interpreters /></div>
+          <div class:hidden={page !== 'connections'}><Connections /></div>
           <div class:hidden={page !== 'export'}><Export /></div>
         {/if}
       </main>

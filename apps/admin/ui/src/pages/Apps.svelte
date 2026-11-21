@@ -16,6 +16,9 @@
     writeMode = $state('none');
   let readKinds = $state(''),
     writeKinds = $state(''),
+    callGrant = $state(false),
+    provideGrant = $state(false),
+    provideNames = $state(''),
     revoke = $state(true),
     changing = $state(false);
   function scopes(grants: Grants) {
@@ -25,6 +28,15 @@
     return [
       { label: '読み取り', value: filter(grants.read) },
       { label: '書き込み', value: filter(grants.write) },
+      { label: 'Interpreter 呼び出し', value: grants.call ? 'あり' : 'なし' },
+      {
+        label: 'Interpreter 提供',
+        value: grants.provide
+          ? grants.provide_names?.length
+            ? grants.provide_names.join('、')
+            : 'あり'
+          : 'なし',
+      },
     ];
   }
   async function review() {
@@ -99,6 +111,14 @@
         grants: {
           read: filter(readMode, readKinds),
           write: filter(writeMode, writeKinds),
+          call: callGrant,
+          provide: provideGrant,
+          provide_names: provideGrant
+            ? provideNames
+                .split(/[,\n]/)
+                .map((name) => name.trim())
+                .filter(Boolean)
+            : [],
           manage_apps: false,
           manage_nodes: false,
         },
@@ -117,7 +137,9 @@
   <div>
     <p class="eyebrow">APPLICATION ACCESS</p>
     <h1>アプリ</h1>
-    <p class="muted">アプリから渡された接続要求を、1行で貼り付けて確認します。</p>
+    <p class="muted">
+      アプリから渡された接続要求を、1行で貼り付けて確認します。初回接続とProvider登録は「接続」画面で1回の承認にまとめられます。
+    </p>
   </div>
 </div>
 {#if !overview?.capabilities.oauth}<p class="warning">
@@ -256,11 +278,38 @@
     <label class="check">
       <input
         type="checkbox"
+        bind:checked={callGrant}
+        onchange={() => (changing = false)}
+      />Interpreter を呼び出せる
+    </label>
+    <label class="check">
+      <input
+        type="checkbox"
+        bind:checked={provideGrant}
+        onchange={() => (changing = false)}
+      />Interpreter を提供できる
+    </label>
+    {#if provideGrant}
+      <label>
+        提供を許可する Provider 名（カンマ区切り。空なら全名前）
+        <input
+          bind:value={provideNames}
+          oninput={() => (changing = false)}
+          placeholder="ledger/balance, docs/search"
+        />
+      </label>
+    {/if}
+    <label class="check">
+      <input
+        type="checkbox"
         bind:checked={revoke}
         onchange={() => (changing = false)}
       />アプリを失効させる
     </label>
-    <p class="muted small">OAuth の権限拡大には新しい認可要求が必要です。</p>
+    <p class="muted small">
+      OAuth の権限拡大には新しい認可要求が必要です。既存の名前付き提供を維持する場合は、同じ
+      Provider 名を入力してください。空にすると全名前への拡大になり、拒否されます。
+    </p>
     <button disabled={busy}>変更内容を確認</button>
   </form>
   {#if changing}<Confirm
@@ -275,7 +324,9 @@
         読み取り {readMode}{readMode === 'kinds' ? ' · ' + readKinds : ''} / 書き込み {writeMode}{writeMode ===
         'kinds'
           ? ' · ' + writeKinds
-          : ''}
+          : ''} / Interpreter {callGrant ? '呼び出し可' : '呼び出し不可'} · {provideGrant
+          ? `提供可（${provideNames.trim() || '全名前'}）`
+          : '提供不可'}
       </p>
     </Confirm>{/if}
 </section>

@@ -158,6 +158,7 @@ async fn peer_push_and_pull_wake_an_app_subscription() {
             node_id: hex(&b.identity.node.0),
             certificate: hex(b.tls.certificate()),
             endpoint: app_endpoint.to_string(),
+            oauth_origin: None,
         },
         *b.admin.expose_bytes(),
     )

@@ -22,7 +22,17 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 
 use crate::export::Body;
+use crate::interpreter::{Service, switching_protocols, validate_upgrade};
 const DEADLINE: Duration = Duration::from_secs(60);
+
+struct RequestContext<S> {
+    store: SharedStore<S>,
+    identity: Arc<crate::NativeTransport>,
+    registration: PeerRegistration,
+    subscriptions: Arc<crate::subscriptions::Service>,
+    interpreter: Arc<Service>,
+    export_slot: Arc<Semaphore>,
+}
 
 pub async fn serve<S: Store + Send + 'static>(
     listener: TcpListener,
@@ -58,8 +68,15 @@ pub async fn serve_with_transport<S: Store + Send + 'static>(
     }
     let acceptor = TlsAcceptor::from(Arc::new(identity.tls.app_server_config()?));
     let slots = Arc::new(Semaphore::new(16));
-    let subscriptions = Arc::new(crate::subscriptions::Service::new());
-    let export_slot = Arc::new(Semaphore::new(1));
+    let interpreter = store.interpreter.clone();
+    let context = Arc::new(RequestContext {
+        store,
+        identity: identity.clone(),
+        registration,
+        subscriptions: Arc::new(crate::subscriptions::Service::new()),
+        interpreter,
+        export_slot: Arc::new(Semaphore::new(1)),
+    });
     let mut connections = tokio::task::JoinSet::new();
     loop {
         let (tcp, _) = tokio::select! {
@@ -77,14 +94,8 @@ pub async fn serve_with_transport<S: Store + Send + 'static>(
         let Ok(permit) = slots.clone().try_acquire_owned() else {
             continue;
         };
-        let (acceptor, store, identity, registration, subscriptions, export_slot) = (
-            acceptor.clone(),
-            store.clone(),
-            identity.clone(),
-            registration.clone(),
-            subscriptions.clone(),
-            export_slot.clone(),
-        );
+        let acceptor = acceptor.clone();
+        let context = context.clone();
         connections.spawn(async move {
             let _permit = permit;
             let (activity, mut progress) = watch::channel(());
@@ -93,20 +104,13 @@ pub async fn serve_with_transport<S: Store + Send + 'static>(
             };
             let serve = async {
                 let tls = acceptor.accept(tcp).await.map_err(transport)?;
-                let service = service_fn(move |request| {
-                    respond(
-                        store.clone(),
-                        identity.clone(),
-                        registration.clone(),
-                        subscriptions.clone(),
-                        (export_slot.clone(), activity.clone()),
-                        request,
-                    )
-                });
+                let service =
+                    service_fn(move |request| respond(context.clone(), activity.clone(), request));
                 hyper::server::conn::http1::Builder::new()
                     .max_headers(32)
                     .max_buf_size(16 * 1024)
                     .serve_connection(TokioIo::new(tls), service)
+                    .with_upgrades()
                     .await
                     .map_err(transport)
             };
@@ -186,6 +190,38 @@ fn failure(error: Error) -> Response<Body> {
         Error::Node(N::QueryItemTooLarge) => {
             (StatusCode::PAYLOAD_TOO_LARGE, "query_item_too_large")
         }
+        Error::Node(N::InterpreterNameConflict) => {
+            (StatusCode::CONFLICT, "interpreter_name_conflict")
+        }
+        Error::Node(N::InterpreterNotApproved) => {
+            (StatusCode::FORBIDDEN, "interpreter_not_approved")
+        }
+        Error::Node(N::InterpreterProviderMismatch) => {
+            (StatusCode::FORBIDDEN, "interpreter_provider_mismatch")
+        }
+        Error::Node(N::InterpreterUnavailable) => {
+            (StatusCode::SERVICE_UNAVAILABLE, "interpreter_unavailable")
+        }
+        Error::Node(N::InterpreterCapacity) => {
+            (StatusCode::TOO_MANY_REQUESTS, "interpreter_capacity")
+        }
+        Error::Node(N::InterpreterCancelled) => (StatusCode::CONFLICT, "interpreter_cancelled"),
+        Error::Node(N::InterpreterInputTooLarge) => {
+            (StatusCode::PAYLOAD_TOO_LARGE, "interpreter_input_too_large")
+        }
+        Error::Node(N::InterpreterInvalidResponse) => {
+            (StatusCode::BAD_GATEWAY, "interpreter_invalid_response")
+        }
+        Error::Node(N::InterpreterTimeout) => (StatusCode::GATEWAY_TIMEOUT, "interpreter_timeout"),
+        Error::Node(N::Unsupported) => (StatusCode::NOT_IMPLEMENTED, "unsupported"),
+        Error::Node(N::ConnectionNotFound) => (StatusCode::NOT_FOUND, "connection_not_found"),
+        Error::Node(N::ConnectionExpired) => (StatusCode::GONE, "connection_expired"),
+        Error::Node(N::ConnectionCompleted) => (StatusCode::CONFLICT, "connection_completed"),
+        Error::Node(N::ConnectionPending) => (StatusCode::CONFLICT, "connection_pending"),
+        Error::Node(N::ConnectionDenied) => (StatusCode::FORBIDDEN, "connection_denied"),
+        Error::Node(N::ConnectionCapacity) => {
+            (StatusCode::TOO_MANY_REQUESTS, "connection_capacity")
+        }
         Error::Node(N::Storage(_) | N::CorruptLog | N::Entropy(_)) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
         }
@@ -198,15 +234,11 @@ fn failure(error: Error) -> Response<Body> {
     response(status, json!({"error":code}))
 }
 async fn respond<S: Store + Send + 'static>(
-    store: SharedStore<S>,
-    identity: Arc<crate::NativeTransport>,
-    registration: PeerRegistration,
-    subscriptions: Arc<crate::subscriptions::Service>,
-    export: (Arc<Semaphore>, watch::Sender<()>),
-    request: Request<Incoming>,
+    context: Arc<RequestContext<S>>,
+    activity: watch::Sender<()>,
+    mut request: Request<Incoming>,
 ) -> Result<Response<Body>, Infallible> {
-    if request.method() != hyper::Method::POST
-        || request.uri().query().is_some()
+    if request.uri().query().is_some()
         || request.headers().get_all("host").iter().count() != 1
         || request.headers().get("host").and_then(|v| v.to_str().ok()) != Some(TLS_NAME)
         || request.headers().contains_key("origin")
@@ -227,9 +259,43 @@ async fn respond<S: Store + Send + 'static>(
     } else {
         None
     };
-    let Some(credential) = credential else {
-        return Ok(failure(harmion_node::Error::Unauthenticated.into()));
-    };
+    if request.method() == hyper::Method::GET && request.uri().path() == "/provider/v1/connect" {
+        let Some(credential) = credential else {
+            return Ok(failure(harmion_node::Error::Unauthenticated.into()));
+        };
+        let key = match validate_upgrade(request.headers()) {
+            Ok(key) => key,
+            Err(_) => {
+                return Ok(response(
+                    StatusCode::BAD_REQUEST,
+                    json!({"error":"invalid_websocket_upgrade"}),
+                ));
+            }
+        };
+        let upgrade = hyper::upgrade::on(&mut request);
+        let interpreter = context.interpreter.clone();
+        let store = context.store.clone();
+        tokio::spawn(async move {
+            match upgrade.await {
+                Ok(upgraded) => {
+                    if let Err(error) = interpreter
+                        .serve_provider(store, credential, upgraded)
+                        .await
+                    {
+                        tracing::debug!(%error, "Provider connection ended");
+                    }
+                }
+                Err(error) => tracing::debug!(%error, "Provider upgrade failed"),
+            }
+        });
+        return Ok(switching_protocols(&key));
+    }
+    if request.method() != hyper::Method::POST {
+        return Ok(response(
+            StatusCode::BAD_REQUEST,
+            json!({"error":"invalid_request"}),
+        ));
+    }
     let operation = request
         .uri()
         .path()
@@ -248,32 +314,48 @@ async fn respond<S: Store + Send + 'static>(
             ));
         }
     };
+    // A connection offer starts without an app credential. The one-time
+    // request secret authorizes status and completion; owner approval is a
+    // separate management operation.
+    if matches!(
+        operation.as_str(),
+        "connect-start" | "connect-status" | "connect-complete"
+    ) {
+        return Ok(
+            match crate::connect::handle_public(&context.store, &operation, body.to_vec()).await {
+                Ok(value) => response(StatusCode::OK, value),
+                Err(error) => failure(error),
+            },
+        );
+    }
+    let Some(credential) = credential else {
+        return Ok(failure(harmion_node::Error::Unauthenticated.into()));
+    };
     if operation == "export" {
         if !body.is_empty() {
             return Ok(failure(invalid().into()));
         }
         return Ok(
-            match crate::export::response(&store, credential, export.0, export.1).await {
+            match crate::export::response(
+                &context.store,
+                credential,
+                context.export_slot.clone(),
+                activity,
+            )
+            .await
+            {
                 Ok(response) => response,
                 Err(error) => failure(error),
             },
         );
     }
-    let result = dispatch(
-        &store,
-        &identity,
-        registration,
-        subscriptions,
-        credential,
-        operation,
-        body.to_vec(),
-    )
-    .await;
+    let result = dispatch(&context, credential, operation, body.to_vec()).await;
     Ok(match result {
         Ok(value) => response(StatusCode::OK, value),
         Err(error) => failure(error),
     })
 }
+
 fn invalid() -> harmion_node::Error {
     harmion_node::Error::InvalidRequest
 }
@@ -308,18 +390,62 @@ fn manifest_json(manifest: &harmion_node::provisioning::ExportManifest) -> Json 
     })
 }
 async fn dispatch<S: Store + Send + 'static>(
-    store: &SharedStore<S>,
-    identity: &crate::NativeTransport,
-    registration: PeerRegistration,
-    subscriptions: Arc<crate::subscriptions::Service>,
+    context: &RequestContext<S>,
     credential: Credential,
     operation: String,
     body: Vec<u8>,
 ) -> Result<Json, Error> {
+    let store = &context.store;
+    let identity = context.identity.as_ref();
+    let subscriptions = context.subscriptions.clone();
+    let interpreter = &context.interpreter;
+    let registration = context.registration.clone();
+    if matches!(operation.as_str(), "connect-list" | "connect-approve") {
+        return crate::connect::handle_admin(store, credential, &operation, body).await;
+    }
+    if operation == "interpreter-ticket" {
+        return crate::connect::provider_ticket(store, credential, body).await;
+    }
+    if matches!(
+        operation.as_str(),
+        "interpreter-list"
+            | "interpreter-describe"
+            | "interpreter-register"
+            | "interpreter-approve"
+            | "interpreter-call"
+            | "interpreter-cancel"
+    ) {
+        return interpreter
+            .handle(store, credential, &operation, body)
+            .await;
+    }
     if matches!(operation.as_str(), "subscribe" | "resume" | "unsubscribe") {
         return subscriptions
             .handle(store, credential, &operation, &body)
             .await;
+    }
+    if operation == "change-grants" {
+        use harmion_node::access::Grants;
+        let request: ChangeGrantsRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
+        let app = AppId(unhex(&request.app_id)?);
+        let grants = Grants::from(request.grants.clone());
+        let revoked = request.revoked;
+        let grants_for_db = grants.clone();
+        store
+            .run(move |s| {
+                application::change_grants(
+                    s,
+                    SystemHost.now_micros(),
+                    &credential,
+                    app,
+                    grants_for_db,
+                    revoked,
+                )
+            })
+            .await?;
+        store.notify_app_changed(app, &grants, revoked).await?;
+        store.changes.send_replace(());
+        return Ok(json!({"changed":true}));
     }
     if operation == "sync" {
         let node = NodeId(id(&body)?);
@@ -597,12 +723,6 @@ async fn dispatch<S: Store + Send + 'static>(
                     "redirect_uri":pending.redirect,"grants":GrantSpec::from(pending.grants),
                     "expires_at":pending.expires_at.to_string()}))
             },
-            "change-grants" => {
-                let request: ChangeGrantsRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
-                application::change_grants(s, host.now_micros(), &credential, AppId(unhex(&request.app_id)?), request.grants.into(), request.revoked)?;
-                changes.send_replace(());
-                Ok(json!({"changed":true}))
-            },
             "identity" | "capabilities" | "permissions" if body.is_empty() => {
                 let permissions = access::permissions(s, &credential, host.now_micros())?;
                 Ok(match operation.as_str() {
@@ -613,10 +733,16 @@ async fn dispatch<S: Store + Send + 'static>(
                     },
                     "permissions" => json!(GrantSpec::from(permissions)),
                     _ => {
-                        let mut methods = vec!["get","query","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","provision-manifest","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants"];
+                        let mut methods = vec!["get","query","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","provision-manifest","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants","interpreter-list","interpreter-describe","interpreter-register","interpreter-approve","interpreter-call","interpreter-cancel"];
                         methods.extend(["metrics", "sync-status"]);
                         if oauth.is_some() { methods.extend(["oauth-register","oauth-consent","oauth-preview"]); }
                         json!({"version":1,"oauth":oauth.is_some(),"query":true,"subscriptions":true,
+                        "interpreter":true,
+                        "interpreter_contract_version":harmion_protocol::interpreter::CONTRACT_VERSION,
+                        "interpreter_max_active":harmion_protocol::interpreter::MAX_ACTIVE_INVOCATIONS,
+                        "interpreter_max_active_per_app":harmion_protocol::interpreter::MAX_ACTIVE_INVOCATIONS_PER_APP,
+                        "interpreter_default_timeout_ms":harmion_protocol::interpreter::DEFAULT_CALL_TIMEOUT_MS,
+                        "interpreter_max_timeout_ms":harmion_protocol::interpreter::MAX_CALL_TIMEOUT_MS,
                         "oauth_origin":oauth.as_ref().map(|service| service.origin()),
                         "query_max_page_items":harmion_protocol::query::MAX_QUERY_PAGE_ITEMS,
                         "query_ttl_seconds":harmion_node::query::QUERY_TTL_MICROS / 1_000_000,

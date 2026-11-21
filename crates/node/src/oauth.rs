@@ -2,7 +2,7 @@
 
 use crate::{
     Error,
-    access::{App, Credential, Filter, Grants, authenticate},
+    access::{App, Credential, Filter, Grants, authenticate, validate_grants},
     application::Host,
     storage::{Store, Transaction},
 };
@@ -62,6 +62,8 @@ pub struct Decision {
     pub redirect: String,
     pub state: String,
     pub code: Option<[u8; 32]>,
+    pub app: Option<AppId>,
+    pub grants: Option<Grants>,
 }
 
 pub struct Tokens {
@@ -176,28 +178,37 @@ pub fn register(
     name: String,
     redirect: String,
 ) -> Result<Client, Error> {
+    store.transaction(|tx| {
+        require_owner(tx, owner, host.now_micros())?;
+        register_client_in_tx(tx, host, name, redirect)
+    })
+}
+
+pub(crate) fn register_client_in_tx(
+    tx: &mut dyn Transaction,
+    host: &mut impl Host,
+    name: String,
+    redirect: String,
+) -> Result<Client, Error> {
     redirect_parts(&redirect)?;
     if name.trim().is_empty() || name.len() > 128 || name.chars().any(char::is_control) {
         return Err(Error::InvalidRequest);
     }
-    store.transaction(|tx| {
-        require_owner(tx, owner, host.now_micros())?;
-        let client = Client {
-            id: AppId(host.random_bytes()?),
-            name,
-            redirect,
-        };
-        // A registered public client has no direct bearer credential.
-        tx.insert_app(&App {
-            id: client.id,
-            verifier: host.random_bytes()?,
-            expires_at: i64::MAX,
-            revoked: false,
-            grants: Grants::default(),
-        })?;
-        tx.put_oauth_client(&client)?;
-        Ok(client)
-    })
+    let client = Client {
+        id: AppId(host.random_bytes()?),
+        name,
+        redirect,
+    };
+    // A registered public client has no direct bearer credential.
+    tx.insert_app(&App {
+        id: client.id,
+        verifier: host.random_bytes()?,
+        expires_at: i64::MAX,
+        revoked: false,
+        grants: Grants::default(),
+    })?;
+    tx.put_oauth_client(&client)?;
+    Ok(client)
 }
 
 pub struct Start {
@@ -226,10 +237,14 @@ pub fn start(
         || request.state.chars().any(char::is_control)
         || request.grants.manage_apps
         || request.grants.manage_nodes
-        || (request.grants.read.is_none() && request.grants.write.is_none())
+        || (request.grants.read.is_none()
+            && request.grants.write.is_none()
+            && !request.grants.call
+            && !request.grants.provide)
     {
         return Err(Error::InvalidRequest);
     }
+    validate_grants(&request.grants)?;
     store.transaction(|tx| {
         let now = host.now_micros();
         let client = tx
@@ -290,6 +305,7 @@ pub fn decide(
                 tx.revoke_oauth_app(app.id)?;
                 app.grants = pending.grants;
                 tx.update_app(&app)?;
+                crate::interpreter::registry::reconcile_grants(tx, app.id, &app.grants)?;
             }
             let code = host.random_bytes()?;
             let generation = tx.grant_generation(app.id)?;
@@ -309,10 +325,17 @@ pub fn decide(
             None
         };
         tx.delete_oauth_pending(request)?;
+        let (app, grants) = if allow {
+            (Some(app.id), Some(app.grants))
+        } else {
+            (None, None)
+        };
         Ok(Decision {
             redirect: pending.redirect,
             state: pending.state,
             code,
+            app,
+            grants,
         })
     })
 }
@@ -446,12 +469,75 @@ pub(crate) fn restrict_grant_update(previous: &Grants, new: &Grants) -> Result<(
         (Some(Filter::Kinds(old)), Some(Filter::Kinds(new))) => new.is_subset(old),
         _ => false,
     };
+    let provide_ok = !new.provide
+        || previous.provide_names.is_empty()
+        || (!new.provide_names.is_empty() && new.provide_names.is_subset(&previous.provide_names));
     if new.manage_apps
         || new.manage_nodes
+        || (new.call && !previous.call)
+        || (new.provide && !previous.provide)
+        || !provide_ok
         || !subset(&previous.read, &new.read)
         || !subset(&previous.write, &new.write)
     {
         return Err(Error::Forbidden);
     }
     Ok(())
+}
+
+/// Issue a new refresh family and access token for an already-approved local
+/// connection. The owner approval replaced the authorization-code exchange.
+pub(crate) fn issue_for_app_in_tx(
+    tx: &mut dyn Transaction,
+    host: &mut impl Host,
+    app_id: AppId,
+) -> Result<Tokens, Error> {
+    let now = host.now_micros();
+    let app = active_app(tx, app_id, now)?;
+    let family = host.random_bytes()?;
+    let expires = now.saturating_add(FAMILY_TTL).min(app.expires_at);
+    tx.prune_oauth(now)?;
+    tx.put_oauth_family(family, app.id, expires)?;
+    issue_tokens(tx, host, family, now, expires, app.grants)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admin_cannot_broaden_named_provide_to_all() {
+        let named = Grants {
+            provide: true,
+            provide_names: ["a/b".to_string()].into(),
+            ..Grants::default()
+        };
+        let all = Grants {
+            provide: true,
+            ..Grants::default()
+        };
+        assert!(restrict_grant_update(&named, &all).is_err());
+        assert!(restrict_grant_update(&named, &named).is_ok());
+        assert!(
+            restrict_grant_update(
+                &all,
+                &Grants {
+                    provide: true,
+                    provide_names: ["a/b".to_string()].into(),
+                    ..Grants::default()
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            restrict_grant_update(
+                &named,
+                &Grants {
+                    provide: false,
+                    ..Grants::default()
+                }
+            )
+            .is_ok()
+        );
+    }
 }

@@ -27,7 +27,7 @@ quota節約のため、**Cloudflareレプリカ本体・Android・Windowsの新�
 - 実DO isolateのeviction中のCAS、実CloudflareのTLS・routing・quota・料金・multi-region耐久性、commit途中のクラッシュは未検証。App/Query/OAuth面はpeer-onlyとしてfail closed。
 - 実ネットワークでのredirect・SSRF・プロキシ・WebPKI運用。loopbackのテストCA検証は実WebPKIの運用保証ではない。
 - native daemonへのPeer v2 listener配線は、所有者提供のWebPKI証明書・origin設定の手順が未確定のため行っていない。
-- Android・Windows、Interpreter。
+- Android・Windows。Interpreterのnative v1初期スライスは2026-11-22に実装した（R52）。
 
 2026-11-22: ここまでの作業を commit `174bc2f` に記録した（未コミット差分なし）。直ちにデプロイする予定はないため、次はInterpreterのローカル実装に進む。
 
@@ -40,11 +40,27 @@ quota節約のため、**Cloudflareレプリカ本体・Android・Windowsの新�
 - **8（nativeのv2入口）**: nativeはiroh/HTTPSのまま。WorkerのoutboundはSignedHttps以外をスキップするため現行の端末起点同期は成立する。`peer_v2::serve`は未配線で、nativeへv4 SignedHttps登録を使うと同期だけ失敗する点を運用上の注意として明記した。公開Linuxピアが必要になった時点で実装する。
 - **10a（大容量）**: 保存要求1 MiB・応答8 MiBの上限を明記し、単一Contentのstream/page取得はv1で提供しない。
 - **11（鍵変更・遠隔管理）**: v1対象外として明記。端末交換は新Node IDでの復元を使う。
-- **未実施のまま**: 実CloudflareのAccess/TLS/secret/課金、workerd自体の再起動を含むE2E、Android/Windows、Interpreter。
+- **未実施のまま**: 実CloudflareのAccess/TLS/secret/課金、workerd自体の再起動を含むE2E、Android/Windows。Interpreterのnative v1初期スライスはR52で実装した。
+
+### 2026-11-22 追記（統合OAuth接続とInterpreter権限）
+
+所有者の指示により、Interpreterの未実装範囲とOAuth権限付与を統合した。詳細は[R53](implementation-review.md)。差分はこの時点で未コミット。
+
+- 初回接続を`connect-start` → 管理UI「接続」承認 → `connect-status`/`connect-complete`に統合した。Provider登録・OAuthクライアント作成・grant確定は承認時の同一transactionで行う。
+- OAuth scopeに`call`と`provide:BASE64URL`/`provide:all`を追加し、`provide_names`で事前許可されたProvider名は追加承認なしでapprovedになる。grantから外れた名前の登録はsupersededになる。`call`/`provide`はRead/Writeを含意しない。
+- schema v15（`app_provide_names`）とv16（`connection_requests`）を追加した。接続要求は5分・32件、完了はPKCE＋単回secret。応答を失った場合は要求を作り直す。
+- ブラウザProvider用に30秒・単回ticketとOAuth originの`/provider/connect?ticket=...`を追加した。Webアプリ用に`/connect`ヘルパーとloopback CORSを追加し、承認を`window.opener.postMessage`で通知する。
+- Rust SDK・CLI・管理UI・`connection.json`の`oauth_origin`を更新した。管理UIには「接続」画面を追加した。
+- 所有者認証は今回も`admin.secret`＋管理UIセッションのまま。クラスタ所有者・Owner Key・Passkey・OS鍵保管は[メモ](owner-authentication-memo.md)に留め、実装していない。
+
+### 2026-11-22 追記（R54）
+
+統合接続・OAuth決定経路でもgrant変更後のセッション再評価を行うようにし、`provide_names`の手動上限、OAuth originのticket再発行（`/connect/ticket`）を追加した。詳細は[R54](implementation-review.md)。`connect-complete`の単回性とticketのメモリ保持は残る制約。
 
 次の実装順:
 
-1. Interpreter（契約確定 → registry/provider_session/invocation → App/Provider API → SDK/CLI → 管理UI）
+1. Interpreter（契約確定 → registry/provider_session/invocation → App/Provider API → SDK/CLI → 管理UI） — native v1初期スライスはR52、統合接続と権限はR53で完了
+1b. 所有者認証（メモを元に、OS鍵保管/Passkey → Cluster Ownerポリシー → 回復・ローテーションの順で検討） — 未着手・所有者判断待ち
 2. 所有者が必要とした時点でWorkersの本番運用準備（Accessポリシー、secret配布、TLS終端、isolate単位のschemaキャッシュ）
 3. Android → WindowsのOSホスト
 4. E2Eの残り（workerd再起動を含むDO耐久、管理画面を含むdaemon起動の通し確認）
@@ -60,6 +76,29 @@ quota節約のため、**Cloudflareレプリカ本体・Android・Windowsの新�
 - 入力スナップショットのサイズ上限と、displayの扱い
 
 初期スライスは、registryとprovider_session、1つの`call`（入力スナップショット、タイムアウト、キャンセル、構造化data/display/error）、偽提供元を使ったnodeテスト、App APIのlist/describe/call/cancelまでとする。管理UIとSDKはその後。
+
+
+### 2026-11-22 Interpreter v1初期スライス（R52）
+
+引継ぎの「Interpreterを始めるための準備」に列挙した契約を[interpreter-v1.md](../contracts/interpreter-v1.md)に確定し、初期スライスを実装した。詳細と検証は[R52](implementation-review.md)に記録した。この節の変更は未コミットで、公開デプロイは行っていない。
+
+実装した範囲:
+
+- **契約**: 登録JSON、`provide`/`call` grant、`manage_apps`による承認、承認済み名の一意性と`replace`、App APIのlist/describe/register/approve/call/cancel、Provider WebSocketのJSON-RPC（attach/invoke/cancel）、timeout・cancel・サイズ上限・エラー。
+- **protocol**: `protocol::interpreter`の型・検証と、限定RFC 6455 framing（`protocol::websocket`）。
+- **node**: `interpreter::registry`（SQLite schema v14）、`provider_session`、`invocation`（編集トークンが固定したSnapshotの生成、Read検査、同時実行状態）。
+- **net-native**: `/provider/v1/connect`の認証付きWebSocket、attach後のセッション管理、invoke/cancel、timeout・切断・置換・grant失効時の終了、App APIへの接続。
+- **SDK/CLI/UI**: Rust App SDKの`interpreter_*`、Provider SDKの`ProviderClient`、CLI 6操作、管理UIの一覧・定義表示・承認、grant編集の`call`/`provide`。
+- **テスト**: protocol wire、SQLite registry/承認/名前競合/スナップショット固定/Read/再起動/失効、状態機械、実TLSのProvider接続（拒否・二重attach・所有元不一致・成功・Providerエラー・timeout+cancel・明示cancel・切断・grant失効）、Provider SDKのattach/invoke/timeout cancel。
+
+残る範囲（v1の欠陥ではなく対象外または未検証）:
+
+- Provider SDKは単一接続を扱うが、自動再接続・常駐・バックオフのループはアプリ側。idle heartbeatは送らない。
+- 管理UIは一覧・定義表示・承認のみで、callの入力組み立て・実行画面はない。callはSDK/CLIから行う。
+- Worker/DOはInterpreterを提供せず、App APIはfail closed。遠隔Interpreter・自動起動・サンドボックス・ストリーミング・入力Contentのページ取得・request receipt・Provider単位のgrant/quota/監査はv1対象外。
+- Android/WindowsのProvider常駐・実行、実Cloudflare、実daemonを設定から起動する通しE2Eは未検証。
+
+次にInterpreterで進めるなら、Provider SDKの再接続ループ、実アプリでのcall統合、必要になった時点の名前単位grant・監査、Androidの実行方式の順が自然である。Workersの本番運用準備を優先する場合は、R39〜R52の未実施範囲を先に扱う。
 
 ## 1. native本体で実装済み
 

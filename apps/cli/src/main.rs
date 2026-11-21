@@ -3,7 +3,14 @@ mod cli;
 use clap::Parser;
 use cli::{Cli, Command as CliCommand};
 use domain::{Change, ContentId, Field, UpdateId, Value};
-use harmion_client::{Client, ProtectedDir, protocol::*, random_id};
+use harmion_client::{
+    Client, ProtectedDir,
+    protocol::{
+        connect::ConnectionApproval, interpreter, interpreter::InvocationId,
+        interpreter::ProviderId, *,
+    },
+    random_id,
+};
 use resolution::{MergeInputRequest, MergePart, parse_selections};
 use std::{collections::BTreeMap, fs::File, io::Read, path::Path};
 
@@ -128,6 +135,38 @@ async fn execute(cli: &Cli) -> Result<serde_json::Value> {
         | CliCommand::ChangeGrants { path }
         | CliCommand::TrustRecoveryPeer { path } => {
             Ok(client.call(command, &read(path, MAX_RECORD_BYTES)?).await?)
+        }
+        CliCommand::InterpreterList => Ok(client.interpreter_list().await?),
+        CliCommand::ConnectList => Ok(client.connect_list().await?),
+        CliCommand::ConnectApprove { id, deny, replace } => Ok(client
+            .connect_approve(&ConnectionApproval {
+                connection_id: id.to_string(),
+                allow: !deny,
+                replace: *replace,
+            })
+            .await?),
+        CliCommand::InterpreterDescribe { id } => {
+            Ok(client.interpreter_describe(ProviderId(unhex(id)?)).await?)
+        }
+        CliCommand::InterpreterRegister { path } => {
+            let registration = interpreter::decode_registration(&read(
+                path,
+                interpreter::MAX_REGISTRATION_BYTES,
+            )?)?;
+            Ok(client.interpreter_register(&registration).await?)
+        }
+        CliCommand::InterpreterApprove { id, replace } => Ok(client
+            .interpreter_approve(ProviderId(unhex(id)?), *replace)
+            .await?),
+        CliCommand::InterpreterCall { request } => {
+            let request = interpreter::decode_call_request(&read(
+                request,
+                interpreter::MAX_CALL_REQUEST_BYTES,
+            )?)?;
+            Ok(client.interpreter_call(&request).await?)
+        }
+        CliCommand::InterpreterCancel { id } => {
+            Ok(client.interpreter_cancel(InvocationId(unhex(id)?)).await?)
         }
         CliCommand::ProvisionManifest { peer, out } => {
             let manifest = client.call(command, &peer_registration(peer)?).await?;

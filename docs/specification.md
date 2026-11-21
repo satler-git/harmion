@@ -155,7 +155,7 @@ kindは所属の有無とその更新関係を扱う。初期に検討したカ�
 | Read<Filter> | Contentの取得、Query、未解決版の取得、Subscribe |
 | Write<Filter> | 作成、変更、削除、競合解決。Readとは独立 |
 | Call<Interpreter> | 指定Interpreterの呼び出し。all指定も初期案に含む |
-| Provide<Interpreter> | 指定した名前のInterpreter提供元になる |
+| Provide<Interpreter> | 指定した名前のInterpreter提供元になる。複数名を列挙でき、空は全名を意味する |
 | ManageApps | アプリの認可・失効等の管理操作 |
 | ManageNodes | ノードの追加・退役等の管理操作 |
 
@@ -198,32 +198,35 @@ kindは所属の有無とその更新関係を扱う。初期に検討したカ�
 
 - ローカルノード内で登録・発見・呼び出しを仲介する。遠隔ノード上のInterpreterを探して実行する保証は持たない。
 - 同名の提供元は登録承認時にユーザーが選ぶ。ノード内で名前から提供元が一つに決まる。
-- ProvideとCallは別権限。呼び出しによってInterpreterにHarmionのデータアクセス権限は付与しない。
+- ProvideとCallは別権限で、どちらもRead/Writeを含意しない。呼び出しによってInterpreterにHarmionのデータアクセス権限は付与しない。
+- 初回接続はアプリ開始→管理UI承認→アプリのポーリング完了に統合し、Provider登録も同じ承認で行う。`provide_names`に含まれる名前は追加承認なしでapprovedになる。
 - QueryとInterpreterを組み合わせるのは呼び出し元アプリ。
 - Content入力は、呼び出し元が選んだ版のスナップショット。InterpreterがIDから最新値を取り直す契約にはしない。
 - 純粋性はアプリ実装が守る契約。初期版で実行サンドボックスによる強制はしない。
 - 提供元の承認と現在の接続・稼働状態は分ける。未起動なら利用不能を返し、自動起動は後回し。
 
-### 7.2 最小契約の初期案
+### 7.2 v1契約
 
-- 登録情報: 名前、契約バージョン、入力定義、出力定義。
-- Interpreterが入力Contentを選ぶためのデフォルトQueryを宣言できるようにしたい。例えば`ledger/balance`は、通常`kinds`に`ledger`を含むContentを入力対象とする。
-- 呼び出し元アプリがデフォルトQueryを参照し、ユーザー指定条件と合わせてQueryを実行し、その結果をInterpreterへ渡す。これによってInterpreter自身にデータアクセス権限を与えるものではない。
-- デフォルトQueryとユーザー条件は通常ANDで絞り込み、置き換えは明示指定とする。宣言形式とデフォルトQuery省略時の扱いは実装時に定める。
-- 入力: Content集合、string、number、boolean、および配列・オブジェクトを基本候補とする。
-- 成功: Interpreter固有の構造化dataと、任意の表示用display（media typeと文字列）。
-- 失敗: code、message、任意のdetails。
-- displayは初期版では表示専用。編集して逆変換する契約は含めない。
-- 共通Table型など大きな型システムは今は定義しない。
-- 型定義の具体形式、数値精度、エラーコード、キャンセル等は未確定。
+詳細は[Interpreter v1契約](../contracts/interpreter-v1.md)にある。以下は設計上の要点。
 
-### 7.3 IPCの初期案
+- 登録情報: 1〜128バイトの名前、契約バージョン（v1は1）、入力・出力スキーマ（JSON object、各64 KiB以下）、任意のデフォルトQuery。スキーマはv1ではノードが解釈せず、呼び出し元向けの宣言として扱う。
+- デフォルトQueryはv1では`{"kinds": [...]}`だけを宣言できる。ノードは実行せず、呼び出し元が自分のQuery条件とANDで結合し、選んだContentのIDと編集トークンを`call`へ渡す。これによってInterpreter自身にデータアクセス権限を与えるものではない。
+- 承認済みの名前はノード内で一つ。未承認の同名登録は複数あり得て、所有者が承認時に選ぶ。承認時に明示的な置換だけを許す。grantから外れた名前の登録はsupersededになる。
+- 入力: 呼び出し元が固定したContentスナップショット（最大64件）と、JSONの明示入力（深さ128、要素合計32,768、128 KiB以下）。Contentは通常値だけで、編集トークン・basis・履歴・競合候補をProviderへ渡さない。ノードはQueryやSubscribeを暗黙に実行しない。
+- 成功: 任意のJSON `data`（1 MiB以下）と、任意の表示用`display`（media typeと64 KiB以下の文字列）。
+- 失敗: code（1〜64バイトの小文字英数字と`. _ -`）、message（1024バイト以下）、任意のdetails（256 KiB以下）。
+- displayは表示専用。編集して逆変換する契約は含めない。ストリーミング・部分応答はv1に含めない。
+- 呼び出しのタイムアウトは100〜30,000 ms、省略時10,000 ms。キャンセルは呼び出し元アプリだけが行え、ノードはProviderへ通知して待機を終了する。キャンセル後の遅延応答は破棄する。
+- ノード全体32件、アプリごと8件の同時呼び出し上限を設ける。
 
-- JSON-RPC 2.0を候補とし、契約と通信路を分離する。
-- アプリからHarmionへは認証付きローカルHTTP。
-- Interpreter提供元はHarmionへ認証付きWebSocketを開き、呼び出しを受ける。
-- タイムアウト等を設ける。各OS、とくにAndroidでの実行・接続方式は検証が必要。
+### 7.3 IPC
+
+- App APIは証明書固定のloopback HTTPSで、`interpreter-list`・`describe`・`register`・`approve`・`call`・`cancel`・`ticket`と、統合接続の`connect-list`・`connect-approve`を提供する。呼び出しには`call`、登録には`provide`、承認には`manage_apps`を要する。`connect-start`・`connect-status`・`connect-complete`は要求secretで認可する。
+- Interpreter提供元はノードへアプリ資格情報付きのloopback WebSocketを開き、JSON-RPC 2.0の`interpreter.attach`で接続する。ノードは承認済み登録と現在の`provide`・`provide_names`をDBで検査する。ブラウザProviderはOAuth originの単回・30秒ticketで接続する。
+- ノードからProviderへは`interpreter.invoke`要求と`interpreter.cancel`通知を送る。Providerは同じ接続でJSON-RPC結果を返す。メッセージはテキストフレーム、2 MiB以下。拡張・サブプロトコルは使わない。
+- 同じProvider IDに接続できるセッションは一つ。新しい接続は古い接続を置換し、古い接続の実行中呼び出しは利用不能として終了する。未接続・再起動・提供元交代時の挙動はこの契約に従う。
 - これはノード間同期の通信路とは別。ノード間をHTTPポーリングから始める方針と矛盾しない。
+- 各OS、とくにAndroidでの実行・接続方式、Provider SDKの常駐方法は引き続き検証が必要。
 
 ## 8. ノード参加・識別・信頼
 

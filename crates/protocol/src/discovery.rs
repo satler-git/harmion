@@ -42,6 +42,8 @@ pub struct ConnectionInfo {
     pub node_id: String,
     pub certificate: String,
     pub endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_origin: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +57,12 @@ pub enum FilterSpec {
 pub struct GrantSpec {
     pub read: Option<FilterSpec>,
     pub write: Option<FilterSpec>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub call: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub provide: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provide_names: Vec<String>,
     pub manage_apps: bool,
     pub manage_nodes: bool,
 }
@@ -102,4 +110,8 @@ pub fn unhex<const N: usize>(text: &str) -> Result<[u8; N], CodecError> {
     unhex_bytes(text, N)?
         .try_into()
         .map_err(|_| CodecError::InvalidHex)
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }

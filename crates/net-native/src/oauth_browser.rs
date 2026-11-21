@@ -37,6 +37,14 @@ const TICKET_TTL: i64 = 120_000_000;
 pub(crate) struct Service {
     origin: String,
     tickets: Mutex<BTreeMap<[u8; 32], Ticket>>,
+    provider_tickets: Mutex<BTreeMap<[u8; 32], ProviderTicket>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ProviderTicket {
+    pub app: AppId,
+    pub provider: harmion_protocol::interpreter::ProviderId,
+    pub expires_at: i64,
 }
 
 #[derive(Clone)]
@@ -62,6 +70,7 @@ pub fn configure<S: Store + Send + 'static>(
         .set(Arc::new(Service {
             origin: origin.clone(),
             tickets: Mutex::new(BTreeMap::new()),
+            provider_tickets: Mutex::new(BTreeMap::new()),
         }))
         .map_err(|_| invalid())?;
     Ok(origin)
@@ -168,6 +177,7 @@ pub async fn serve<S: Store + Send + 'static>(
                         TokioIo::new(stream),
                         service_fn(move |request| handle(store.clone(), state.clone(), request)),
                     )
+                    .with_upgrades()
                     .await
                     .map_err(transport)
             })
@@ -180,8 +190,27 @@ pub async fn serve<S: Store + Send + 'static>(
 async fn handle<S: Store + Send + 'static>(
     store: SharedStore<S>,
     state: Arc<Service>,
-    request: Request<Incoming>,
+    mut request: Request<Incoming>,
 ) -> Result<Response<Body>, Infallible> {
+    if provided(&request, "host") != state.origin.strip_prefix("https://") {
+        return Ok(error(StatusCode::BAD_REQUEST, "invalid_request"));
+    }
+    let path = request.uri().path().to_owned();
+    if path == "/connect" && request.method() == Method::GET {
+        return Ok(connect_page());
+    }
+    if path == "/provider/connect" && request.method() == Method::GET {
+        return Ok(match provider_connect(store, state, &mut request).await {
+            Ok(response) => response,
+            Err(error) => connect_failure(error),
+        });
+    }
+    if path.starts_with("/connect/") {
+        return Ok(match connect_dispatch(store, request).await {
+            Ok(response) => response,
+            Err(error) => connect_failure(error),
+        });
+    }
     Ok(match dispatch(store, &state, request).await {
         Ok(response) => response,
         Err(Error::Node(harmion_node::Error::OAuthInvalidGrant)) => {
@@ -193,6 +222,10 @@ async fn handle<S: Store + Send + 'static>(
         Err(Error::Node(harmion_node::Error::OAuthCapacity)) => {
             error(StatusCode::TOO_MANY_REQUESTS, "temporarily_unavailable")
         }
+        Err(Error::Node(harmion_node::Error::InterpreterNameConflict)) => json_response(
+            StatusCode::CONFLICT,
+            json!({"error":"interpreter_name_conflict"}),
+        ),
         Err(Error::Node(
             harmion_node::Error::Storage(_)
             | harmion_node::Error::CorruptLog
@@ -324,6 +357,9 @@ async fn dispatch<S: Store + Send + 'static>(
                             oauth::decide(db, &mut SystemHost, &ticket.owner, ticket.request, allow)
                         })
                         .await?;
+                    if let (Some(app), Some(grants)) = (decision.app, decision.grants.clone()) {
+                        store.notify_app_changed(app, &grants, false).await?;
+                    }
                     let mut callback = Url::parse(&decision.redirect).map_err(transport)?;
                     {
                         let mut params = callback.query_pairs_mut();
@@ -433,7 +469,25 @@ impl Form {
 fn parse_scope(value: &str) -> Result<Grants, harmion_node::Error> {
     let mut grants = Grants::default();
     for scope in value.split(' ') {
+        if scope == "call" {
+            grants.call = true;
+            continue;
+        }
         let (permission, filter) = scope.split_once(':').ok_or_else(invalid)?;
+        if permission == "provide" {
+            if filter == "all" {
+                grants.provide = true;
+                continue;
+            }
+            let name = String::from_utf8(URL_SAFE_NO_PAD.decode(filter).map_err(|_| invalid())?)
+                .map_err(|_| invalid())?;
+            harmion_protocol::interpreter::validate_provider_name(&name).map_err(|_| invalid())?;
+            if !grants.provide_names.insert(name) {
+                return Err(invalid());
+            }
+            grants.provide = true;
+            continue;
+        }
         let field = match permission {
             "read" => &mut grants.read,
             "write" => &mut grants.write,
@@ -460,7 +514,7 @@ fn parse_scope(value: &str) -> Result<Grants, harmion_node::Error> {
     Ok(grants)
 }
 
-fn format_scope(grants: &Grants) -> String {
+pub(crate) fn format_scope(grants: &Grants) -> String {
     let mut scopes = Vec::new();
     for (permission, filter) in [("read", &grants.read), ("write", &grants.write)] {
         match filter {
@@ -471,6 +525,21 @@ fn format_scope(grants: &Grants) -> String {
                     .map(|kind| format!("{permission}:kind:{}", URL_SAFE_NO_PAD.encode(kind))),
             ),
             None => {}
+        }
+    }
+    if grants.call {
+        scopes.push("call".into());
+    }
+    if grants.provide {
+        if grants.provide_names.is_empty() {
+            scopes.push("provide:all".into());
+        } else {
+            scopes.extend(
+                grants
+                    .provide_names
+                    .iter()
+                    .map(|name| format!("provide:{}", URL_SAFE_NO_PAD.encode(name))),
+            );
         }
     }
     scopes.join(" ")
@@ -542,3 +611,369 @@ const CONSENT_JS: &str = r#"
   }
 })();
 "#;
+
+impl Service {
+    /// Issue a short-lived, single-use ticket for a browser WebSocket to the
+    /// Provider endpoint on this browser-trusted origin.
+    pub(crate) fn issue_provider_ticket(
+        &self,
+        app: AppId,
+        provider: harmion_protocol::interpreter::ProviderId,
+        now: i64,
+    ) -> Result<(String, i64), Error> {
+        let secret = Credential::from_bytes(SystemHost.random_bytes()?);
+        let expires_at = now.saturating_add(30_000_000);
+        let mut tickets = self
+            .provider_tickets
+            .lock()
+            .map_err(|_| harmion_node::Error::Storage("provider tickets poisoned".into()))?;
+        tickets.retain(|_, ticket| ticket.expires_at > now);
+        if tickets.len() >= 128 || tickets.values().filter(|ticket| ticket.app == app).count() >= 8
+        {
+            return Err(harmion_node::Error::InterpreterCapacity.into());
+        }
+        tickets.insert(
+            secret.verifier(),
+            ProviderTicket {
+                app,
+                provider,
+                expires_at,
+            },
+        );
+        Ok((hex(secret.expose_bytes()), expires_at))
+    }
+
+    pub(crate) fn consume_provider_ticket(
+        &self,
+        encoded: &str,
+        now: i64,
+    ) -> Result<ProviderTicket, Error> {
+        let key = Credential::from_bytes(unhex(encoded)?).verifier();
+        let mut tickets = self
+            .provider_tickets
+            .lock()
+            .map_err(|_| harmion_node::Error::Storage("provider tickets poisoned".into()))?;
+        let ticket = tickets
+            .remove(&key)
+            .filter(|ticket| ticket.expires_at > now)
+            .ok_or(harmion_node::Error::Forbidden)?;
+        Ok(ticket)
+    }
+
+    pub(crate) fn provider_websocket_url(&self, ticket: &str) -> String {
+        let origin = self.origin.replacen("https://", "wss://", 1);
+        format!("{origin}/provider/connect?ticket={ticket}")
+    }
+}
+
+async fn connect_dispatch<S: Store + Send + 'static>(
+    store: SharedStore<S>,
+    request: Request<Incoming>,
+) -> Result<Response<Body>, Error> {
+    let path = request.uri().path().to_owned();
+    let origin = cors_origin(&request)?;
+    if request.method() == Method::OPTIONS {
+        if origin.is_none() || provided(&request, "access-control-request-method") != Some("POST") {
+            return Err(invalid().into());
+        }
+        let mut response = response(StatusCode::NO_CONTENT, "text/plain; charset=utf-8", "");
+        add_cors(&mut response, origin.as_deref().expect("checked"));
+        return Ok(response);
+    }
+    if request.method() != Method::POST {
+        return Err(invalid().into());
+    }
+    let operation = match path.as_str() {
+        "/connect/start" => "connect-start",
+        "/connect/status" => "connect-status",
+        "/connect/complete" => "connect-complete",
+        "/connect/ticket" => "connect-ticket",
+        _ => return Err(invalid().into()),
+    };
+    let credential = if operation == "connect-ticket" {
+        bearer_credential(&request)
+    } else {
+        None
+    };
+    let limit = if operation == "connect-start" {
+        harmion_protocol::connect::MAX_OFFER_BYTES
+    } else {
+        16 * 1024
+    };
+    let body = Limited::new(request.into_body(), limit)
+        .collect()
+        .await
+        .map_err(|_| invalid())?
+        .to_bytes();
+    let result = if operation == "connect-ticket" {
+        match credential {
+            Some(credential) => {
+                crate::connect::provider_ticket(&store, credential, body.to_vec()).await
+            }
+            None => Err(Error::Node(harmion_node::Error::Forbidden)),
+        }
+    } else {
+        crate::connect::handle_public(&store, operation, body.to_vec()).await
+    };
+    let mut response = match result {
+        Ok(value) => json_response(StatusCode::OK, value),
+        Err(error) => connect_failure(error),
+    };
+    if let Some(origin) = origin {
+        add_cors(&mut response, &origin);
+    }
+    Ok(response)
+}
+
+async fn provider_connect<S: Store + Send + 'static>(
+    store: SharedStore<S>,
+    state: Arc<Service>,
+    request: &mut Request<Incoming>,
+) -> Result<Response<Body>, Error> {
+    if request.uri().path() != "/provider/connect" {
+        return Err(invalid().into());
+    }
+    let mut form = Form::parse(request.uri().query().unwrap_or("").as_bytes())?;
+    let ticket = form.take("ticket")?;
+    form.finish()?;
+    let ticket = state.consume_provider_ticket(&ticket, SystemHost.now_micros())?;
+    let key = crate::interpreter::validate_upgrade(request.headers()).map_err(|_| invalid())?;
+    let upgrade = hyper::upgrade::on(&mut *request);
+    let interpreter = store.interpreter.clone();
+    tokio::spawn(async move {
+        match upgrade.await {
+            Ok(upgraded) => {
+                if let Err(error) = interpreter
+                    .serve_provider_ticket(store, ticket, upgraded)
+                    .await
+                {
+                    tracing::debug!(%error, "browser Provider connection ended");
+                }
+            }
+            Err(error) => tracing::debug!(%error, "browser Provider upgrade failed"),
+        }
+    });
+    let upgraded = crate::interpreter::switching_protocols(&key);
+    let (parts, _) = upgraded.into_parts();
+    Ok(Response::from_parts(parts, Full::new(Bytes::new())))
+}
+
+fn connect_failure(error: Error) -> Response<Body> {
+    use harmion_node::Error as N;
+    let (status, code) = match error {
+        Error::Node(N::ConnectionNotFound) => (StatusCode::NOT_FOUND, "connection_not_found"),
+        Error::Node(N::ConnectionExpired) => (StatusCode::GONE, "connection_expired"),
+        Error::Node(N::ConnectionCompleted) => (StatusCode::CONFLICT, "connection_completed"),
+        Error::Node(N::ConnectionPending) => (StatusCode::CONFLICT, "connection_pending"),
+        Error::Node(N::ConnectionDenied) => (StatusCode::FORBIDDEN, "connection_denied"),
+        Error::Node(N::ConnectionCapacity) => {
+            (StatusCode::TOO_MANY_REQUESTS, "connection_capacity")
+        }
+        Error::Node(N::InterpreterNameConflict) => {
+            (StatusCode::CONFLICT, "interpreter_name_conflict")
+        }
+        Error::Node(N::Forbidden | N::Unauthenticated) => (StatusCode::FORBIDDEN, "forbidden"),
+        Error::Node(N::InvalidRequest) => (StatusCode::BAD_REQUEST, "invalid_request"),
+        Error::Node(N::Storage(_) | N::CorruptLog | N::Entropy(_)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "server_error")
+        }
+        _ => (StatusCode::BAD_REQUEST, "invalid_request"),
+    };
+    json_response(status, json!({"error": code}))
+}
+
+fn bearer_credential(request: &Request<Incoming>) -> Option<Credential> {
+    provided(request, "authorization")?
+        .strip_prefix("Bearer ")
+        .and_then(|value| unhex(value).ok())
+        .map(Credential::from_bytes)
+}
+
+fn cors_origin(request: &Request<Incoming>) -> Result<Option<String>, Error> {
+    let Some(value) = provided(request, "origin") else {
+        return Ok(None);
+    };
+    let url = Url::parse(value).map_err(|_| invalid())?;
+    let loopback = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    };
+    if !matches!(url.scheme(), "http" | "https")
+        || !loopback
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.port() == Some(0)
+    {
+        return Err(invalid().into());
+    }
+    Ok(Some(url.origin().ascii_serialization()))
+}
+
+fn add_cors(response: &mut Response<Body>, origin: &str) {
+    if let Ok(value) = hyper::header::HeaderValue::from_str(origin) {
+        response
+            .headers_mut()
+            .insert(hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+    }
+    response.headers_mut().insert(
+        hyper::header::VARY,
+        hyper::header::HeaderValue::from_static("Origin"),
+    );
+    response.headers_mut().insert(
+        hyper::header::ACCESS_CONTROL_ALLOW_METHODS,
+        hyper::header::HeaderValue::from_static("POST, OPTIONS"),
+    );
+    response.headers_mut().insert(
+        hyper::header::ACCESS_CONTROL_ALLOW_HEADERS,
+        hyper::header::HeaderValue::from_static("content-type, authorization"),
+    );
+    response.headers_mut().insert(
+        hyper::header::ACCESS_CONTROL_MAX_AGE,
+        hyper::header::HeaderValue::from_static("600"),
+    );
+}
+
+const CONNECT_PAGE: &str = r#"<!doctype html>
+<meta charset="utf-8"><title>Harmion connection</title>
+<h1>Harmion connection</h1><p id="status">Waiting for owner approval…</p>
+<script>
+(async () => {
+  const status = document.getElementById("status");
+  try {
+    const encoded = location.hash.slice(1);
+    history.replaceState(null, "", location.pathname);
+    let encoded = encoded.replace(/-/g, "+").replace(/_/g, "/");
+    while (encoded.length % 4) encoded += "=";
+    const request = JSON.parse(new TextDecoder().decode(
+      Uint8Array.from(atob(encoded), c => c.charCodeAt(0))
+    ));
+    if (!/^[a-f0-9]{64}$/.test(request.connection_id) || !/^[a-f0-9]{64}$/.test(request.request_secret)) throw new Error();
+    for (let attempt = 0; attempt < 300; attempt++) {
+      const response = await fetch("/connect/status", {
+        method: "POST", headers: {"content-type": "application/json"},
+        body: JSON.stringify({connection_id: request.connection_id, request_secret: request.request_secret})
+      });
+      if (!response.ok) throw new Error();
+      const view = await response.json();
+      status.textContent = "Status: " + view.status;
+      if (view.status === "approved" || view.status === "denied" ||
+          view.status === "expired" || view.status === "completed") {
+        if (window.opener && view.web_origin) {
+          window.opener.postMessage({
+            type: "harmion-connect", status: view.status,
+            connection_id: view.connection_id, state: request.state
+          }, view.web_origin);
+          status.textContent = view.status === "approved"
+            ? "Approved. You can close this window."
+            : view.status === "completed"
+              ? "This connection is already complete. You can close this window."
+              : "The owner " + view.status + " the request.";
+        }
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    status.textContent = "The connection request expired. Return to the app and try again.";
+  } catch (_) {
+    status.textContent = "This connection link is invalid. Return to the app and request a new connection.";
+  }
+})();
+</script>"#;
+
+fn connect_page() -> Response<Body> {
+    let mut response = response(StatusCode::OK, "text/html; charset=utf-8", CONNECT_PAGE);
+    response.headers_mut().insert(
+        hyper::header::CONTENT_SECURITY_POLICY,
+        hyper::header::HeaderValue::from_static(
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+        ),
+    );
+    response.headers_mut().insert(
+        hyper::header::CACHE_CONTROL,
+        hyper::header::HeaderValue::from_static("no-store"),
+    );
+    response.headers_mut().insert(
+        hyper::header::REFERRER_POLICY,
+        hyper::header::HeaderValue::from_static("no-referrer"),
+    );
+    response.headers_mut().insert(
+        hyper::header::X_CONTENT_TYPE_OPTIONS,
+        hyper::header::HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interpreter_scopes_round_trip() {
+        let scope = format!(
+            "read:all call provide:{}",
+            URL_SAFE_NO_PAD.encode("ledger/balance")
+        );
+        let grants = parse_scope(&scope).unwrap();
+        assert!(grants.read == Some(Filter::All));
+        assert!(grants.call);
+        assert!(grants.provide);
+        assert_eq!(grants.provide_names, ["ledger/balance".to_string()].into());
+        assert_eq!(parse_scope(&format_scope(&grants)).unwrap(), grants);
+        assert_eq!(
+            format_scope(&parse_scope("provide:all").unwrap()),
+            "provide:all"
+        );
+    }
+
+    #[test]
+    fn interpreter_scopes_reject_unknown_and_duplicate_values() {
+        assert!(parse_scope("call call").is_ok());
+        assert!(parse_scope("provide:").is_err());
+        assert!(parse_scope("call:").is_err());
+        assert!(parse_scope("admin").is_err());
+        assert!(
+            parse_scope(&format!(
+                "provide:{} provide:{}",
+                URL_SAFE_NO_PAD.encode("a/b"),
+                URL_SAFE_NO_PAD.encode("a/b")
+            ))
+            .is_err()
+        );
+        assert!(parse_scope(&format!("provide:{}", URL_SAFE_NO_PAD.encode("bad name"))).is_err());
+    }
+}
+
+#[test]
+fn provider_tickets_are_single_use_and_bounded_per_app() {
+    let service = Service {
+        origin: "https://127.0.0.1:8443".into(),
+        tickets: Mutex::new(BTreeMap::new()),
+        provider_tickets: Mutex::new(BTreeMap::new()),
+    };
+    let app = AppId([1; 32]);
+    let other = AppId([2; 32]);
+    let provider = harmion_protocol::interpreter::ProviderId([3; 32]);
+    let (ticket, expires_at) = service.issue_provider_ticket(app, provider, 100).unwrap();
+    assert!(expires_at > 100);
+    assert_eq!(
+        service.provider_websocket_url(&ticket),
+        format!("wss://127.0.0.1:8443/provider/connect?ticket={ticket}")
+    );
+    service.consume_provider_ticket(&ticket, 100).unwrap();
+    assert!(service.consume_provider_ticket(&ticket, 100).is_err());
+    for _ in 0..8 {
+        service.issue_provider_ticket(app, provider, 100).unwrap();
+    }
+    assert!(service.issue_provider_ticket(app, provider, 100).is_err());
+    assert!(service.issue_provider_ticket(other, provider, 100).is_ok());
+    let (expired, expires_at) = service.issue_provider_ticket(other, provider, 100).unwrap();
+    assert!(
+        service
+            .consume_provider_ticket(&expired, expires_at)
+            .is_err()
+    );
+}

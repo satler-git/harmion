@@ -10,7 +10,7 @@
 
 - §9.3 のローカル保存後の同期は R16、復帰・ネットワーク変化・iroh relay再接続の同期ヒントはR27に記録する。相手の更新通知は未実装。
 - §6.1 の Query は条件と参照評価器を R17、保存層の検索を R18、固定スナップショットと App API・SDK への接続を R19 に記録する。Subscribe は R20 に記録する。
-- §6 のnative OAuthはR22、§4.3・§5 の標準解決ツールとローカル管理 Web アプリはR24に記録する。§7 のInterpreterと§9 のCloudflareノードは実装作業が残る。Cloudflareのノード認証と初期管理資格情報は設計が残る。[未解決の設計論点](review.md#4-残る境界注意点新たな確定仕様ではない)
+- §6 のnative OAuthはR22、§4.3・§5 の標準解決ツールとローカル管理 Web アプリはR24に記録する。§7 のInterpreterはnativeのv1初期スライスをR52に記録する。§9 のCloudflareノードは実装作業が残る。Cloudflareのノード認証と初期管理資格情報は設計が残る。[未解決の設計論点](review.md#4-残る境界注意点新たな確定仕様ではない)
 
 ## 確認範囲
 
@@ -28,7 +28,7 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 | §6 Read/Write/Manage権限 | 実装 | `node::access/application`。grant/credential/token/request_resultは同期対象外 |
 | §6 OAuth | native実装 | R22参照。HTTPS、登録、所有者承認、PKCE、refreshと失効。ブラウザでCAの設定が必要 |
 | §6 OS所有者保護 | Unix実装、Linux検証 | `local::ProtectedDir`。Windows/Androidの保護・lifecycleはない。同一OSユーザーを信頼する前提は仕様と一致 |
-| §7 Interpreter | 未実装 | 登録、仲介、Call/Provide、Provider接続なし |
+| §7 Interpreter | native v1初期スライスを実装 | 登録・承認・Provider WebSocket・list/describe/call/cancel・SDK/CLI/管理UIの一覧・承認。R52参照。遠隔実行・自動起動・サンドボックスは対象外 |
 | §8 参加・退役の伝播 | 実装・検証済み | 共通の初期信頼証明、署名付きAdmit/Retire/Dismiss、管理ログ・保留・所有者回復。R01参照 |
 | §8 古いノードバックアップからの復元 | native 実装 | 新しい Node ID で Content 履歴を復元し、有効なノードから承認を受けて再参加する。R23参照 |
 | §9 端末間iroh・通信と意味の分離 | 実装、検証範囲限定 | `sync::PeerTransport`とHTTPS/iroh adapter。ローカルIP変更、リレーのみ、独立2プロセスを検証 |
@@ -447,6 +447,36 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - 単一Contentは保存要求1 MiB、応答8 MiBを上限とし、stream/page取得はv1で提供しない。上限超過は413で失敗し、部分的な成功にしない。
 - v1は署名鍵ローテーションを提供しない。既知identity pinは同一ノードの鍵変更を拒否するため、端末交換は新しいNode IDでの復元（R23）を使う。遠隔管理grantも提供しない（Peer資格を管理grantへ昇格しない）。これらは欠陥ではなくv1の対象外として明示する。
 
+
+### R52 — Interpreter v1のローカル初期スライス
+
+- 契約を[interpreter-v1.md](../contracts/interpreter-v1.md)に確定した。Provider登録（名前、契約v1、JSON objectの入出力スキーマ、kindsだけの任意デフォルトQuery）、`provide`/`call`の独立grant、`manage_apps`による承認、同名承認の一意性と明示置換、呼び出しのtimeout・cancel・エラーを定めた。
+- `protocol::interpreter`に登録・呼び出し・Provider入出力・JSON-RPCの型と検証を追加した。Contentは通常値だけを送り、編集トークン・basis・履歴・候補を含めない。大きさは入力Content 64件、呼び出し2 MiB、data 1 MiB、display 64 KiB、details 256 KiB、timeout 100〜30,000 ms。`protocol::websocket`にRFC 6455の限定framing（mask必須、textのみ、2 MiB上限、close/ping/pong）を追加した。[実装](../crates/protocol/src/interpreter.rs)
+- nodeに`interpreter::{registry,provider_session,invocation}`を追加した。registryはSQLite schema v14の`interpreters`と`apps.call`/`apps.provide`を使い、承認・置換・一覧・attach認可を同期transaction内で行う。invocationは編集トークンが固定したスナップショットを生成し、現在のRead権限を再検査する。実行時のセッション・deadline・キャンセル・呼び出し数上限はhost所有の状態機械とした。[registry](../crates/node/src/interpreter/registry.rs)・[invocation](../crates/node/src/interpreter/invocation.rs)
+- net-nativeにProvider WebSocketの入口（`/provider/v1/connect`）、JSON-RPC attach/invoke/cancel、timeout・キャンセル・切断・置換・grant変更時の終了処理を追加した。HTTPサーバーはhyperのupgradeを有効化し、App APIの`interpreter-*`操作へ接続した。Provider未接続503、timeout 504、cancel 409、入力過大413、応答不正502。[service](../crates/net-native/src/interpreter/service.rs)
+- Rust SDKにApp用`interpreter_*`とProvider用`ProviderClient`を追加し、CLIに6操作、管理UIに一覧・定義表示・承認画面を追加した。既存のgrant編集画面に`call`/`provide`を追加した。
+- 検証: protocolのwire検証、node/SQLiteの登録・承認・名前競合・スナップショット固定・Read検査・再起動・Provider失効、invocation/sessionの状態機械、実TLSのProvider接続（attach拒否、二重attach、所有元不一致、成功call、Providerエラー、timeout+cancel通知、明示cancel、切断、grant失効）を確認した。Provider SDKのattach・invoke・timeout cancelも実TLSで確認した。
+- 限界: nativeのみで、Worker/DOはInterpreterを提供しない（App APIはfail closed）。遠隔Interpreter・自動起動・サンドボックス・ストリーミング・入力Contentのページ取得・request receipt・Providerごとのgrant/quota/監査・管理UIからのcall実行はv1の対象外。Provider SDKは単一接続のAPIで、自動再接続ループや常駐管理はアプリ側の責務。WebSocketのidle heartbeatは送らない。AndroidのProvider常駐・実行方式は未検証。
+
+### R53 — 統合OAuth接続とInterpreter権限の接続
+
+- 初回接続を「アプリ開始 → 管理UI承認 → アプリのポーリング完了」に統合した。アプリは`connect-start`でアプリ名、loopback callback、任意の`web_origin`、PKCE challenge、state、grant、任意のProvider manifestを送る。所有者は管理UIの「接続」画面で承認・拒否し、アプリは`connect-status`・`connect-complete`でaccess token・refresh token・Provider ticketを受け取る。Provider登録・OAuthクライアント作成・grant確定は承認時の1つのDB transactionで行う。[契約](../contracts/interpreter-v1.md#6-統合接続)・[node](../crates/node/src/connect.rs)・[HTTP adapter](../crates/net-native/src/connect.rs)
+- OAuth grantに`call`と`provide:BASE64URL` / `provide:all`を追加した。`provide_names`を列挙したアプリが同じ名前のProviderを登録すると、所有者の追加承認なしでapprovedになる。grant変更・失効で許可されなくなった登録は同一transactionでsupersededになる。`call`/`provide`はRead/Writeを含意しない。[access](../crates/node/src/access.rs)・[OAuth](../crates/node/src/oauth.rs)
+- SQLite schema v15で`app_provide_names`、v16で`connection_requests`を追加した。接続要求は5分・同時32件、secretはverifierだけを保存し、完了はPKCE S256と単回secretで認可する。完了応答を失った場合は要求を作り直す。[store](../crates/store-sqlite/src/lib.rs)
+- Webアプリ向けにOAuth専用originの`/connect/start`・`/connect/status`・`/connect/complete`と`/connect`ヘルパーページを追加した。ヘルパーは承認・拒否・期限切れを`window.opener.postMessage`で通知し、secretやトークンは渡さない。CORSはloopback originだけに許可する。開始応答はOAuth originが有効なら`verification_url`を返す。[browser adapter](../crates/net-native/src/oauth_browser.rs)
+- ブラウザProvider用に30秒・単回のticketと`wss://.../provider/connect?ticket=...`を追加した。ticketはアプリとprovider IDを束縛し、接続時に現在のgrant・承認状態をDBで再検査する。Provider WebSocketはOAuth originでもupgradeを有効にした。[service](../crates/net-native/src/interpreter/service.rs)
+- Rust SDKに`connect_*`と`interpreter_ticket`、CLIに`connect-list`・`connect-approve`（`--deny`/`--replace`）、管理UIに「接続」画面を追加した。`connection.json`に任意の`oauth_origin`を追加した。
+- 検証: protocolの接続要求検証、node/SQLiteの開始・承認・拒否・期限切れ・完了・単回性・名前付きProvideの自動承認・grant変更時のsuperseded・Provider置換、実TLSのApp API統合接続E2E（Provider attachからcallまで）、OAuth originのticket WebSocket E2E、OAuth scopeのround-tripを追加した。`cargo test --workspace --offline`、Clippy `-D warnings`、fmt、管理UIのcheck/buildが成功した。
+- 限界: 所有者認証は引き続き`admin.secret`と管理UIセッションで、クラスタ所有者・OS鍵保管・Passkeyは未実装（[メモ](owner-authentication-memo.md)）。完了応答の再送はできず、Webアプリのポップアップ自動化・QR・アプリ側の接続UIは提供しない。Provider名の縮小で既存Providerセッションを即座に閉じるのは、`provide`全体の削除時だけ。Worker/DOはInterpreterと統合接続を提供しない。ticketはプロセス内メモリだけに保持し、ノード再起動で失効する。
+
+### R54 — 統合接続の権限再評価とWeb ticket再発行
+
+- 統合接続の`connect-approve`とOAuthの`/oauth/decision`でも、grant変更後に`SharedStore::notify_app_changed`を呼ぶようにした。`disallowed_providers`が現在の`provide_names`で許可されない登録を返し、`Service::app_changed`が該当Providerセッションを閉じ、実行中invocationを503/401で終了する。`provide_names`の縮小でもセッションを閉じる。[registry](../crates/node/src/interpreter/registry.rs)・[service](../crates/net-native/src/interpreter/service.rs)
+- 手動の`interpreter-register`は`provide_names`外の名前を403で拒否し、手動`interpreter-approve`も登録元アプリの現在grant・有効期限を再検査する。approvedだがattachできない名前付きProviderを残さない。
+- OAuth originに`POST /connect/ticket`を追加した。`Authorization: Bearer <access token>`と`{"provider_id":"hex"}`で、`connect-complete`後にticketを失っても再発行できる。CORSは`Authorization`を許可し、ticketはアプリごと8件・全体128件に制限した。[oauth_browser](../crates/net-native/src/oauth_browser.rs)
+- 検証: 統合接続の再承認で接続済みProviderがcloseされるE2E、サービス単体の名前縮小close、手動register/approveの名前上限、ticketの単回・期限・アプリ単位容量、OAuth originのticket再発行CORSを追加した。全workspaceテスト、Clippy、fmt、wasm check、管理UI check/build、設計チェックが成功した。
+- 限界: ticketは引き続きメモリ保持で、ノード再起動時はaccess tokenから再発行が必要。`connect-complete`自体は単回のままで、トークン応答を失った場合は要求の作り直しが必要。grant変更とセッション通知の間には短い非transaction区間があり、同時grant変更では古い許可名で閉じる可能性がある。
+
 ## 基準時点の複数ノード同期の検証条件
 
 1. 3〜5ノードで、A↔B↔Cの中継、循環、分断中の別々の編集、後着の競合解決、再送が収束し、静止後のログ件数が増えない。
@@ -455,6 +485,7 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 4. 管理情報の途中失敗・再起動・重複と受信順序を確認する。管理情報を正本ではなくキャッシュとして扱って消さない。
 5. 1台が到達不能でも他のオンライン端末が同期を進める。実daemon・CLIで確認する。
 6. 全体の既存テスト、fmt、Clippy、fixture整合性を通す。追加機能だけの狭いテストで全仕様準拠を主張しない。
+
 
 ## 基準時点の実行記録
 

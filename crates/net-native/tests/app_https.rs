@@ -26,6 +26,7 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
         node_id: hex(&identity.node.0),
         certificate: hex(tls.certificate()),
         endpoint: endpoint.clone(),
+        oauth_origin: None,
     };
     let registration = PeerRegistration {
         signing_key: None,
@@ -133,6 +134,9 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
                 grants: GrantSpec {
                     read: Some(FilterSpec::All),
                     write: None,
+                    call: false,
+                    provide: false,
+                    provide_names: Vec::new(),
                     manage_apps: false,
                     manage_nodes: false,
                 },
@@ -237,6 +241,9 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
                 grants: GrantSpec {
                     read: Some(FilterSpec::All),
                     write: None,
+                    call: false,
+                    provide: false,
+                    provide_names: Vec::new(),
                     manage_apps: false,
                     manage_nodes: false,
                 },

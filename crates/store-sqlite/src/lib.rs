@@ -18,6 +18,8 @@ use harmion_node::{
     query::{QueryPosition, QueryRevision},
     storage::{ChangeWindow, ContentChange, Identity, Store, Transaction},
 };
+use harmion_protocol::connect::{ConnectionId, ConnectionStatus};
+use harmion_protocol::interpreter::{ProviderId, ProviderStatus};
 use harmion_protocol::membership::Certificate;
 use harmion_protocol::{
     AppId, EditToken, LogEntry, LogEpoch, Record, RequestId,
@@ -31,6 +33,110 @@ fn db(e: rusqlite::Error) -> Error {
 }
 fn fixed(bytes: Vec<u8>) -> Result<[u8; 32], Error> {
     bytes.try_into().map_err(|_| Error::CorruptLog)
+}
+
+struct InterpreterRow {
+    provider: Vec<u8>,
+    app: Vec<u8>,
+    name: String,
+    contract_version: i64,
+    manifest: Vec<u8>,
+    status: i64,
+    created_at: i64,
+    approved_at: Option<i64>,
+}
+struct ConnectionRow {
+    id: Vec<u8>,
+    secret_verifier: Vec<u8>,
+    name: String,
+    redirect: String,
+    web_origin: Option<String>,
+    client: Option<Vec<u8>>,
+    challenge: Vec<u8>,
+    state: String,
+    grants: String,
+    provider_manifest: Option<Vec<u8>>,
+    provider_replace: bool,
+    status: i64,
+    created_at: i64,
+    expires_at: i64,
+    approved_at: Option<i64>,
+    completed_at: Option<i64>,
+    app: Option<Vec<u8>>,
+    provider: Option<Vec<u8>>,
+}
+fn connection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionRow> {
+    Ok(ConnectionRow {
+        id: row.get(0)?,
+        secret_verifier: row.get(1)?,
+        name: row.get(2)?,
+        redirect: row.get(3)?,
+        web_origin: row.get(4)?,
+        client: row.get(5)?,
+        challenge: row.get(6)?,
+        state: row.get(7)?,
+        grants: row.get(8)?,
+        provider_manifest: row.get(9)?,
+        provider_replace: row.get(10)?,
+        status: row.get(11)?,
+        created_at: row.get(12)?,
+        expires_at: row.get(13)?,
+        approved_at: row.get(14)?,
+        completed_at: row.get(15)?,
+        app: row.get(16)?,
+        provider: row.get(17)?,
+    })
+}
+fn connection_from(row: ConnectionRow) -> Result<harmion_node::connect::ConnectionRequest, Error> {
+    let grants: harmion_protocol::GrantSpec =
+        serde_json::from_str(&row.grants).map_err(|_| Error::CorruptLog)?;
+    Ok(harmion_node::connect::ConnectionRequest {
+        id: ConnectionId(fixed(row.id)?),
+        secret_verifier: fixed(row.secret_verifier)?,
+        name: row.name,
+        redirect: row.redirect,
+        web_origin: row.web_origin,
+        client: row.client.map(fixed).transpose()?.map(AppId),
+        challenge: fixed(row.challenge)?,
+        state: row.state,
+        grants: grants.into(),
+        provider_manifest: row.provider_manifest,
+        provider_replace: row.provider_replace,
+        status: ConnectionStatus::from_storage(row.status).ok_or(Error::CorruptLog)?,
+        created_at: row.created_at,
+        expires_at: row.expires_at,
+        approved_at: row.approved_at,
+        completed_at: row.completed_at,
+        app: row.app.map(fixed).transpose()?.map(AppId),
+        provider_id: row.provider.map(fixed).transpose()?.map(ProviderId),
+    })
+}
+fn interpreter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InterpreterRow> {
+    Ok(InterpreterRow {
+        provider: row.get(0)?,
+        app: row.get(1)?,
+        name: row.get(2)?,
+        contract_version: row.get(3)?,
+        manifest: row.get(4)?,
+        status: row.get(5)?,
+        created_at: row.get(6)?,
+        approved_at: row.get(7)?,
+    })
+}
+fn interpreter_from(row: InterpreterRow) -> Result<harmion_node::interpreter::Registration, Error> {
+    Ok(harmion_node::interpreter::Registration {
+        provider: ProviderId(fixed(row.provider)?),
+        app: AppId(fixed(row.app)?),
+        name: row.name,
+        contract_version: row
+            .contract_version
+            .try_into()
+            .map_err(|_| Error::CorruptLog)?,
+        manifest: row.manifest,
+        status: ProviderStatus::from_storage(row.status).ok_or(Error::CorruptLog)?,
+        created_at: row.created_at,
+        approved_at: row.approved_at,
+    })
 }
 fn seq(value: u64) -> Result<i64, Error> {
     value.try_into().map_err(|_| Error::InvalidPage)
@@ -143,7 +249,7 @@ impl SqliteStore {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(db)?;
-        if !(0..=13).contains(&version) {
+        if !(0..=16).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
@@ -277,6 +383,74 @@ impl SqliteStore {
             }
             tx.pragma_update(None, "user_version", 13).map_err(db)?;
         }
+        if version < 14 {
+            // Interpreter is a local-App capability. Peer-only hosts leave these
+            // columns false and do not implement the registry methods.
+            if !has_column(&tx, "apps", "call")? {
+                tx.execute_batch("ALTER TABLE apps ADD COLUMN call INTEGER NOT NULL DEFAULT 0;")
+                    .map_err(db)?;
+            }
+            if !has_column(&tx, "apps", "provide")? {
+                tx.execute_batch("ALTER TABLE apps ADD COLUMN provide INTEGER NOT NULL DEFAULT 0;")
+                    .map_err(db)?;
+            }
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS interpreters (
+                    provider_id BLOB PRIMARY KEY CHECK(length(provider_id)=32),
+                    app_id BLOB NOT NULL REFERENCES apps(app_id),
+                    name TEXT NOT NULL,
+                    contract_version INTEGER NOT NULL,
+                    manifest BLOB NOT NULL,
+                    status INTEGER NOT NULL CHECK(status IN (0,1,2)),
+                    created_at INTEGER NOT NULL,
+                    approved_at INTEGER,
+                    CHECK(status != 1 OR approved_at IS NOT NULL),
+                    UNIQUE(app_id, name));
+                CREATE UNIQUE INDEX IF NOT EXISTS interpreters_approved_name
+                    ON interpreters(name) WHERE status=1;
+                PRAGMA user_version=14;",
+            )
+            .map_err(db)?;
+        }
+        if version < 15 {
+            // OAuth `provide:NAME` pre-approvals are local App grants, not
+            // replicated membership or Interpreter state.
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS app_provide_names (
+                    app_id BLOB NOT NULL REFERENCES apps(app_id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    PRIMARY KEY(app_id, name));
+                PRAGMA user_version=15;",
+            )
+            .map_err(db)?;
+        }
+        if version < 16 {
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS connection_requests (
+                    id BLOB PRIMARY KEY CHECK(length(id)=32),
+                    secret_verifier BLOB NOT NULL CHECK(length(secret_verifier)=32),
+                    name TEXT NOT NULL,
+                    redirect TEXT NOT NULL,
+                    web_origin TEXT,
+                    client BLOB CHECK(client IS NULL OR length(client)=32),
+                    challenge BLOB NOT NULL CHECK(length(challenge)=32),
+                    state TEXT NOT NULL,
+                    grants TEXT NOT NULL,
+                    provider_manifest BLOB,
+                    provider_replace INTEGER NOT NULL CHECK(provider_replace IN (0,1)),
+                    status INTEGER NOT NULL CHECK(status IN (0,1,2,3,4)),
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    approved_at INTEGER,
+                    completed_at INTEGER,
+                    app BLOB CHECK(app IS NULL OR length(app)=32),
+                    provider BLOB CHECK(provider IS NULL OR length(provider)=32));
+                CREATE INDEX IF NOT EXISTS connection_requests_expiry
+                    ON connection_requests(expires_at);
+                PRAGMA user_version=16;",
+            )
+            .map_err(db)?;
+        }
         {
             let mut storage = SqlTransaction { sql: &tx, identity };
             // Reject broken bytes/dependencies at startup; never salvage only the
@@ -333,7 +507,7 @@ impl SqliteStore {
         let version: i64 = tx
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db)?;
-        if !(1..=13).contains(&version) {
+        if !(1..=16).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
@@ -411,6 +585,31 @@ impl SqlTransaction<'_> {
             }
             _ => Err(Error::CorruptLog),
         }
+    }
+    fn provide_names(&self, app: AppId) -> Result<BTreeSet<String>, Error> {
+        let mut statement = self
+            .sql
+            .prepare("SELECT name FROM app_provide_names WHERE app_id=?1 ORDER BY name")
+            .map_err(db)?;
+        statement
+            .query_map([app.0], |row| row.get::<_, String>(0))
+            .map_err(db)?
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(db)
+    }
+    fn write_provide_names(&self, app: &App) -> Result<(), Error> {
+        self.sql
+            .execute("DELETE FROM app_provide_names WHERE app_id=?1", [app.id.0])
+            .map_err(db)?;
+        for name in &app.grants.provide_names {
+            self.sql
+                .execute(
+                    "INSERT INTO app_provide_names(app_id,name) VALUES(?1,?2)",
+                    params![app.id.0, name],
+                )
+                .map_err(db)?;
+        }
+        Ok(())
     }
     fn write_kinds(&self, app: &App) -> Result<(), Error> {
         self.sql
@@ -995,14 +1194,26 @@ impl Transaction for SqlTransaction<'_> {
         }
     }
     fn app_by_id(&mut self, id: AppId) -> Result<Option<App>, Error> {
-        let row = self.sql.query_row("SELECT verifier,expires_at,revoked,read_all,write_all,manage_apps,manage_nodes FROM apps WHERE app_id=?1", [id.0], |r| {
+        let row = self.sql.query_row("SELECT verifier,expires_at,revoked,read_all,write_all,call,provide,manage_apps,manage_nodes FROM apps WHERE app_id=?1", [id.0], |r| {
             Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?, r.get::<_, bool>(2)?,
-                r.get::<_, Option<i64>>(3)?, r.get::<_, Option<i64>>(4)?, r.get::<_, bool>(5)?, r.get::<_, bool>(6)?))
+                r.get::<_, Option<i64>>(3)?, r.get::<_, Option<i64>>(4)?, r.get::<_, bool>(5)?,
+                r.get::<_, bool>(6)?, r.get::<_, bool>(7)?, r.get::<_, bool>(8)?))
         }).optional().map_err(db)?;
-        let Some((verifier, expires_at, revoked, read, write, manage_apps, manage_nodes)) = row
+        let Some((
+            verifier,
+            expires_at,
+            revoked,
+            read,
+            write,
+            call,
+            provide,
+            manage_apps,
+            manage_nodes,
+        )) = row
         else {
             return Ok(None);
         };
+        let provide_names = self.provide_names(id)?;
         Ok(Some(App {
             id,
             verifier: fixed(verifier)?,
@@ -1011,6 +1222,9 @@ impl Transaction for SqlTransaction<'_> {
             grants: Grants {
                 read: self.filter(id, 0, read)?,
                 write: self.filter(id, 1, write)?,
+                call,
+                provide,
+                provide_names,
                 manage_apps,
                 manage_nodes,
             },
@@ -1019,7 +1233,7 @@ impl Transaction for SqlTransaction<'_> {
     fn insert_app(&mut self, app: &App) -> Result<(), Error> {
         self.sql
             .execute(
-                "INSERT INTO apps VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                "INSERT INTO apps(app_id,verifier,expires_at,revoked,read_all,write_all,call,provide,manage_apps,manage_nodes) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                 params![
                     app.id.0,
                     app.verifier,
@@ -1027,22 +1241,270 @@ impl Transaction for SqlTransaction<'_> {
                     app.revoked,
                     all_flag(&app.grants.read),
                     all_flag(&app.grants.write),
+                    app.grants.call,
+                    app.grants.provide,
                     app.grants.manage_apps,
                     app.grants.manage_nodes
                 ],
             )
             .map_err(db)?;
-        self.write_kinds(app)
+        self.write_kinds(app)?;
+        self.write_provide_names(app)
     }
     fn update_app(&mut self, app: &App) -> Result<(), Error> {
-        let changed = self.sql.execute("UPDATE apps SET expires_at=?2,revoked=?3,read_all=?4,write_all=?5,manage_apps=?6,manage_nodes=?7 WHERE app_id=?1",
-            params![app.id.0, app.expires_at, app.revoked, all_flag(&app.grants.read), all_flag(&app.grants.write), app.grants.manage_apps, app.grants.manage_nodes]).map_err(db)?;
+        let changed = self.sql.execute("UPDATE apps SET expires_at=?2,revoked=?3,read_all=?4,write_all=?5,call=?6,provide=?7,manage_apps=?8,manage_nodes=?9 WHERE app_id=?1",
+            params![app.id.0, app.expires_at, app.revoked, all_flag(&app.grants.read), all_flag(&app.grants.write), app.grants.call, app.grants.provide, app.grants.manage_apps, app.grants.manage_nodes]).map_err(db)?;
         if changed != 1 {
             return Err(Error::NotFound);
         }
         self.write_kinds(app)?;
+        self.write_provide_names(app)?;
         changes::advance_grants(self.sql, app.id)
     }
+    fn interpreter_registration(
+        &mut self,
+        provider: ProviderId,
+    ) -> Result<Option<harmion_node::interpreter::Registration>, Error> {
+        let row = self
+            .sql
+            .query_row(
+                "SELECT provider_id,app_id,name,contract_version,manifest,status,created_at,approved_at FROM interpreters WHERE provider_id=?1",
+                [provider.0],
+                interpreter_row,
+            )
+            .optional()
+            .map_err(db)?;
+        row.map(interpreter_from).transpose()
+    }
+    fn interpreter_registration_by_app_name(
+        &mut self,
+        app: AppId,
+        name: &str,
+    ) -> Result<Option<harmion_node::interpreter::Registration>, Error> {
+        let row = self
+            .sql
+            .query_row(
+                "SELECT provider_id,app_id,name,contract_version,manifest,status,created_at,approved_at FROM interpreters WHERE app_id=?1 AND name=?2",
+                params![app.0, name],
+                interpreter_row,
+            )
+            .optional()
+            .map_err(db)?;
+        row.map(interpreter_from).transpose()
+    }
+    fn interpreter_registrations(
+        &mut self,
+    ) -> Result<Vec<harmion_node::interpreter::Registration>, Error> {
+        let mut statement = self
+            .sql
+            .prepare(
+                "SELECT provider_id,app_id,name,contract_version,manifest,status,created_at,approved_at FROM interpreters ORDER BY created_at,provider_id",
+            )
+            .map_err(db)?;
+        let rows = statement
+            .query_map([], interpreter_row)
+            .map_err(db)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db)?;
+        rows.into_iter().map(interpreter_from).collect()
+    }
+    fn insert_interpreter_registration(
+        &mut self,
+        registration: &harmion_node::interpreter::Registration,
+    ) -> Result<(), Error> {
+        self.sql
+            .execute(
+                "INSERT INTO interpreters(provider_id,app_id,name,contract_version,manifest,status,created_at,approved_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    registration.provider.0,
+                    registration.app.0,
+                    registration.name,
+                    i64::from(registration.contract_version),
+                    registration.manifest,
+                    registration.status.storage(),
+                    registration.created_at,
+                    registration.approved_at
+                ],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+    fn update_interpreter_registration(
+        &mut self,
+        registration: &harmion_node::interpreter::Registration,
+    ) -> Result<(), Error> {
+        let changed = self
+            .sql
+            .execute(
+                "UPDATE interpreters SET name=?2,contract_version=?3,manifest=?4 WHERE provider_id=?1",
+                params![
+                    registration.provider.0,
+                    registration.name,
+                    i64::from(registration.contract_version),
+                    registration.manifest
+                ],
+            )
+            .map_err(db)?;
+        if changed != 1 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+    fn approved_interpreter_by_name(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<harmion_node::interpreter::Registration>, Error> {
+        let row = self
+            .sql
+            .query_row(
+                "SELECT provider_id,app_id,name,contract_version,manifest,status,created_at,approved_at FROM interpreters WHERE name=?1 AND status=1",
+                [name],
+                interpreter_row,
+            )
+            .optional()
+            .map_err(db)?;
+        row.map(interpreter_from).transpose()
+    }
+    fn set_interpreter_status(
+        &mut self,
+        provider: ProviderId,
+        status: ProviderStatus,
+        approved_at: Option<i64>,
+    ) -> Result<(), Error> {
+        let changed = self
+            .sql
+            .execute(
+                "UPDATE interpreters SET status=?2,approved_at=?3 WHERE provider_id=?1",
+                params![provider.0, status.storage(), approved_at],
+            )
+            .map_err(db)?;
+        if changed != 1 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+    fn connection_request(
+        &mut self,
+        id: ConnectionId,
+    ) -> Result<Option<harmion_node::connect::ConnectionRequest>, Error> {
+        let row = self
+            .sql
+            .query_row(
+                "SELECT id,secret_verifier,name,redirect,web_origin,client,challenge,state,grants,provider_manifest,provider_replace,status,created_at,expires_at,approved_at,completed_at,app,provider FROM connection_requests WHERE id=?1",
+                [id.0],
+                connection_row,
+            )
+            .optional()
+            .map_err(db)?;
+        row.map(connection_from).transpose()
+    }
+    fn connection_requests(
+        &mut self,
+    ) -> Result<Vec<harmion_node::connect::ConnectionRequest>, Error> {
+        let mut statement = self
+            .sql
+            .prepare(
+                "SELECT id,secret_verifier,name,redirect,web_origin,client,challenge,state,grants,provider_manifest,provider_replace,status,created_at,expires_at,approved_at,completed_at,app,provider FROM connection_requests ORDER BY created_at DESC,id",
+            )
+            .map_err(db)?;
+        let rows = statement
+            .query_map([], connection_row)
+            .map_err(db)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db)?;
+        rows.into_iter().map(connection_from).collect()
+    }
+    fn insert_connection_request(
+        &mut self,
+        request: &harmion_node::connect::ConnectionRequest,
+    ) -> Result<(), Error> {
+        let grants =
+            serde_json::to_string(&harmion_protocol::GrantSpec::from(request.grants.clone()))
+                .map_err(|_| Error::InvalidRequest)?;
+        self.sql
+            .execute(
+                "INSERT INTO connection_requests(id,secret_verifier,name,redirect,web_origin,client,challenge,state,grants,provider_manifest,provider_replace,status,created_at,expires_at,approved_at,completed_at,app,provider) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                params![
+                    request.id.0,
+                    request.secret_verifier,
+                    request.name,
+                    request.redirect,
+                    request.web_origin,
+                    request.client.map(|app| app.0),
+                    request.challenge,
+                    request.state,
+                    grants,
+                    request.provider_manifest,
+                    request.provider_replace,
+                    request.status.storage(),
+                    request.created_at,
+                    request.expires_at,
+                    request.approved_at,
+                    request.completed_at,
+                    request.app.map(|app| app.0),
+                    request.provider_id.map(|provider| provider.0),
+                ],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+    fn update_connection_request(
+        &mut self,
+        request: &harmion_node::connect::ConnectionRequest,
+    ) -> Result<(), Error> {
+        let grants =
+            serde_json::to_string(&harmion_protocol::GrantSpec::from(request.grants.clone()))
+                .map_err(|_| Error::InvalidRequest)?;
+        let changed = self
+            .sql
+            .execute(
+                "UPDATE connection_requests SET secret_verifier=?2,name=?3,redirect=?4,web_origin=?5,client=?6,challenge=?7,state=?8,grants=?9,provider_manifest=?10,provider_replace=?11,status=?12,expires_at=?13,approved_at=?14,completed_at=?15,app=?16,provider=?17 WHERE id=?1",
+                params![
+                    request.id.0,
+                    request.secret_verifier,
+                    request.name,
+                    request.redirect,
+                    request.web_origin,
+                    request.client.map(|app| app.0),
+                    request.challenge,
+                    request.state,
+                    grants,
+                    request.provider_manifest,
+                    request.provider_replace,
+                    request.status.storage(),
+                    request.expires_at,
+                    request.approved_at,
+                    request.completed_at,
+                    request.app.map(|app| app.0),
+                    request.provider_id.map(|provider| provider.0),
+                ],
+            )
+            .map_err(db)?;
+        if changed != 1 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+    fn connection_request_count(&mut self, now: i64) -> Result<usize, Error> {
+        let count: i64 = self
+            .sql
+            .query_row(
+                "SELECT COUNT(*) FROM connection_requests WHERE status IN (0,1) AND expires_at>?1",
+                [now],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        count.try_into().map_err(|_| Error::CorruptLog)
+    }
+    fn prune_connection_requests(&mut self, before: i64) -> Result<usize, Error> {
+        self.sql
+            .execute(
+                "DELETE FROM connection_requests WHERE status IN (2,3,4) AND created_at<?1",
+                [before],
+            )
+            .map_err(db)
+    }
+
     fn grant_generation(&mut self, app: AppId) -> Result<u64, Error> {
         changes::grant_generation(self.sql, app)
     }

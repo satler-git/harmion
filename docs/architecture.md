@@ -2,7 +2,7 @@
 
 更新日: 2026-11-18
 
-native管理クライアントの入口は証明書を固定したloopback HTTPS。SDKはTLS検証とleaf完全一致を確認してからBearerを送る。`crates/local`はdaemonとSDKが共有するUnix所有者限定ファイル操作を持つ。ブラウザOAuthは所有者が専用CAを信頼する別のloopback HTTPSで提供する。WS・JSON-RPCは未実装。
+native管理クライアントの入口は証明書を固定したloopback HTTPS。SDKはTLS検証とleaf完全一致を確認してからBearerを送る。`crates/local`はdaemonとSDKが共有するUnix所有者限定ファイル操作を持つ。ブラウザOAuthは所有者が専用CAを信頼する別のloopback HTTPSで提供する。Provider WebSocketはJSON-RPC 2.0でattach・invoke・cancelを実装し、ブラウザProviderはOAuth originの単回ticketで接続する。
 
 [仕様](specification.md)と[内部設計](internal-design.md)を実装するための構成。ユーザーからの設計委任に基づく初期選定。現在の実装範囲は[進捗・レビュー記録](implementation-progress.md)を参照。実装の細かな型・ライブラリバージョン・wire形式は実装時に確定する。
 
@@ -116,8 +116,8 @@ NodeServiceはApp、peer、Provider操作を区別する。一般アプリ操作
 | API | 呼び出し元 | 初期通信 | 認証・権限 |
 |---|---|---|---|
 | App API | Wiki等と付属管理ツール | 証明書固定のloopback HTTPS | アプリ資格情報、Read/Write/Call、管理操作には管理権限 |
-| OAuth | nativeアプリの認可とトークン交換 | 所有者が信頼する専用CAのloopback HTTPS | public clientの登録、所有者による承認、PKCE S256 |
-| Provider API | Interpreter提供元 | 提供元発のloopback WS | アプリ資格情報、Provide、承認済み名前 |
+| OAuth | native/Webアプリの認可、トークン交換、統合接続 | 所有者が信頼する専用CAのloopback HTTPS | public clientの登録、所有者による承認、PKCE S256、単回接続要求 |
+| Provider API | Interpreter提供元 | 提供元発のloopback WS（ブラウザはOAuth originのticket WS） | アプリ資格情報、Provide、`provide_names`、承認済み名前 |
 | Peer API | 別ノード | native間iroh、HTTPノードへHTTPS | ノード本人確認＋クラスタ参加資格 |
 
 JSON-RPC 2.0をApp/Provider APIの初期候補とする。OAuthの認可・トークンエンドポイントはOAuthのHTTP契約に従い、独自RPCへ置き換えない。Peer APIは同期のページ・ACK等の専用メッセージ契約とし、RPC方式の統一は強制しない。論理プロトコルと通信のframingを分ける。
@@ -144,9 +144,9 @@ Read<all>やWrite<all>だけではノード追加・grant発行はできない�
 
 ### アプリの登録・失効
 
-アプリは要求する権限を提示し、所有者の承認後にノードローカルの資格情報を受け取る。各ノードがOAuth Authorization Code＋PKCE S256の認可サーバーとリソースサーバーになる。管理ツールも同じApp APIとgrant体系を使う。
+アプリは要求する権限を提示し、所有者の承認後にノードローカルの資格情報を受け取る。各ノードがOAuth Authorization Code＋PKCE S256の認可サーバーとリソースサーバーになる。初回接続はアプリ開始→管理UI承認→アプリのポーリング完了に統合し、Provider登録も同じ承認で行う。管理ツールも同じApp APIとgrant体系を使う。
 
-初回管理grantはOS保護されたbootstrapから渡す。承認操作はその資格情報で発行した使い切りリンクでブラウザへ引き継ぐ。ブラウザ用サーバー証明書は専用CAで署名し、所有者はそのCAをブラウザに登録する。コード・トークンの状態遷移と現在のgrantの確定はnodeと保存層、HTTPS・認可画面はnet-nativeが担当する。scope、Filter、redirect、期限の契約は[App API](app-api.md#5-oauthとローカル構成)にまとめる。
+初回管理grantはOS保護されたbootstrapから渡す。承認操作はその資格情報で発行した使い切りリンクでブラウザへ引き継ぐ。ブラウザ用サーバー証明書は専用CAで署名し、所有者はそのCAをブラウザに登録する。コード・トークンの状態遷移と現在のgrantの確定はnodeと保存層、HTTPS・認可画面はnet-nativeが担当する。scope、Filter、redirect、期限の契約は[App API](app-api.md#6-oauthとローカル構成)にまとめる。
 
 長期の資格情報は推測困難な秘密として発行し、サーバー側は検証用の値を保存する。資格情報の発行・保存・交換を専門のモジュールへ閉じ込める。具体的な秘密長・検証方式・OS保管APIは実装時に選ぶ。
 
@@ -164,16 +164,25 @@ Cloudflare管理では、最初のノード鍵・参加情報の導入をデプ�
 
 InterpreterをRustの動的ライブラリとしてノード内にロードする構成は採らない。標準は別プロセス・別アプリからのProvider接続。純粋性は提供元の契約であり、プロセス分離はサンドボックスの保証ではない。
 
-1. 提供元の名前と契約を所有者が承認し、Provideを付与する。
+1. 提供元の名前と契約を所有者が`manage_apps`で承認し、`provide`を付与する。
 2. 提供元が接続するとregistryはその名前をオンライン状態にする。切断しても承認は残す。
 3. 呼び出し元は定義とデフォルトQueryを取得する。
 4. 呼び出し元が自身のRead範囲でQueryし、選んだ版のスナップショットを組み立てる。
-5. Call権限を検査したbrokerが、入力と呼出しIDを指定提供元へ送る。
+5. `call`を検査したbrokerが、入力と呼出しIDを指定提供元へ送る。
 6. data/displayまたはエラーを、同じ呼出し元へ返す。
+
+v1の具体化:
+
+- `provide`と`call`はアプリ単位の独立したgrantで、名前単位のgrantはv1に含めない。承認済みの名前はノード内で一意。同名の未承認登録は共存でき、所有者が`replace`を明示したときだけ既存の承認を置換する。
+- registryはnodeのstorage portとSQLite schema v14に永続化する。接続・invocation・deadline・キャンセルなどの実行時状態はhost（net-native）が所有し、nodeは同期transaction内で検証・スナップショット生成・上限判定を行う。
+- 提供元セッションは`/provider/v1/connect`への認証付きloopback WebSocket。JSON-RPC 2.0の`interpreter.attach`・`interpreter.invoke`・`interpreter.cancel`を使う。同じProvider IDの新セッションは旧セッションを置換し、旧セッションの呼び出しは利用不能として終了する。
+- 呼び出し元が渡す編集トークンはbasisを固定するためだけに使い、Providerへ渡さない。ProviderはContent IDから最新値を取り直せない。brokerは渡された入力以外を取得しない。
+- 入力Content 64件、呼び出し全体2 MiB、data 1 MiB、display 64 KiB、timeout 100〜30,000 ms、同時呼び出し32件（アプリごと8件）を上限とする。
+- Rust SDKはApp用のInterpreter操作、接続要求、Provider用の`ProviderClient`を持つ。管理UIは一覧・定義表示・承認と「接続」画面を提供し、呼び出し画面は設けない。WebアプリはOAuth originの`/connect`ヘルパーで承認を`postMessage`できる。
 
 デフォルトQueryは入力候補の宣言。brokerは勝手にデータを取り足さない。ユーザー条件とは通常ANDで結合し、上書きは明示指定とする。Content以外の明示入力だけで呼べるInterpreterにRead権限を要求しない。
 
-brokerは入力・出力サイズ、同時呼出し数、deadline、キャンセル、提供元切断を扱う。呼出しIDを提供元セッションと呼び出し元へ結び付け、別接続からの応答を受け付けない。提供元再接続で保留中の呼出しを無条件に再実行しない。初期版は切断エラーを返し、呼び出し元が再試行を選ぶ。
+brokerは入力・出力サイズ、同時呼出し数、deadline、キャンセル、提供元切断を扱う。呼出しIDを提供元セッションと呼び出し元へ結び付け、別接続からの応答を受け付けない。提供元再接続で保留中の呼出しを無条件に再実行しない。切断・置換時はエラーを返し、呼び出し元が再試行を選ぶ。
 
 SDKは認証ヘッダー、型、再接続、編集トークンの保持、request_id、Query/Subscribeの再取得を扱う。再接続で編集元を最新に差し替えず、古い編集内容の保存判断をアプリに残す。SDKは通常編集だけで全競合を解決したり、データの意味を判断したりしない。
 

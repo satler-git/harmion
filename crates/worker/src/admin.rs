@@ -70,6 +70,8 @@ pub fn capabilities() -> Value {
             "contents": false,
             "conflicts": false,
             "apps": false,
+            "interpreters": false,
+            "connections": false,
             "export": false
         },
         "operations": {

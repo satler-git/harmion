@@ -65,6 +65,32 @@ pub(crate) enum Command {
     },
     /// Change application grants.
     ChangeGrants { path: String },
+    /// List Interpreter providers visible to this app.
+    InterpreterList,
+    /// Describe an Interpreter provider by ID.
+    InterpreterDescribe { id: String },
+    /// Register or update this app's interpreter manifest from a JSON file.
+    InterpreterRegister { path: String },
+    /// Approve a pending Interpreter provider (owner only).
+    InterpreterApprove {
+        id: String,
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Call an Interpreter using a JSON request file.
+    InterpreterCall { request: String },
+    /// Cancel one of this app's interpreter invocations.
+    InterpreterCancel { id: String },
+    /// List integrated connection requests.
+    ConnectList,
+    /// Approve or deny an integrated connection request (owner only).
+    ConnectApprove {
+        id: String,
+        #[arg(long)]
+        deny: bool,
+        #[arg(long)]
+        replace: bool,
+    },
     /// Trust a peer for explicit local owner recovery.
     TrustRecoveryPeer { path: String },
     /// Replay a persisted save request.
@@ -158,6 +184,14 @@ impl Command {
             Self::Approve { .. } => "approve",
             Self::ProvisionManifest { .. } => "provision-manifest",
             Self::ChangeGrants { .. } => "change-grants",
+            Self::InterpreterList => "interpreter-list",
+            Self::InterpreterDescribe { .. } => "interpreter-describe",
+            Self::InterpreterRegister { .. } => "interpreter-register",
+            Self::InterpreterApprove { .. } => "interpreter-approve",
+            Self::InterpreterCall { .. } => "interpreter-call",
+            Self::InterpreterCancel { .. } => "interpreter-cancel",
+            Self::ConnectList => "connect-list",
+            Self::ConnectApprove { .. } => "connect-approve",
             Self::TrustRecoveryPeer { .. } => "trust-recovery-peer",
             Self::Save { .. } => "save",
             Self::Create { .. } => "create",
@@ -236,6 +270,33 @@ mod tests {
         assert_eq!(peer, "harmion-peer:v1:z:abc");
         assert_eq!(out.as_deref(), Some("manifest.json"));
         assert!(parse(&["provision-manifest", "peer", "extra"]).is_err());
+    }
+
+    #[test]
+    fn interpreter_commands_parse_provider_and_invocation_ids() {
+        assert!(matches!(
+            parse(&["interpreter-list"]).unwrap().command,
+            Command::InterpreterList
+        ));
+        let cli = parse(&["interpreter-describe", "id"]).unwrap();
+        assert!(matches!(cli.command, Command::InterpreterDescribe { id } if id == "id"));
+        let cli = parse(&["interpreter-approve", "id", "--replace"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::InterpreterApprove { id, replace: true } if id == "id"
+        ));
+        let cli = parse(&["interpreter-register", "manifest.json"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::InterpreterRegister { path } if path == "manifest.json")
+        );
+        let cli = parse(&["interpreter-call", "call.json"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::InterpreterCall { request } if request == "call.json")
+        );
+        let cli = parse(&["interpreter-cancel", "id"]).unwrap();
+        assert!(matches!(cli.command, Command::InterpreterCancel { id } if id == "id"));
+        assert!(parse(&["interpreter-describe"]).is_err());
+        assert!(parse(&["interpreter-cancel", "id", "extra"]).is_err());
     }
 
     #[test]

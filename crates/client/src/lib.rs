@@ -3,14 +3,20 @@ pub use harmion_local::ProtectedDir;
 pub use harmion_protocol as protocol;
 mod export;
 mod export_directory;
+mod provider;
 mod resolution;
 mod subscription;
+pub use provider::{ProviderClient, ProviderEvent};
 pub use subscription::{Subscription, SubscriptionCheckpoint, SubscriptionNotification};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{Request, Response, body::Incoming};
 use hyper_util::rt::TokioIo;
+use protocol::connect::{
+    ConnectionApproval, ConnectionCompleteRequest, ConnectionOffer, ConnectionStatusRequest,
+};
+use protocol::interpreter::{CallRequest, InvocationId, ProviderId, ProviderRegistration};
 use protocol::query::{Condition, QueryCursor, QueryRequest};
 use protocol::{ConnectionInfo, MAX_APP_RESPONSE_BYTES, MAX_RECORD_BYTES, TLS_NAME};
 use rustls::{ClientConfig, RootCertStore, pki_types::CertificateDer};
@@ -44,6 +50,7 @@ pub enum Error {
     Transport,
     Timeout,
     Http(u16),
+    ProviderAttachRejected { code: i64 },
 }
 
 /// No Debug implementation: the bearer credential must never enter diagnostics.
@@ -84,32 +91,12 @@ impl Client {
     }
 
     pub fn new(info: ConnectionInfo, credential: [u8; 32]) -> Result<Self, Error> {
-        let endpoint: SocketAddr = info.endpoint.parse().map_err(|_| Error::InvalidDiscovery)?;
-        if info.version != 1
-            || !endpoint.ip().is_loopback()
-            || endpoint.port() == 0
-            || protocol::unhex::<32>(&info.cluster_id).is_err()
-            || protocol::unhex::<32>(&info.node_id).is_err()
-        {
-            return Err(Error::InvalidDiscovery);
-        }
-        let certificate = protocol::unhex_bytes(&info.certificate, 64 * 1024)
-            .map_err(|_| Error::InvalidDiscovery)?;
-        let mut roots = RootCertStore::empty();
-        roots
-            .add(CertificateDer::from(certificate.clone()))
-            .map_err(|_| Error::InvalidDiscovery)?;
-        let tls =
-            ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
-                .with_safe_default_protocol_versions()
-                .map_err(|_| Error::InvalidDiscovery)?
-                .with_root_certificates(roots)
-                .with_no_client_auth();
+        let pinned = PinnedEndpoint::new(&info)?;
         Ok(Self {
-            endpoint,
-            certificate,
+            endpoint: pinned.endpoint,
+            certificate: pinned.certificate,
             credential,
-            tls: Arc::new(tls),
+            tls: pinned.tls,
         })
     }
 
@@ -214,6 +201,99 @@ impl Client {
         self.call("get", &content.0).await
     }
 
+    /// Public connection endpoints do not require an app credential; the
+    // one-time request secret authorizes status and completion.
+    pub fn anonymous(info: ConnectionInfo) -> Result<Self, Error> {
+        Self::new(info, [0; 32])
+    }
+
+    pub async fn connect_start(&self, offer: &ConnectionOffer) -> Result<serde_json::Value, Error> {
+        let bytes = serde_json::to_vec(offer).map_err(|_| Error::InvalidRequest)?;
+        self.call("connect-start", &bytes).await
+    }
+
+    pub async fn connect_status(
+        &self,
+        request: &ConnectionStatusRequest,
+    ) -> Result<serde_json::Value, Error> {
+        let bytes = serde_json::to_vec(request).map_err(|_| Error::InvalidRequest)?;
+        self.call("connect-status", &bytes).await
+    }
+
+    pub async fn connect_complete(
+        &self,
+        request: &ConnectionCompleteRequest,
+    ) -> Result<serde_json::Value, Error> {
+        let bytes = serde_json::to_vec(request).map_err(|_| Error::InvalidRequest)?;
+        self.call("connect-complete", &bytes).await
+    }
+
+    pub async fn connect_list(&self) -> Result<serde_json::Value, Error> {
+        self.call("connect-list", &[]).await
+    }
+
+    pub async fn connect_approve(
+        &self,
+        approval: &ConnectionApproval,
+    ) -> Result<serde_json::Value, Error> {
+        let bytes = serde_json::to_vec(approval).map_err(|_| Error::InvalidRequest)?;
+        self.call("connect-approve", &bytes).await
+    }
+
+    pub async fn interpreter_list(&self) -> Result<serde_json::Value, Error> {
+        self.call("interpreter-list", &[]).await
+    }
+
+    pub async fn interpreter_describe(
+        &self,
+        provider: ProviderId,
+    ) -> Result<serde_json::Value, Error> {
+        self.call("interpreter-describe", &provider.0).await
+    }
+
+    pub async fn interpreter_register(
+        &self,
+        registration: &ProviderRegistration,
+    ) -> Result<serde_json::Value, Error> {
+        let bytes = serde_json::to_vec(registration).map_err(|_| Error::InvalidRequest)?;
+        self.call("interpreter-register", &bytes).await
+    }
+
+    pub async fn interpreter_approve(
+        &self,
+        provider: ProviderId,
+        replace: bool,
+    ) -> Result<serde_json::Value, Error> {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "provider_id": provider,
+            "replace": replace,
+        }))
+        .map_err(|_| Error::InvalidRequest)?;
+        self.call("interpreter-approve", &bytes).await
+    }
+
+    pub async fn interpreter_call(
+        &self,
+        request: &CallRequest,
+    ) -> Result<serde_json::Value, Error> {
+        let bytes = serde_json::to_vec(request).map_err(|_| Error::InvalidRequest)?;
+        self.call("interpreter-call", &bytes).await
+    }
+
+    pub async fn interpreter_cancel(
+        &self,
+        invocation: InvocationId,
+    ) -> Result<serde_json::Value, Error> {
+        self.call("interpreter-cancel", &invocation.0).await
+    }
+
+    pub async fn interpreter_ticket(
+        &self,
+        provider: ProviderId,
+    ) -> Result<serde_json::Value, Error> {
+        self.call("interpreter-ticket", &provider.0).await
+    }
+
     /// Read owner-only historical replication confirmations without contacting peers.
     /// An unconfirmed update may already have arrived through another node.
     pub async fn sync_status(
@@ -250,5 +330,42 @@ impl Client {
             _ => return Err(Error::InvalidResponse),
         };
         Ok(QueryPage { items, next })
+    }
+}
+
+/// A loopback App/Provider TLS endpoint with a pinned leaf certificate.
+pub(crate) struct PinnedEndpoint {
+    pub endpoint: SocketAddr,
+    pub certificate: Vec<u8>,
+    pub tls: Arc<ClientConfig>,
+}
+impl PinnedEndpoint {
+    pub(crate) fn new(info: &ConnectionInfo) -> Result<Self, Error> {
+        let endpoint: SocketAddr = info.endpoint.parse().map_err(|_| Error::InvalidDiscovery)?;
+        if info.version != 1
+            || !endpoint.ip().is_loopback()
+            || endpoint.port() == 0
+            || protocol::unhex::<32>(&info.cluster_id).is_err()
+            || protocol::unhex::<32>(&info.node_id).is_err()
+        {
+            return Err(Error::InvalidDiscovery);
+        }
+        let certificate = protocol::unhex_bytes(&info.certificate, 64 * 1024)
+            .map_err(|_| Error::InvalidDiscovery)?;
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(certificate.clone()))
+            .map_err(|_| Error::InvalidDiscovery)?;
+        let tls =
+            ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+                .with_safe_default_protocol_versions()
+                .map_err(|_| Error::InvalidDiscovery)?
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+        Ok(Self {
+            endpoint,
+            certificate,
+            tls: Arc::new(tls),
+        })
     }
 }

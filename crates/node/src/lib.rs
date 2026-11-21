@@ -2,9 +2,11 @@
 
 pub mod access;
 pub mod application;
+pub mod connect;
 pub mod export;
 pub mod https_peer;
 pub mod identity;
+pub mod interpreter;
 pub mod membership;
 pub mod membership_log;
 pub mod membership_state;
@@ -60,4 +62,36 @@ pub enum Error {
         #[source]
         reason: domain::Error,
     },
+    /// The host does not provide this optional storage capability.
+    Unsupported,
+    /// Another approved Provider already owns the requested name.
+    InterpreterNameConflict,
+    /// The registration is pending, superseded, or owned by another app.
+    InterpreterNotApproved,
+    /// The authenticated app does not own this Provider registration.
+    InterpreterProviderMismatch,
+    /// The approved Provider's app is no longer allowed or connected.
+    InterpreterUnavailable,
+    /// The node's bounded active-invocation capacity is full.
+    InterpreterCapacity,
+    /// The caller canceled its invocation.
+    InterpreterCancelled,
+    /// The materialized Provider input exceeds the contract limit.
+    InterpreterInputTooLarge,
+    /// The Provider's response did not satisfy the contract.
+    InterpreterInvalidResponse,
+    /// The Provider did not answer before the invocation deadline.
+    InterpreterTimeout,
+    /// No connection request matches this id or secret.
+    ConnectionNotFound,
+    /// The connection request expired before completion.
+    ConnectionExpired,
+    /// The connection request was already completed.
+    ConnectionCompleted,
+    /// The connection request is awaiting owner approval.
+    ConnectionPending,
+    /// The owner denied the connection request.
+    ConnectionDenied,
+    /// Too many pending connection requests on this node.
+    ConnectionCapacity,
 }

@@ -1,4 +1,12 @@
-export type Page = 'overview' | 'contents' | 'conflicts' | 'peers' | 'apps' | 'export';
+export type Page =
+  | 'overview'
+  | 'contents'
+  | 'conflicts'
+  | 'peers'
+  | 'apps'
+  | 'interpreters'
+  | 'connections'
+  | 'export';
 export type Field =
   | { type: 'body' }
   | { type: 'attribute'; namespace: string; key: string }
@@ -75,6 +83,9 @@ export type Filter = { type: 'all' } | { type: 'kinds'; kinds: string[] };
 export interface Grants {
   read: Filter | null;
   write: Filter | null;
+  call: boolean;
+  provide: boolean;
+  provide_names?: string[];
   manage_apps: boolean;
   manage_nodes: boolean;
 }
@@ -153,4 +164,49 @@ export interface SyncResult {
   downloaded: string;
   local_high: string;
   remote_high: string;
+}
+
+export type InterpreterStatus = 'pending' | 'approved' | 'superseded';
+export interface InterpreterProvider {
+  provider_id: string;
+  name: string;
+  contract_version: number;
+  status: InterpreterStatus;
+  connected: boolean;
+}
+export interface InterpreterList {
+  providers: InterpreterProvider[];
+}
+export interface InterpreterDescription extends InterpreterProvider {
+  input_schema: unknown;
+  output_schema: unknown;
+  default_query: { kinds: string[] } | null;
+}
+
+export type ConnectionStatus = 'pending' | 'approved' | 'denied' | 'completed' | 'expired';
+export interface ConnectionRequest {
+  connection_id: string;
+  name: string;
+  redirect_uri: string;
+  web_origin: string | null;
+  client_id: string | null;
+  status: ConnectionStatus;
+  grants: Grants;
+  provider: {
+    name: string;
+    contract_version: number;
+    input_schema: unknown;
+    output_schema: unknown;
+    default_query: { kinds: string[] } | null;
+  } | null;
+  provider_replace: boolean;
+  app_id: string | null;
+  provider_id: string | null;
+  created_at: string;
+  expires_at: string;
+  approved_at: string | null;
+  completed_at: string | null;
+}
+export interface ConnectionList {
+  connections: ConnectionRequest[];
 }

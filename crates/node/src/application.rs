@@ -2,7 +2,7 @@
 //! grants inside its storage transaction; tokens never grant read or write access.
 use crate::{
     Error,
-    access::{App, Credential, Grants, authenticate},
+    access::{App, Credential, Grants, authenticate, validate_grants},
     storage::{Store, Transaction, read_content_graph},
 };
 use harmion_domain::*;
@@ -122,6 +122,7 @@ pub fn issue_app(
     grants: Grants,
     expires_at: i64,
 ) -> Result<(AppId, Credential), Error> {
+    validate_grants(&grants)?;
     store.transaction(|tx| {
         let principal = authenticate(tx, credential, host.now_micros())?;
         if !principal.app.grants.manage_apps {
@@ -138,6 +139,7 @@ pub fn change_grants(
     grants: Grants,
     revoked: bool,
 ) -> Result<(), Error> {
+    validate_grants(&grants)?;
     store.transaction(|tx| {
         let principal = authenticate(tx, credential, now)?;
         if !principal.app.grants.manage_apps {
@@ -155,7 +157,8 @@ pub fn change_grants(
         }
         app.grants = grants;
         app.revoked = revoked;
-        tx.update_app(&app)
+        tx.update_app(&app)?;
+        crate::interpreter::registry::reconcile_grants(tx, app.id, &app.grants)
     })
 }
 

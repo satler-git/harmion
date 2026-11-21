@@ -1,10 +1,13 @@
 //! Versioned, canonical update records. Does not authenticate or accept updates.
 mod app;
 mod app_view;
+pub mod connect;
 pub mod https_peer;
+pub mod interpreter;
 mod json;
 pub mod membership;
 pub mod metrics;
+pub mod websocket;
 pub use json::decode_app_json;
 mod discovery;
 pub mod export;

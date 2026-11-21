@@ -75,6 +75,7 @@ async fn registration_v4_is_validated_signed_and_owner_pinned() {
         node_id: hex(&identity.node.0),
         certificate: hex(tls.certificate()),
         endpoint,
+        oauth_origin: None,
     };
     let client = Client::new(info, *admin.expose_bytes()).unwrap();
 

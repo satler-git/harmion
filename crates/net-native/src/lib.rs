@@ -1,6 +1,8 @@
 //! Native HTTP/TLS host adapters. Shared node semantics remain in harmion-node.
 pub mod app;
+mod connect;
 mod export;
+mod interpreter;
 pub mod iroh_peer;
 mod membership_sync;
 pub mod oauth_browser;
@@ -130,6 +132,7 @@ impl Host for SystemHost {
 /// only for synchronous work. No lock is held across a network await.
 pub struct SharedStore<S> {
     inner: Arc<Mutex<S>>,
+    pub(crate) interpreter: Arc<interpreter::Service>,
     sync: Arc<Mutex<RoundLocks>>,
     local_save: Arc<tokio::sync::Notify>,
     changes: tokio::sync::watch::Sender<()>,
@@ -139,6 +142,7 @@ impl<S> Clone for SharedStore<S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            interpreter: self.interpreter.clone(),
             sync: self.sync.clone(),
             local_save: self.local_save.clone(),
             changes: self.changes.clone(),
@@ -150,6 +154,7 @@ impl<S: Store + Send + 'static> SharedStore<S> {
     pub fn new(store: S) -> Self {
         Self {
             inner: Arc::new(Mutex::new(store)),
+            interpreter: Arc::new(interpreter::Service::new()),
             sync: Arc::new(Mutex::new(RoundLocks::new())),
             local_save: Arc::new(tokio::sync::Notify::new()),
             changes: tokio::sync::watch::Sender::new(()),
@@ -175,6 +180,26 @@ impl<S: Store + Send + 'static> SharedStore<S> {
             Ok(value)
         })
         .await
+    }
+
+    /// Re-evaluate live Provider sessions after any grant change. The node
+    /// transaction reconciles stored registrations; this closes the runtime
+    /// sessions and fails in-flight calls for names that are no longer allowed.
+    pub(crate) async fn notify_app_changed(
+        &self,
+        app: harmion_protocol::AppId,
+        grants: &harmion_node::access::Grants,
+        revoked: bool,
+    ) -> Result<(), Error> {
+        let snapshot = grants.clone();
+        let disallowed = self
+            .run(move |store| {
+                harmion_node::interpreter::registry::disallowed_providers(store, app, &snapshot)
+            })
+            .await?;
+        self.interpreter
+            .app_changed(app, grants, revoked, &disallowed);
+        Ok(())
     }
 
     pub(crate) fn round_lock(

@@ -22,6 +22,11 @@ impl Filter {
 pub struct Grants {
     pub read: Option<Filter>,
     pub write: Option<Filter>,
+    pub call: bool,
+    pub provide: bool,
+    /// Names explicitly pre-approved for Provide (OAuth `provide:NAME`).
+    /// Empty means the grant is not name-restricted.
+    pub provide_names: BTreeSet<String>,
     pub manage_apps: bool,
     pub manage_nodes: bool,
 }
@@ -30,12 +35,21 @@ impl Grants {
         Self {
             read: Some(Filter::All),
             write: Some(Filter::All),
+            call: true,
+            provide: true,
+            provide_names: BTreeSet::new(),
             manage_apps: true,
             manage_nodes: true,
         }
     }
     pub fn is_administrator(&self) -> bool {
-        *self == Self::administrator()
+        // Interpreter grants are independent of the owner-management baseline.
+        // Existing administrator rows migrated from earlier schemas must keep
+        // their kind-conflict and restore visibility.
+        self.read == Some(Filter::All)
+            && self.write == Some(Filter::All)
+            && self.manage_apps
+            && self.manage_nodes
     }
     pub fn can_read(&self, content: &Content) -> bool {
         self.read.as_ref().is_some_and(|f| f.matches(content))
@@ -48,6 +62,18 @@ impl Grants {
     pub fn can_write(&self, content: &Content) -> bool {
         self.write.as_ref().is_some_and(|f| f.matches(content))
     }
+    pub fn can_call(&self) -> bool {
+        self.call
+    }
+    pub fn can_provide(&self) -> bool {
+        self.provide
+    }
+    pub fn is_provider_name_preapproved(&self, name: &str) -> bool {
+        self.provide && self.provide_names.contains(name)
+    }
+    pub fn allows_provider_name(&self, name: &str) -> bool {
+        self.provide && (self.provide_names.is_empty() || self.provide_names.contains(name))
+    }
 }
 
 impl From<GrantSpec> for Grants {
@@ -59,6 +85,9 @@ impl From<GrantSpec> for Grants {
         Self {
             read: spec.read.map(filter),
             write: spec.write.map(filter),
+            call: spec.call,
+            provide: spec.provide,
+            provide_names: spec.provide_names.into_iter().collect(),
             manage_apps: spec.manage_apps,
             manage_nodes: spec.manage_nodes,
         }
@@ -76,6 +105,9 @@ impl From<Grants> for GrantSpec {
         Self {
             read: grants.read.map(filter),
             write: grants.write.map(filter),
+            call: grants.call,
+            provide: grants.provide,
+            provide_names: grants.provide_names.into_iter().collect(),
             manage_apps: grants.manage_apps,
             manage_nodes: grants.manage_nodes,
         }
@@ -152,4 +184,16 @@ pub fn permissions(
     now: i64,
 ) -> Result<Grants, Error> {
     store.transaction(|tx| Ok(authenticate(tx, credential, now)?.app.grants))
+}
+
+/// Validate grant values constructed outside a typed OAuth scope.
+pub fn validate_grants(grants: &Grants) -> Result<(), Error> {
+    if !grants.provide && !grants.provide_names.is_empty() {
+        return Err(Error::InvalidRequest);
+    }
+    for name in &grants.provide_names {
+        harmion_protocol::interpreter::validate_provider_name(name)
+            .map_err(|_| Error::InvalidRequest)?;
+    }
+    Ok(())
 }

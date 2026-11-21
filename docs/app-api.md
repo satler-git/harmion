@@ -1,6 +1,6 @@
 # App APIの契約
 
-更新日: 2026-11-20
+更新日: 2026-11-22
 
 現在のnative実装では、証明書を固定したloopback HTTPSの`POST /app/v1/{operation}`を使う。保存要求はHRQ-v1で、返却値は明示的なJSON view。App APIはHostを検査しOrigin付き要求を拒否する。ブラウザで行うOAuth認可には専用のHTTPS入口を使う。有効にしたノードのcapabilitiesは `oauth: true` と `oauth_origin` を返す。
 
@@ -159,11 +159,44 @@ Rust SDK は型付き `Client::sync_status(Option<UpdateId>)`、CLI は `sync-st
 
 ネイティブの管理者は `POST /app/v1/export` で固定時点の本文、属性・kind、競合候補、削除記録を取得できる。転送形式とCLI出力は [Export v1](../contracts/export-v1.md) を参照。
 
-Interpreterのcallは渡された入力を計算し、Query/Subscribeを暗黙に実行しない。デフォルトQueryとユーザー条件は通常ANDで絞り、置き換えは明示指定とする。提供元と呼び出し元の契約・型定義・エラー詳細は実装時に定める。
+## 5. Interpreter
 
-## 5. OAuthとローカル構成
+Interpreterのcallは渡された入力を計算し、Query/Subscribeを暗黙に実行しない。デフォルトQueryとユーザー条件は通常ANDで絞り、置き換えは明示指定とする。提供元と呼び出し元の契約・型定義・エラー詳細は[Interpreter v1](../contracts/interpreter-v1.md)に定める。
 
-各ノードがnative public clientを Authorization Code＋PKCE S256 で認可する。登録、grant、コード、トークンは発行ノードに保存する。管理権限はOS所有者のbootstrap経路で設定し、OAuthはReadとWriteを発行する。
+nativeのApp APIは次の操作を提供する。証明書固定のloopback HTTPSを使う。Interpreter操作はアプリ資格情報を必要とし、統合接続の開始・状態・完了だけは要求secretを資格情報とする。
+
+| 操作 | 権限 | 本文と応答 |
+|---|---|---|
+| `interpreter-list` | 認証済み | 本文なし。承認済みProvider（自分・管理者には未承認も）を返す。 |
+| `interpreter-describe` | 認証済み | 32バイトのprovider ID。スキーマ・デフォルトQuery・接続状態を返す。 |
+| `interpreter-register` | `provide` | 登録JSON。`provider_id`と`status`を返す。同名の別登録は承認まで共存する。 |
+| `interpreter-approve` | `manage_apps` | `{"provider_id":"hex","replace":bool}`。同名の承認済みProviderの明示置換だけを許す。 |
+| `interpreter-call` | `call` | Provider名、明示入力、固定したContentのIDと編集トークン、timeout。成功時は`invocation_id`・`status`・`data`・`display`。 |
+| `interpreter-cancel` | `call`（開始したアプリのみ） | 32バイトのinvocation ID。Providerへ通知し、待機中の呼び出しを409で終了する。 |
+| `interpreter-ticket` | `provide` | 32バイトのprovider ID（または`{"provider_id":"hex"}`）。ブラウザ用の単回ticketとOAuth originの`websocket_url`を返す。WebはOAuth originの`/connect/ticket`でaccess tokenから再発行できる。 |
+
+Providerは`GET /provider/v1/connect`へアプリ資格情報付きのloopback WebSocketを開き、`interpreter.attach`で接続する。ブラウザProviderは`interpreter-ticket`または統合接続の完了応答が返す`wss://.../provider/connect?ticket=...`を使う。ticketを失った場合やWebSocket接続に失敗した場合は、OAuth originの`POST /connect/ticket`へ`Authorization: Bearer <access token>`と`{"provider_id":"hex"}`を送って再発行する。ticketは30秒・単回・アプリごと8件・全体128件。ノード再起動でメモリ上のticketは失効する。ノードは現在の`provide`・`provide_names`と承認状態をDBで再検査する。callの本文は`get`/`query`で得た編集トークンが固定したスナップショットを使い、ProviderへトークンやRead権限を渡さない。Content入力は最大64件、呼び出し全体は2 MiB、`data`は1 MiB、`display.text`は64 KiBまで。timeoutは100〜30,000 ms（既定10,000 ms）。ノード全体32件・アプリごと8件の同時上限を持つ。
+
+未接続は503 `interpreter_unavailable`、タイムアウトは504 `interpreter_timeout`、キャンセルは409 `interpreter_cancelled`、Providerのアプリケーションエラーは200で`status:"error"`を返す。呼び出しは冪等ではなく、v1にrequest receiptはない。capabilitiesは`interpreter: true`と契約バージョン・上限を返す。
+
+grant JSONの`call`と`provide`、`provide_names`は追加フィールドで、false・空のときは従来どおり出力しない。`provide_names`を列挙したアプリが同じ名前のProviderを登録すると、所有者承認を待たずにapprovedになる。grant変更で外れた名前の登録はsupersededになる。`call`/`provide`はRead/Writeを含意せず、所有者の管理権限判定は従来のread/write/manageで維持する。
+
+Rust SDKは`Client::interpreter_list`・`interpreter_describe`・`interpreter_register`・`interpreter_approve`・`interpreter_call`・`interpreter_cancel`と、Provider用の`ProviderClient`を提供する。CLIは`interpreter-list`・`interpreter-describe`・`interpreter-register`・`interpreter-approve`・`interpreter-call`・`interpreter-cancel`を提供する。管理UIは一覧・定義表示・承認だけを行う。
+
+### 統合接続
+
+アプリの初回接続とProvider登録を、所有者の1回の承認にまとめる。詳細なJSONとエラーは[Interpreter v1 §6](../contracts/interpreter-v1.md#6-統合接続)に定める。nativeのApp APIでは`connect-start`・`connect-status`・`connect-complete`を資格情報なしで呼べる。要求secretが状態と完了を認可する。`connect-list`・`connect-approve`は`manage_apps`を必要とする管理操作。
+
+1. アプリが`connect-start`へアプリ名、loopback callback、任意の`web_origin`、PKCE challenge、state、grant、任意のProvider manifestを送る。応答の`connection_id`と`request_secret`を保持する。OAuth originが有効なら`verification_url`も返る。
+2. 所有者は管理UIの「接続」画面で内容を確認し、承認・拒否する。承認はOAuthクライアント作成、grant確定、Provider登録・承認を1つのDB transactionで行う。同名Providerの置換は所有者が明示的に選ぶ。
+3. アプリは`connect-status`をポーリングするか、Webアプリは`verification_url`をポップアップで開く。ヘルパーページは承認を`window.opener.postMessage`で通知するが、secretやトークンは渡さない。
+4. アプリは`connect-complete`へsecretとPKCE verifierを送り、access token・refresh token・Provider ticketを受け取る。完了は単回。応答を失った場合は要求を作り直す。Provider ticketだけを失った場合は、OAuth originの`/connect/ticket`へaccess tokenを提示して再発行できる。
+
+OAuth専用originでは同じ操作を`/connect/start`・`/connect/status`・`/connect/complete`として提供し、loopback originにだけCORSを許可する。認証情報・Cookieは使わない。ticket再発行だけは`/connect/ticket`で`Authorization: Bearer`を受け付ける。
+
+## 6. OAuthとローカル構成
+
+各ノードがnative public clientを Authorization Code＋PKCE S256 で認可する。登録、grant、コード、トークンは発行ノードに保存する。管理権限はOS所有者のbootstrap経路で設定し、OAuthはRead/Writeに加えてInterpreterの`call`と名前付き`provide`を発行できる。
 
 ### 登録と認可
 
@@ -175,7 +208,7 @@ Interpreterのcallは渡された入力を計算し、Query/Subscribeを暗黙�
 
 callbackには `http://127.0.0.1:PORT/PATH` や `http://[::1]:PORT/PATH` など、IPリテラルのloopback HTTPを使う。登録時と認可時でIP、パス、クエリを照合し、アプリはOSが選んだポートを認可時に指定できる。callbackのHTTP例外はRFC 8252に従う。認可、トークン交換、App APIはHTTPSで行う。
 
-scopeは空白区切りで `read:all`、`write:all`、`read:kind:BASE64URL`、`write:kind:BASE64URL` を指定する。`BASE64URL` はkind名のUTF-8をパディングなしで符号化する。kind集合には同じ操作のkind scopeを複数指定する。同じ操作のallとkindは排他的。grantは登録単位で、異なるscopeへの再承認は既存の資格情報を失効させる。管理者はApp APIの `change-grants` で縮小・失効できる。拡大には改めて所有者の承認を要する。
+scopeは空白区切りで `read:all`、`write:all`、`read:kind:BASE64URL`、`write:kind:BASE64URL`、`call`、`provide:BASE64URL`、`provide:all` を指定する。`BASE64URL` はkind名またはProvider名のUTF-8をパディングなしで符号化する。kind集合には同じ操作のkind scopeを複数指定する。同じ操作のallとkindは排他的。grantは登録単位で、異なるscopeへの再承認は既存の資格情報を失効させる。管理者はApp APIの `change-grants` で縮小・失効できる。拡大には改めて所有者の承認を要する。
 
 ### トークン
 
@@ -185,6 +218,6 @@ scopeは空白区切りで `read:all`、`write:all`、`read:kind:BASE64URL`、`w
 
 ブラウザ用HTTPSは `127.0.0.1` に限定した専用リスナーで、既存App・Peer用の証明書と分ける。所有者がノードで生成した専用CAを直接取得し、使うブラウザでWebサイト識別用に明示的に信頼する。CAはloopbackのIP制約と下位CAの禁止を持ち、署名鍵はサーバー証明書を1枚発行した後に破棄する。ノードに残るのは有効期間1年のサーバー証明書とその秘密鍵、および公開CA証明書。導入・更新手順は[native実行手順](native-quickstart.md#oauthを有効にする)を参照。
 
-認可サーバーはHostを検査し、承認操作には同一originと一時リンクを要求する。トークン交換はnativeアプリからのHTTPSリクエストで行う。アプリはトークンをOSで保護し、URLやログへ載せない。クライアント名とIDは登録を識別するための値であり、所有者は自分が開始した要求を確認する。同じOSユーザーとして動くプログラムは所有者と同じ信頼境界にある。動的クライアント登録、ブラウザからの直接App API、外部公開用の認可サーバーは今後の範囲とする。
+認可サーバーはHostを検査し、承認操作には同一originと一時リンクを要求する。トークン交換はnativeアプリからのHTTPSリクエストで行う。統合接続の開始・状態・完了は要求secretで認可し、loopback WebアプリにはCORSを許可する。アプリはトークンをOSで保護し、URLやログへ載せない。クライアント名とIDは登録を識別するための値であり、所有者は自分が開始した要求を確認する。同じOSユーザーとして動くプログラムは所有者と同じ信頼境界にある。統合接続によるクライアント作成は所有者承認時だけ行う。動的クライアント登録、ブラウザからの直接App API（統合接続を除く）、外部公開用の認可サーバーは今後の範囲とする。
 
 [RFC 6749](https://www.rfc-editor.org/rfc/rfc6749.html)、[RFC 7636](https://www.rfc-editor.org/rfc/rfc7636.html)、[RFC 8252](https://www.rfc-editor.org/rfc/rfc8252.html)、[RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html)。

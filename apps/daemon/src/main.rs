@@ -447,6 +447,7 @@ async fn run(path: &str, options: RunOptions) -> Result<()> {
         node_id: config.node_id.clone(),
         certificate: hex(tls.certificate()),
         endpoint: config.app_listen.to_string(),
+        oauth_origin: oauth_listener.as_ref().map(|(_, _, origin)| origin.clone()),
     };
     let mut registration = PeerRegistration {
         version: 3,

@@ -133,7 +133,7 @@ Architecture更新時の確認: 管理ツールは同じAppPrincipal・App API�
 
 [App API](app-api.md)へ取得・編集・競合解決・Subscribeの契約を整理した。再利用可能な編集トークンとrequest_idの冪等性、保存成功と通常表示の区別、Writeのみの受領結果を明記した。Subscribeは固定初期状態と以後の追跡を接続し、通知適用後にカーソルを保存する。
 
-この時点ではOAuthライブラリとローカルHTTP/WSを検討した。native実装では、専用CAを使うloopback HTTPSとした。現行の契約は[App APIのOAuth節](app-api.md#5-oauthとローカル構成)を参照。
+この時点ではOAuthライブラリとローカルHTTP/WSを検討した。native実装では、専用CAを使うloopback HTTPSとした。現行の契約は[App APIのOAuth節](app-api.md#6-oauthとローカル構成)を参照。
 
 Storage Backendは端末SQLite＋rusqlite、CloudflareはDOのSQL APIを選定した。共通化するのはdriverではなく保存契約。正本・索引・ローカル認可状態を分け、同期対象を明示する。
 
