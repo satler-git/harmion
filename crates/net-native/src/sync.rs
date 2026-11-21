@@ -1,6 +1,7 @@
 //! Fixed-high synchronization independent of HTTP and TLS framing.
-use crate::{Error, SharedStore};
+use crate::{Error, SharedStore, SystemHost};
 use harmion_domain::NodeId;
+use harmion_node::{application::Host, sync_status};
 use harmion_node::{
     membership::{self, Peer},
     replication,
@@ -61,7 +62,53 @@ pub async fn sync_once<S: Store + Send + 'static>(
     // A stalled remote must not hold up unrelated peers. Keep same-peer outgoing
     // rounds serialized; inbound receipt still uses durable transactional cursors.
     let lock = store.round_lock(node)?;
-    let _round = lock.lock().await;
+    // Outcome writes run on blocking workers and may outlive a cancelled caller.
+    // Keep serialization until those writes actually finish, not just until await
+    // is dropped, so an older outcome cannot overwrite a newer same-peer round.
+    let round = std::sync::Arc::new(lock.lock_owned().await);
+    let result = sync_round(store, transport, node, round.clone()).await;
+    if let Err(error) = &result {
+        let code = failure_code(error);
+        // Diagnostics must not replace the original synchronization failure.
+        // Once submitted, this write may commit even if the caller is cancelled.
+        if let Err(record_error) = store
+            .run(move |s| {
+                let _round = round;
+                s.transaction(|tx| {
+                    sync_status::record_failure(tx, node, SystemHost.now_micros(), code)
+                })
+            })
+            .await
+        {
+            tracing::debug!(%record_error, "could not persist sync failure");
+        }
+    }
+    result
+}
+
+/// Stable, bounded diagnostic codes; never persist transport messages or payloads.
+fn failure_code(error: &Error) -> &'static str {
+    use harmion_node::Error as N;
+    match error {
+        Error::Timeout => "timeout",
+        Error::Io(_) | Error::Transport(_) => "transport_error",
+        Error::InvalidResponse => "invalid_response",
+        Error::RemoteRejected { .. } | Error::Node(N::RecordRejected { .. }) => "record_rejected",
+        Error::Node(N::PeerRetired) => "peer_retired",
+        Error::Node(N::MembershipConflict) => "membership_conflict",
+        Error::Node(N::Unauthenticated) => "unauthenticated",
+        Error::Node(N::IdentityMismatch) => "identity_mismatch",
+        Error::Node(N::Storage(_) | N::CorruptLog) => "storage_error",
+        _ => "sync_error",
+    }
+}
+
+async fn sync_round<S: Store + Send + 'static>(
+    store: &SharedStore<S>,
+    transport: &(impl PeerTransport + ?Sized),
+    node: NodeId,
+    round: std::sync::Arc<tokio::sync::OwnedMutexGuard<()>>,
+) -> Result<SyncReport, Error> {
     let control = store
         .run(move |s| {
             s.transaction(|tx| {
@@ -212,6 +259,25 @@ pub async fn sync_once<S: Store + Send + 'static>(
             }
         }
     }
+    let observation = sync_status::Observation {
+        local_epoch: local.epoch,
+        acknowledged_through: upload,
+        remote_epoch: epoch,
+        remote_high,
+        received_through: download,
+        succeeded_at: SystemHost.now_micros(),
+    };
+    store
+        .run(move |s| {
+            let _round = round;
+            s.transaction(|tx| {
+                if membership::active_peer(tx, node)? != peer {
+                    return Err(harmion_node::Error::IdentityMismatch);
+                }
+                sync_status::record_success(tx, node, &observation)
+            })
+        })
+        .await?;
     tracing::debug!(
         uploaded = report.uploaded,
         downloaded = report.downloaded,
@@ -221,3 +287,6 @@ pub async fn sync_once<S: Store + Send + 'static>(
     );
     Ok(report)
 }
+
+#[cfg(test)]
+mod cancellation_tests;

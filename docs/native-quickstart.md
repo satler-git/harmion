@@ -29,6 +29,8 @@ target/debug/harmiond run ./node-b
 
 Appのloopback HTTPSは初回に空きポートを選び、以後同じポートで再起動する。`--app-listen IP:PORT`で変更可能。HTTPS Peerの検証経路は`--peer-transport https --peer-listen IP:PORT`で選ぶ。この経路だけはIP変更時に相手へ再登録が必要。既存node.jsonでuse_irohがない場合はHTTPSを維持する。承認済みNode IDの鍵を別方式の鍵へ差し替える操作は未実装で、切替後の再承認は拒否される。
 
+signed-HTTPSのPeerが所有者提供のprivate CA配下にいる場合は、そのCA証明書（DER）を`--signed-https-root /path/to/ca.der`で追加できる（繰り返し指定可）。WebPKIのchain・hostname・期限・server-auth検証は無効化されず、追加rootはtrust anchorとしてだけ使われる。通常のCloudflare公開証明書では不要。
+
 ```sh
 target/debug/harmion --node ./node-a approve ./node-b/peer.json
 target/debug/harmion --node ./node-b join ./node-a/peer.json
@@ -41,7 +43,11 @@ target/debug/harmion --node ./node-a sync NODE_B_ID
 
 `admin.secret`・`private-key.der`・`iroh.secret`は交換しない。管理資格情報は所有者bootstrap用で、OAuth access tokenではない。
 
-起動時にSQLite DBをschema v9へ移行する。旧DBの検索索引と項目の版参照は保持している更新から作る。Subscribeの変更履歴には移行後の更新を記録する。schema v4以前から移行した旧クラスタでは、起点にする1台だけを所有者が選び、`run DIR --bootstrap-cluster-root true`で共通の初期信頼証明を作る。他ノードは新しいv3登録でapprove/joinし直す。無署名だった既存Peerを、署名検証鍵を確認せず自動的に他端末へ紹介しない。データ・アプリ資格情報・データcursorは維持する。
+起動時にSQLite DBをschema v12へ移行する。同期状態の新しい観測領域は空で作り、過去の同期成功を推測で補わない。既知署名identityのpinは、現に有効な参加者とtrust rootだけを移行時にseedし、鍵を検証できない旧 peer は unknown のまま残す。旧DBの検索索引と項目の版参照は保持している更新から作る。Subscribeの変更履歴には移行後の更新を記録する。schema v4以前から移行した旧クラスタでは、起点にする1台だけを所有者が選び、`run DIR --bootstrap-cluster-root true`で共通の初期信頼証明を作る。他ノードは新しいv3登録でapprove/joinし直す。無署名だった既存Peerを、署名検証鍵を確認せず自動的に他端末へ紹介しない。データ・アプリ資格情報・データcursorは維持する。署名HTTPS（登録v4）は[署名HTTPSのdraft](../contracts/https-peer-v2-draft.md)を参照する。
+
+## Linuxのユーザーサービスとして運用する
+
+所有者が任意で導入するsystemdユーザーサービスと、release build・更新・停止したノードのバックアップ・新しいNode IDでの復元手順は [Linuxの日常運用](linux-service.md) を参照する。ビルドやテストだけでホストへサービスを登録・起動する処理はない。ログアウト後の常駐やlingerは別途所有者が判断する。
 
 ## OAuthを有効にする
 
@@ -88,6 +94,21 @@ target/debug/harmion --node ./node-a save ./node-a/edit-1.bin
 
 再送結果は元の保存時点の結果であり、現在値の取得とは異なる。credential失効・現在の権限も再検査する。
 
+## 保存更新の受領確認
+
+保存成功はこの端末への永続化を意味する。別端末への受領確認は、保存結果の `update_id` で別途取得する。
+
+```sh
+target/debug/harmion --node ./node-a sync-status
+target/debug/harmion --node ./node-a sync-status --update UPDATE_ID
+```
+
+所有者用の読み取り操作で、ネットワーク接続は行わない。Peer ごとの `last_success_at` は最後に完了した自発同期の確認時刻、`last_failure` は最新の試行が失敗した場合の分類と時刻。成功すると失敗表示を消し、失敗しても以前の受領確認は保持する。手動の `sync NODE_B_ID` と自動同期の両方が観測を更新する。
+
+`update_confirmed: true` はそのPeerで当該更新の受領を確認済み。`false` は観測位置が足りず未確認、`null` は更新未指定または有効な観測なし。どちらも未受領とは断定できない。`unconfirmed_local` は確認したログ位置に含まれない更新件数であり、中継更新も含む。初回同期で取得した更新は、次の同期まで未確認に残ることがある。
+
+初回・旧DB移行直後は観測なし。ノード再起動後も確認を保持するが、新しい Node ID でのバックアップ復元先には引き継がない。現在のオンライン状態、第三ノードへの伝播や将来のバックアップを保証する表示ではない。参加・保留状態は `members` も確認する。取得権限・各フィールドと失敗コードの詳細は [同期状態のAPI契約](app-api.md#所有者向け同期状態更新の受領確認) を参照。
+
 ## 競合と停止
 
 ノードの参加状態は`members`で確認する。通常の退役は有効な端末で`retire NODE_ID`を実行し、他端末へ同期する。承認元が退役しても、維持対象に入った別ノードの承認は残る。
@@ -119,7 +140,15 @@ target/debug/harmion --node ./recovery approve ./node-b/peer.json
 
 削除は`delete CONTENT_ID TOKEN REQUEST_FILE`。管理`inspect CONTENT_ID`で削除済みContentを取得でき、`keep`で削除競合の生存を選べる。`restore CONTENT_ID TOKEN BODY_FILE REQUEST_FILE`は既知フィールドを置換する操作で、このCLIコマンドは本文しか指定しないため、既知の属性・kindを消す。属性を含む復元はSDKのSaveRequestで全フィールドを明示する。
 
-自ノードからの自動同期は起動時、Contentの新規保存が確定したとき、および周期照合で行う。周期は標準30秒で、`--sync-seconds 1`等で変更できる。0では自ノードからの開始は手動操作に限り、認証済みPeerからの同期は受け付ける。到達不能なPeerは保存後も最大1時間のbackoffとjitterに従い、状態が変化した時だけstderrへ記録する。SIGINT/SIGTERMで接続taskと同期taskを停止する。再起動後もID・鍵・ログ・cursor・編集token・再送結果を保持する。
+自ノードからの自動同期は起動時、Contentの新規保存が確定したとき、および周期照合で行う。周期は標準30秒で、`--sync-seconds 1`等で変更できる。0では自ノードからの開始は手動操作に限り、復帰監視も起動しない。認証済みPeerからの同期は受け付ける。到達不能なPeerは通常は保存後も最大1時間のbackoffとjitterに従い、状態が変化した時だけstderrへ記録する。SIGINT/SIGTERMで接続taskと同期taskを停止する。再起動後もID・鍵・ログ・cursor・編集token・再送結果を保持する。
+
+### 復帰・ネットワーク変化による再試行
+
+自動同期が有効なら、Linuxでは `CLOCK_BOOTTIME` と `CLOCK_MONOTONIC` の差の増加から1秒以上のサスペンドを推定する。別途、実行間隔が5秒以上空いた場合はプロセス一時停止や実行遅延からの再開ヒントとして扱い、OSのサスペンドと区別する。時刻変更は検知に使わない。
+
+ネットワーク監視はローカルのインターフェース・アドレス・経路の状態変化を通知し、5秒ごとのローカル状態再確認も行う。irohはrelayの新たな接続も通知する。これらは到達可能になった保証ではなく再試行の合図。同じアドレスのまま上流だけが復旧する等、検知できない障害には周期照合を残す。監視を初期化できなくても同期を停止せず、30秒後に監視を再試行する。
+
+ヒントは2秒待って集約し、長いbackoff中でも最大30秒に1回の再試行波を許す。待機中の追加ヒントで期限を延ばし続けず、同期中に届いたヒントは次の1ラウンドに保持する。失敗回数はリセットせず、復旧していなければ通常のbackoffに戻る。同時4Peer・待機順の割り当て・認証と退役検査は維持する。`RUST_LOG=harmiond=debug` でヒントと再試行を確認できる。
 
 ## 管理 Web アプリ
 
@@ -177,6 +206,8 @@ target/debug/harmion --node ./node-a export ./harmion-export
 本文は `bodies/`、現在値・候補・削除記録は `metadata.jsonl` に入る。完了後に `manifest.json` が作られる。ディレクトリとファイルの読み書きは所有者に限定する。 [Export v1の形式](../contracts/export-v1.md)
 
 ## 検証
+
+Nixを使う場合は `nix develop` でRust（wasm32 std込み）・node/npm・Pythonが揃う。以下のコマンドはそのshell内で実行する。`flake.nix`・`flake.lock`はgitの追跡対象に含める必要がある。
 
 ```sh
 cargo test --workspace

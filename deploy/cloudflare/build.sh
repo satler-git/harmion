@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Build the deployable Worker: wasm bridge, generated bindings, and the admin UI.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "$here/../.." && pwd)"
+cd "$repo"
+cargo build -p harmion-worker --target wasm32-unknown-unknown --release --offline
+rm -rf "$here/src/pkg"
+wasm-bindgen --target web --out-dir "$here/src/pkg" --out-name harmion_worker_do \
+  target/wasm32-unknown-unknown/release/harmion_worker.wasm
+# The generated module imports the host boundary as a bare specifier; make it a
+# relative module so wrangler and workerd both resolve it from src/pkg.
+cp "$here/src/host-api.js" "$here/src/pkg/host-api.js"
+sed -i "s|from 'host-api'|from './host-api.js'|; s|from \"host-api\"|from \"./host-api.js\"|" "$here/src/pkg/harmion_worker_do.js"
+(cd apps/admin/ui && npm run build)
+rm -rf "$here/public"
+mkdir -p "$here/public"
+cp -R apps/admin/ui/dist/. "$here/public/"
+echo "built $here/public and $here/src/pkg"

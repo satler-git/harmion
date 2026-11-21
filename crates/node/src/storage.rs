@@ -95,6 +95,25 @@ pub trait Transaction: crate::oauth::Storage {
     /// Ordered prefix of (after, high] within the replication count and byte budgets.
     fn accepted_page(&mut self, after: u64, high: u64) -> Result<Vec<LogEntry>, Error>;
     fn accepted_record(&mut self, id: UpdateId) -> Result<Option<Record>, Error>;
+    fn accepted_sequence(&mut self, id: UpdateId) -> Result<Option<u64>, Error>;
+    /// Count records, not sequence distance: local acceptance logs may have holes.
+    fn accepted_count_after(&mut self, after: u64) -> Result<u64, Error>;
+    fn sync_observation(
+        &mut self,
+        node: NodeId,
+    ) -> Result<Option<crate::sync_status::Observation>, Error>;
+    fn put_sync_observation(
+        &mut self,
+        node: NodeId,
+        observation: &crate::sync_status::Observation,
+    ) -> Result<(), Error>;
+    fn sync_failure(&mut self, node: NodeId) -> Result<Option<crate::sync_status::Failure>, Error>;
+    /// None clears the last failure after a completed successful round.
+    fn put_sync_failure(
+        &mut self,
+        node: NodeId,
+        failure: Option<&crate::sync_status::Failure>,
+    ) -> Result<(), Error>;
     /// Includes deleted Content and uses the fixed acceptance position.
     fn export_content_ids(
         &mut self,
@@ -163,6 +182,18 @@ pub trait Transaction: crate::oauth::Storage {
     fn peer(&mut self, node: NodeId) -> Result<Option<Peer>, Error>;
     fn peers(&mut self) -> Result<Vec<Peer>, Error>;
     fn put_peer(&mut self, peer: &Peer) -> Result<(), Error>;
+    /// Durable authentication identity, separate from current membership grants.
+    fn known_peer_identity(
+        &mut self,
+        node: NodeId,
+    ) -> Result<Option<crate::identity::KnownIdentity>, Error>;
+    fn known_peer_identities(&mut self) -> Result<Vec<crate::identity::KnownIdentity>, Error>;
+    /// Insert or accept an identical pin. Implementations must reject overwriting
+    /// a pin and reusing a signing key or binding key for another Node ID.
+    fn put_known_identity(
+        &mut self,
+        identity: &crate::identity::KnownIdentity,
+    ) -> Result<(), Error>;
 }
 
 pub fn read_graph(tx: &mut dyn Transaction) -> Result<Graph, Error> {

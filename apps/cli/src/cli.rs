@@ -41,6 +41,12 @@ pub(crate) enum Command {
     Inspect { id: String },
     /// Synchronize with a peer.
     Sync { id: String },
+    /// Read historical replication confirmations (owner only; does not contact peers).
+    SyncStatus {
+        /// Check a saved update ID, not a Content ID. Unconfirmed does not mean absent.
+        #[arg(long, value_name = "UPDATE_ID")]
+        update: Option<String>,
+    },
     /// Retire a peer.
     Retire { id: String },
     /// Dismiss retirement evidence.
@@ -137,6 +143,7 @@ impl Command {
             Self::Conflicts { .. } => "conflicts",
             Self::Inspect { .. } => "inspect",
             Self::Sync { .. } => "sync",
+            Self::SyncStatus { .. } => "sync-status",
             Self::Retire { .. } => "retire",
             Self::DismissRetirement { .. } => "dismiss-retirement",
             Self::ConfirmRetirement { .. } => "confirm-retirement",
@@ -177,6 +184,18 @@ mod tests {
             panic!("expected resolve")
         };
         assert_eq!(versions, ["v2", "v1"]);
+    }
+
+    #[test]
+    fn sync_status_accepts_an_optional_update_id() {
+        let cli = parse(&["sync-status"]).unwrap();
+        assert!(matches!(cli.command, Command::SyncStatus { update: None }));
+        let cli = parse(&["sync-status", "--update", "update-id"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::SyncStatus { update: Some(id) } if id == "update-id")
+        );
+        assert!(parse(&["sync-status", "content-id"]).is_err());
+        assert!(parse(&["sync-status", "--update"]).is_err());
     }
 
     #[test]

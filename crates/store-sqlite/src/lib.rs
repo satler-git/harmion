@@ -1,11 +1,15 @@
 //! Native SQLite adapter for the node transaction port.
 
+mod challenge;
 mod changes;
 mod oauth;
 mod query;
 mod query_session;
+mod startup;
+mod sync_status;
 
 use harmion_domain::{ClusterId, ContentId, ContentSnapshot, NodeId, UpdateId};
+use harmion_node::identity::{KnownIdentity, Provenance};
 use harmion_node::membership::{Peer, PeerKey};
 use harmion_node::{
     Error,
@@ -60,6 +64,51 @@ fn verify_identity(sql: &Connection, identity: Identity) -> Result<(), Error> {
 pub struct SqliteStore {
     connection: Connection,
     identity: Identity,
+    auth_clock: harmion_node::https_peer::AuthClock,
+}
+
+/// Allow `key_kind` 2 (signed HTTPS) in the routing projection. SQLite cannot
+/// change a CHECK in place, and the sync-status tables carry a foreign key to
+/// `peers`, so the documented 12-step rebuild must run with foreign-key
+/// enforcement off, i.e. outside the schema transaction. It is idempotent: it
+/// only rebuilds a v4+ `peers` table whose CHECK still excludes kind 2.
+fn widen_peer_keys(connection: &mut Connection) -> Result<(), Error> {
+    let sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='peers'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db)?;
+    let Some(sql) = sql else {
+        return Ok(());
+    };
+    // A pre-v4 table has no key_kind; the v4 migration creates the widened form.
+    if !sql.contains("key_kind") || sql.contains("key_kind IN (0,1,2)") {
+        return Ok(());
+    }
+    connection
+        .execute_batch("PRAGMA foreign_keys=OFF;")
+        .map_err(db)?;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(db)?;
+    tx.execute_batch(
+        "CREATE TABLE peers_widened (node BLOB PRIMARY KEY CHECK(length(node)=32),
+            key_kind INTEGER NOT NULL CHECK(key_kind IN (0,1,2)), key_bytes BLOB NOT NULL,
+            endpoint TEXT NOT NULL, retired INTEGER NOT NULL CHECK(retired IN (0,1)),
+            UNIQUE(key_kind,key_bytes), CHECK(key_kind=0 OR length(key_bytes)=32));
+        INSERT INTO peers_widened SELECT node,key_kind,key_bytes,endpoint,retired FROM peers;
+        DROP TABLE peers;
+        ALTER TABLE peers_widened RENAME TO peers;",
+    )
+    .map_err(db)?;
+    tx.commit().map_err(db)?;
+    connection
+        .execute_batch("PRAGMA foreign_keys=ON;")
+        .map_err(db)?;
+    Ok(())
 }
 
 impl SqliteStore {
@@ -75,17 +124,20 @@ impl SqliteStore {
                 "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
             )
             .map_err(db)?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(db)?;
-        let version: i64 = tx
+        let version: i64 = connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(db)?;
-        if !(0..=9).contains(&version) {
+        if !(0..=12).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
         }
+        if version < 11 {
+            widen_peer_keys(&mut connection)?;
+        }
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db)?;
         if version == 0 {
             tx.execute_batch("
                 CREATE TABLE identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -142,7 +194,7 @@ impl SqliteStore {
             tx.execute_batch(
                 "ALTER TABLE peers RENAME TO peers_v3;
                 CREATE TABLE peers (node BLOB PRIMARY KEY CHECK(length(node)=32),
-                    key_kind INTEGER NOT NULL CHECK(key_kind IN (0,1)), key_bytes BLOB NOT NULL,
+                    key_kind INTEGER NOT NULL CHECK(key_kind IN (0,1,2)), key_bytes BLOB NOT NULL,
                     endpoint TEXT NOT NULL, retired INTEGER NOT NULL CHECK(retired IN (0,1)),
                     UNIQUE(key_kind,key_bytes), CHECK(key_kind=0 OR length(key_bytes)=32));
                 INSERT INTO peers SELECT node,0,certificate,endpoint,retired FROM peers_v3;
@@ -159,17 +211,6 @@ impl SqliteStore {
                 PRAGMA user_version=5;").map_err(db)?;
         }
         verify_identity(&tx, identity)?;
-        // Reject broken bytes/dependencies at startup; never salvage only the normal value.
-        let mut storage = SqlTransaction { sql: &tx, identity };
-        let graph = harmion_node::storage::read_graph(&mut storage)?;
-        harmion_node::membership_state::state(&mut storage)?;
-        if version < 6 {
-            query::initialize(&tx)?;
-        }
-        if version < 7 {
-            query::initialize_version_refs(&tx, &graph)?;
-            query_session::initialize(&tx)?;
-        }
         if version < 8 {
             changes::initialize(&tx)?;
         }
@@ -177,10 +218,64 @@ impl SqliteStore {
             oauth::initialize(&tx)?;
             tx.pragma_update(None, "user_version", 9).map_err(db)?;
         }
+        if version < 10 {
+            sync_status::initialize(&tx)?;
+            tx.pragma_update(None, "user_version", 10).map_err(db)?;
+        }
+        if version < 11 {
+            // Authentication identity pins are durable and independent of current
+            // membership grants. key_kind 2 (signed HTTPS) is the HMC v2 binding.
+            // A pin is never rewritten and a key is never reused for another node.
+            tx.execute_batch(
+                "CREATE TABLE identity_pins (
+                    node BLOB PRIMARY KEY CHECK(length(node)=32),
+                    signing_key BLOB NOT NULL UNIQUE CHECK(length(signing_key)=32),
+                    key_kind INTEGER NOT NULL CHECK(key_kind IN (0,1,2)),
+                    key_bytes BLOB NOT NULL,
+                    provenance_kind INTEGER NOT NULL CHECK(provenance_kind IN (0,1,2,3)),
+                    provenance_id BLOB,
+                    CHECK((provenance_kind=2 AND provenance_id IS NOT NULL AND length(provenance_id)=32)
+                       OR (provenance_kind IN (0,1,3) AND provenance_id IS NULL)),
+                    UNIQUE(key_kind,key_bytes));
+                PRAGMA user_version=11;",
+            )
+            .map_err(db)?;
+        }
+        if version < 12 {
+            challenge::initialize(&tx)?;
+        }
+        {
+            let mut storage = SqlTransaction { sql: &tx, identity };
+            // Reject broken bytes/dependencies at startup; never salvage only the
+            // normal value. Legacy migrations still need the complete graph to
+            // initialize the per-Content history and projection indexes.
+            let membership = if version < 7 {
+                let graph = harmion_node::storage::read_graph(&mut storage)?;
+                let membership = harmion_node::membership_state::state(&mut storage)?;
+                if version < 6 {
+                    query::initialize(&tx)?;
+                }
+                query::initialize_version_refs(&tx, &graph)?;
+                query_session::initialize(&tx)?;
+                membership
+            } else {
+                startup::verify_content_history(&tx, identity)?;
+                harmion_node::membership_state::state(&mut storage)?
+            };
+            if version < 11 {
+                // Seed only identities whose exact key/binding is validated from
+                // effective membership state; raw historical claims are not replayed.
+                harmion_node::identity::migrate(&mut storage, membership.as_ref())?;
+            }
+            if let Some(state) = &membership {
+                harmion_node::identity::verify_active_identities(&mut storage, state)?;
+            }
+        };
         tx.commit().map_err(db)?;
         Ok(Self {
             connection,
             identity,
+            auth_clock: Default::default(),
         })
     }
 
@@ -205,7 +300,7 @@ impl SqliteStore {
         let version: i64 = tx
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db)?;
-        if !(1..=9).contains(&version) {
+        if !(1..=12).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
@@ -477,11 +572,7 @@ impl Transaction for SqlTransaction<'_> {
         row.map(|(kind, bytes, endpoint, retired)| {
             Ok(Peer {
                 node,
-                key: match kind {
-                    0 => PeerKey::TlsCertificate(bytes),
-                    1 => PeerKey::Iroh(fixed(bytes)?),
-                    _ => return Err(Error::CorruptLog),
-                },
+                key: PeerKey::from_parts(kind.try_into().map_err(|_| Error::CorruptLog)?, bytes)?,
                 endpoint,
                 retired,
             })
@@ -504,13 +595,90 @@ impl Transaction for SqlTransaction<'_> {
             .collect()
     }
     fn put_peer(&mut self, peer: &Peer) -> Result<(), Error> {
-        let (kind, bytes): (i64, &[u8]) = match &peer.key {
-            PeerKey::TlsCertificate(bytes) => (0, bytes),
-            PeerKey::Iroh(bytes) => (1, bytes),
-        };
         self.sql.execute("INSERT INTO peers VALUES(?1,?2,?3,?4,?5) ON CONFLICT(node) DO UPDATE SET
             key_kind=excluded.key_kind,key_bytes=excluded.key_bytes,endpoint=excluded.endpoint,retired=excluded.retired",
-            params![peer.node.0, kind, bytes, peer.endpoint, peer.retired]).map_err(db)?;
+            params![peer.node.0, peer.key.kind(), peer.key.bytes(), peer.endpoint, peer.retired]).map_err(db)?;
+        Ok(())
+    }
+    fn known_peer_identity(&mut self, node: NodeId) -> Result<Option<KnownIdentity>, Error> {
+        let row = self
+            .sql
+            .query_row(
+                "SELECT signing_key,key_kind,key_bytes,provenance_kind,provenance_id
+                 FROM identity_pins WHERE node=?1",
+                [node.0],
+                |r| {
+                    Ok((
+                        r.get::<_, Vec<u8>>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, Option<Vec<u8>>>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(db)?;
+        row.map(|(signing_key, kind, bytes, provenance, evidence)| {
+            let evidence = evidence
+                .map(|id| <[u8; 32]>::try_from(id.as_slice()).map_err(|_| Error::CorruptLog))
+                .transpose()?;
+            Ok(KnownIdentity {
+                node,
+                signing_key: <[u8; 32]>::try_from(signing_key.as_slice())
+                    .map_err(|_| Error::CorruptLog)?,
+                key: PeerKey::from_parts(kind.try_into().map_err(|_| Error::CorruptLog)?, bytes)?,
+                provenance: Provenance::from_parts(
+                    provenance.try_into().map_err(|_| Error::CorruptLog)?,
+                    evidence,
+                )?,
+            })
+        })
+        .transpose()
+    }
+    fn known_peer_identities(&mut self) -> Result<Vec<KnownIdentity>, Error> {
+        let mut statement = self
+            .sql
+            .prepare("SELECT node FROM identity_pins ORDER BY node")
+            .map_err(db)?;
+        let nodes = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db)?;
+        nodes
+            .into_iter()
+            .map(|bytes| {
+                self.known_peer_identity(NodeId(fixed(bytes)?))?
+                    .ok_or(Error::CorruptLog)
+            })
+            .collect()
+    }
+    fn put_known_identity(&mut self, identity: &KnownIdentity) -> Result<(), Error> {
+        if let Some(existing) = self.known_peer_identity(identity.node)? {
+            if existing == *identity {
+                return Ok(());
+            }
+            return Err(Error::IdentityMismatch);
+        }
+        for existing in self.known_peer_identities()? {
+            if existing.signing_key == identity.signing_key || existing.key == identity.key {
+                return Err(Error::IdentityMismatch);
+            }
+        }
+        self.sql
+            .execute(
+                "INSERT INTO identity_pins VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    identity.node.0,
+                    identity.signing_key,
+                    identity.key.kind(),
+                    identity.key.bytes(),
+                    identity.provenance.kind(),
+                    identity.provenance.certificate(),
+                ],
+            )
+            .map_err(db)?;
         Ok(())
     }
     fn identity(&self) -> Identity {
@@ -592,6 +760,55 @@ impl Transaction for SqlTransaction<'_> {
                 harmion_protocol::MAX_RECORD_BYTES as i64,
             ],
         )
+    }
+    fn accepted_sequence(&mut self, id: UpdateId) -> Result<Option<u64>, Error> {
+        self.sql
+            .query_row(
+                "SELECT seq FROM accept_log WHERE update_id=?1",
+                [id.0],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(db)?
+            .map(|value| value.try_into().map_err(|_| Error::CorruptLog))
+            .transpose()
+    }
+    fn accepted_count_after(&mut self, after: u64) -> Result<u64, Error> {
+        self.sql
+            .query_row(
+                "SELECT COUNT(*) FROM accept_log WHERE seq>?1",
+                [seq(after)?],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(db)?
+            .try_into()
+            .map_err(|_| Error::CorruptLog)
+    }
+    fn sync_observation(
+        &mut self,
+        node: NodeId,
+    ) -> Result<Option<harmion_node::sync_status::Observation>, Error> {
+        self.read_sync_observation(node)
+    }
+    fn put_sync_observation(
+        &mut self,
+        node: NodeId,
+        observation: &harmion_node::sync_status::Observation,
+    ) -> Result<(), Error> {
+        self.write_sync_observation(node, observation)
+    }
+    fn sync_failure(
+        &mut self,
+        node: NodeId,
+    ) -> Result<Option<harmion_node::sync_status::Failure>, Error> {
+        self.read_sync_failure(node)
+    }
+    fn put_sync_failure(
+        &mut self,
+        node: NodeId,
+        failure: Option<&harmion_node::sync_status::Failure>,
+    ) -> Result<(), Error> {
+        self.write_sync_failure(node, failure)
     }
     fn accepted_record(&mut self, id: UpdateId) -> Result<Option<Record>, Error> {
         Ok(self

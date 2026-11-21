@@ -14,6 +14,10 @@ pub type CertificateId = [u8; 32];
 pub enum Binding {
     Https(Vec<u8>),
     Iroh([u8; 32]),
+    /// HMC v2 only. Carries the exact node signing public key, which must equal
+    /// `Member.signing_key`. Binding uniqueness compares this key, never just the
+    /// transport discriminant.
+    SignedHttps([u8; 32]),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,10 +53,20 @@ pub struct Statement {
 }
 
 impl Statement {
+    /// HMC v2 is used only for an Admit carrying the explicit `SignedHttps`
+    /// binding. Retire and Dismiss keep byte-identical v1 encodings; the version
+    /// is not a timestamp and carries no ordering meaning.
+    pub fn version(&self) -> u32 {
+        match &self.action {
+            Action::Admit(member) if matches!(member.binding, Binding::SignedHttps(_)) => 2,
+            _ => 1,
+        }
+    }
+
     pub fn signing_bytes(&self) -> Result<Vec<u8>, CodecError> {
         let mut e = Encoder::with_limit(MAX_CERTIFICATE_BYTES - 64);
         e.raw(b"HMC\0")?;
-        e.raw(&1u32.to_be_bytes())?;
+        e.raw(&self.version().to_be_bytes())?;
         e.raw(&self.cluster.0)?;
         e.raw(&self.issuer.0)?;
         e.raw(&self.signing_key)?;
@@ -83,6 +97,15 @@ impl Statement {
                     }
                     Binding::Iroh(key) => {
                         e.tag(1)?;
+                        e.raw(key)?;
+                    }
+                    Binding::SignedHttps(key) => {
+                        // The typed binding repeats the membership signing key
+                        // explicitly; it is not a second requester-chosen credential.
+                        if *key != member.signing_key {
+                            return Err(CodecError::InvalidFieldValue);
+                        }
+                        e.tag(2)?;
                         e.raw(key)?;
                     }
                 }
@@ -129,7 +152,7 @@ impl Certificate {
             return Err(CodecError::BadMagic);
         }
         let version = d.u32()?;
-        if version != 1 {
+        if version != 1 && version != 2 {
             return Err(CodecError::UnsupportedVersion(version));
         }
         let cluster = ClusterId(d.fixed()?);
@@ -155,15 +178,22 @@ impl Certificate {
             0 => {
                 let node = NodeId(d.fixed()?);
                 let signing_key = d.fixed()?;
-                let binding = match d.tag()? {
-                    0 => {
+                let binding = match (version, d.tag()?) {
+                    (1, 0) => {
                         let len = d.u32()? as usize;
                         if len == 0 || len > 65536 {
                             return Err(CodecError::TooLarge);
                         }
                         Binding::Https(d.raw(len)?.to_vec())
                     }
-                    1 => Binding::Iroh(d.fixed()?),
+                    (1, 1) => Binding::Iroh(d.fixed()?),
+                    (2, 2) => {
+                        let key = d.fixed()?;
+                        if key != signing_key {
+                            return Err(CodecError::InvalidFieldValue);
+                        }
+                        Binding::SignedHttps(key)
+                    }
                     _ => return Err(CodecError::InvalidTag),
                 };
                 let len = d.u32()? as usize;

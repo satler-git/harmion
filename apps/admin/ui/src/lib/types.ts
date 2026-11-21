@@ -68,7 +68,8 @@ export interface Registration {
   cluster_root?: string;
   binding:
     | { transport: 'iroh'; endpoint_id: string; relay_url: string | null }
-    | { transport: 'https'; certificate: string; endpoint: string };
+    | { transport: 'https'; certificate: string; endpoint: string }
+    | { transport: 'signed_https'; origin: string; signing_key?: string };
 }
 export type Filter = { type: 'all' } | { type: 'kinds'; kinds: string[] };
 export interface Grants {
@@ -82,19 +83,52 @@ export interface Members {
   pending_retirements: { certificate_id: string; issuer: string; target: string }[];
   confirmed_certificates: number;
 }
+export interface Capabilities {
+  mode: 'native' | 'worker';
+  read_only: boolean;
+  sections?: Partial<Record<Page, boolean>>;
+  operations?: {
+    peer_approve?: boolean;
+    peer_join?: boolean;
+    sync?: boolean;
+    provision?: boolean;
+  };
+  auth?: { access?: boolean; bearer?: boolean };
+  [key: string]: unknown;
+}
+export interface WorkerPeerBinding {
+  transport: 'https' | 'iroh' | 'signed_https';
+  endpoint?: string;
+  relay_url?: string;
+  origin?: string;
+  certificate?: string;
+  endpoint_id?: string;
+  signing_key?: string;
+}
+export interface WorkerPeer {
+  node_id: string;
+  retired: boolean;
+  pinned: boolean;
+  pin: { signing_key: string; provenance: string } | null;
+  binding: WorkerPeerBinding;
+}
 export interface Overview {
   identity: Registration;
-  permissions: Grants;
-  capabilities: { oauth: boolean; oauth_origin: string | null; [key: string]: unknown };
+  permissions: Grants | null;
+  capabilities: Capabilities & { oauth?: boolean; oauth_origin?: string | null };
   metrics: {
     contents: string;
     visible_contents: string;
     accepted_updates: string;
     record_bytes: string;
     active_apps: string;
-  };
+  } | null;
   members: Members;
-  peer_transfer: string;
+  peer_transfer: string | null;
+  mode?: 'native' | 'worker';
+  configured?: boolean;
+  peers?: WorkerPeer[];
+  sync_status?: unknown;
 }
 export interface PeerPreview {
   ticket: string;

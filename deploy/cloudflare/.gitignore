@@ -1,0 +1,4 @@
+src/pkg/
+public/
+node_modules/
+.wrangler/

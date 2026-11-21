@@ -1,9 +1,9 @@
-import type { Edit, Save } from './types';
+import type { Capabilities, Edit, Save } from './types';
 export class ApiError extends Error {
   constructor(public status: number) {
     const messages: Record<number, string> = {
       400: '入力の形式、対象のノード、または要求の有効性を確認してください。',
-      401: '所有者セッションが終了しました。管理アプリを再起動して新しいリンクを開いてください。',
+      401: '認証が無効か、所有者セッションが終了しています。管理画面を開き直してください。',
       403: 'この操作に必要な権限がありません。',
       404: '対象が見つかりません。',
       409: '状態が変化したか、出力先が既に存在します。最新の状態を確認してください。',
@@ -16,7 +16,28 @@ export class ApiError extends Error {
     super(messages[status] ?? `処理に失敗しました（HTTP ${status}）。`);
   }
 }
-export const session = $state({ token: '', expiresAt: 0, ended: false });
+export const session = $state({
+  token: '',
+  expiresAt: 0,
+  ended: false,
+  mode: 'native' as 'native' | 'worker',
+});
+export const workerAdmin = $state({ capabilities: null as Capabilities | null });
+const MARKER = (window as unknown as { __HARMION_ADMIN_MODE__?: string }).__HARMION_ADMIN_MODE__;
+// A Worker requires a bearer (401) even for capabilities; the native admin
+// server answers 404. This distinguishes the two modes without an
+// unauthenticated endpoint or an injected HTML marker.
+export async function detectMode(): Promise<'native' | 'worker'> {
+  if (MARKER === 'worker') return 'worker';
+  try {
+    await api('/capabilities', {});
+    return 'worker';
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) return 'worker';
+  }
+  return 'native';
+}
+
 export async function api<T>(path: string, body: unknown): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (session.token) headers.Authorization = 'Bearer ' + session.token;
@@ -29,7 +50,7 @@ export async function api<T>(path: string, body: unknown): Promise<T> {
       body: JSON.stringify(body),
     });
   } catch {
-    throw new Error('管理アプリに接続できません。プロセスの起動状態を確認してください。');
+    throw new Error('管理画面に接続できません。ネットワークと認証情報を確認してください。');
   }
   if (response.status === 401 && session.token) {
     session.token = '';
@@ -48,12 +69,49 @@ export async function connect() {
   return true;
 }
 export async function endSession() {
+  if (session.mode === 'worker') {
+    sessionStorage.removeItem('harmion-admin-token');
+    session.token = '';
+    session.ended = true;
+    return;
+  }
   try {
     await api('/session/end', {});
   } finally {
     session.token = '';
     session.ended = true;
   }
+}
+
+// Worker mode: the host injects window.__HARMION_ADMIN_MODE__ = "worker" and
+// requires a deployment-issued bearer in addition to Cloudflare Access.
+export async function loadCapabilities(): Promise<Capabilities | null> {
+  try {
+    const value = await api<Capabilities>('/capabilities', {});
+    workerAdmin.capabilities = value;
+    return value;
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 400)) {
+      workerAdmin.capabilities = null;
+      return null;
+    }
+    throw error;
+  }
+}
+export async function signInWorker(token: string) {
+  session.token = token.trim();
+  session.mode = 'worker';
+  try {
+    const value = await loadCapabilities();
+    if (!value) throw new Error('このWorkerは管理APIを提供していません。');
+    sessionStorage.setItem('harmion-admin-token', session.token);
+  } catch (error) {
+    session.token = '';
+    throw error;
+  }
+}
+export function restoreWorkerSession(): string {
+  return sessionStorage.getItem('harmion-admin-token') ?? '';
 }
 export function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : '処理に失敗しました。';

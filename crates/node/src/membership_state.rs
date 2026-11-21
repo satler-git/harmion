@@ -19,6 +19,11 @@ impl MembershipSigner {
     pub fn public_key(&self) -> [u8; 32] {
         self.0.verifying_key().to_bytes()
     }
+    /// Crate-internal access for the constrained typed signing operations in
+    /// [`crate::https_peer`]; never exposed outside the crate.
+    pub(crate) fn key(&self) -> &SigningKey {
+        &self.0
+    }
     pub fn sign(&self, statement: Statement) -> Result<Certificate, Error> {
         if statement.signing_key != self.public_key() {
             return Err(Error::IdentityMismatch);
@@ -315,6 +320,22 @@ pub fn require_active(state: &Membership, node: NodeId) -> Result<&Member, Error
     }
 }
 
+/// Local and remote must both be Active, and the routing projection must agree
+/// with the effective binding. Returns the effective member for identity checks.
+pub fn active_member(tx: &mut dyn Transaction, node: NodeId) -> Result<Member, Error> {
+    let state = state(tx)?.ok_or(Error::Unauthenticated)?;
+    require_active(&state, tx.identity().node)?;
+    let member = require_active(&state, node)?.clone();
+    let peer = tx.peer(node)?.ok_or(Error::Unauthenticated)?;
+    if peer.retired {
+        return Err(Error::PeerRetired);
+    }
+    if as_peer(&member).key != peer.key {
+        return Err(Error::IdentityMismatch);
+    }
+    Ok(member)
+}
+
 pub fn as_peer(member: &Member) -> Peer {
     Peer {
         node: member.node,
@@ -323,10 +344,83 @@ pub fn as_peer(member: &Member) -> Peer {
                 PeerKey::TlsCertificate(bytes.clone())
             }
             harmion_protocol::membership::Binding::Iroh(key) => PeerKey::Iroh(*key),
+            harmion_protocol::membership::Binding::SignedHttps(key) => PeerKey::SignedHttps(*key),
         },
         endpoint: member.endpoint.clone(),
         retired: false,
     }
+}
+
+/// Pin the exact signing key and binding of every effectively Active remote
+/// member in the same transaction that accepts the admission. An existing pin is
+/// never overwritten; an explicit owner pin inserted earlier is preserved.
+fn pin_active_identities(tx: &mut dyn Transaction, membership: &Membership) -> Result<(), Error> {
+    let root = tx.membership_root()?;
+    let recovery_roots = tx.recovery_roots()?;
+    let root_id = root.as_ref().map(|root| root.id());
+    let recovery: BTreeSet<CertificateId> = recovery_roots.iter().map(|root| root.id()).collect();
+    let entries = tx.membership_entries()?;
+    for (node, status) in &membership.nodes {
+        let Status::Active(member) = status else {
+            continue;
+        };
+        if *node == tx.identity().node {
+            continue;
+        }
+        let certificate = entries
+            .iter()
+            .filter(|entry| membership.confirmed.contains(&entry.record.id()))
+            .find_map(|entry| match &entry.record.statement().action {
+                Action::Admit(candidate)
+                    if candidate.node == member.node
+                        && candidate.signing_key == member.signing_key
+                        && candidate.binding == member.binding =>
+                {
+                    Some(entry.record.id())
+                }
+                _ => None,
+            });
+        let provenance = match certificate {
+            Some(certificate) if Some(certificate) == root_id => {
+                crate::identity::Provenance::OwnerRegistration
+            }
+            Some(certificate) if recovery.contains(&certificate) => {
+                crate::identity::Provenance::OwnerRecovery
+            }
+            Some(certificate) => crate::identity::Provenance::AcceptedAdmission(certificate),
+            // A trust anchor can be effective from durable root state alone.
+            None if anchor_matches(root.as_ref(), member) => {
+                crate::identity::Provenance::OwnerRegistration
+            }
+            None if recovery_roots
+                .iter()
+                .any(|root| anchor_matches(Some(root), member)) =>
+            {
+                crate::identity::Provenance::OwnerRecovery
+            }
+            None => return Err(Error::CorruptLog),
+        };
+        crate::identity::pin(
+            tx,
+            member.node,
+            member.signing_key,
+            as_peer(member).key,
+            provenance,
+        )?;
+    }
+    Ok(())
+}
+
+fn anchor_matches(certificate: Option<&Certificate>, member: &Member) -> bool {
+    certificate.is_some_and(|certificate| {
+        matches!(
+            &certificate.statement().action,
+            Action::Admit(anchor)
+                if anchor.node == member.node
+                    && anchor.signing_key == member.signing_key
+                    && anchor.binding == member.binding
+        )
+    })
 }
 
 /// The peer table is a routing projection; certificates remain the authority.
@@ -336,6 +430,7 @@ pub fn apply(tx: &mut dyn Transaction, records: &[Certificate]) -> Result<Member
         tx.append_membership(certificate)?;
     }
     let result = state(tx)?.ok_or(Error::InvalidRequest)?;
+    pin_active_identities(tx, &result)?;
     for status in result.nodes.values() {
         if let Status::Active(member) = status {
             if member.node == tx.identity().node {
@@ -461,6 +556,17 @@ pub fn join(
         }
         tx.set_membership_root(&root)?;
         tx.append_membership(&root)?;
+        // The owner verified this registration out of band; pin both the trust
+        // anchor and the explicitly supplied contact identity.
+        for verified in [anchor, &contact] {
+            crate::identity::pin(
+                tx,
+                verified.node,
+                verified.signing_key,
+                as_peer(verified).key,
+                crate::identity::Provenance::OwnerRegistration,
+            )?;
+        }
         if recovery {
             tx.insert_recovery_root(&local)?;
         }
@@ -537,6 +643,13 @@ pub fn trust_recovery_peer(
         {
             return Err(Error::InvalidRequest);
         }
+        crate::identity::pin(
+            tx,
+            member.node,
+            member.signing_key,
+            as_peer(&member).key,
+            crate::identity::Provenance::OwnerRecovery,
+        )?;
         let certificate = signer.sign(Statement {
             cluster,
             issuer: tx.identity().node,
@@ -573,6 +686,15 @@ pub fn approve(
         {
             return Err(Error::IdentityMismatch);
         }
+        // Explicit owner registration pins possession before the signed admission;
+        // `apply` accepts the identical pin and never rewrites it.
+        crate::identity::pin(
+            tx,
+            member.node,
+            member.signing_key,
+            peer.key.clone(),
+            crate::identity::Provenance::OwnerRegistration,
+        )?;
         let certificate = signer.sign(Statement {
             cluster,
             issuer: tx.identity().node,

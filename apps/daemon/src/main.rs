@@ -41,6 +41,8 @@ enum DaemonError {
     MissingSyncTask,
     #[error("{0} stopped unexpectedly")]
     ServiceStopped(&'static str),
+    #[error("invalid signed-HTTPS trust root")]
+    InvalidTrustRoot,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -196,15 +198,36 @@ struct SyncSchedule {
     retries: BTreeMap<NodeId, (u32, Instant)>,
     inflight: BTreeSet<NodeId>,
     pending_saves: BTreeSet<NodeId>,
+    pending_recovery: BTreeSet<NodeId>,
+    recovery_due: Option<Instant>,
+    last_recovery: Option<Instant>,
     ready: VecDeque<NodeId>,
 }
 
 impl SyncSchedule {
+    /// A hint is not proof of connectivity. Coalesce it, allow interfaces two
+    /// seconds to settle, and admit at most one backoff-bypassing wave per 30s.
+    /// Preserve failure counts so a failed recovery attempt resumes backoff.
+    fn request_recovery(&mut self, now: Instant) {
+        let due = self
+            .last_recovery
+            .map_or(now + Duration::from_secs(2), |last| {
+                (last + Duration::from_secs(30)).max(now + Duration::from_secs(2))
+            });
+        self.recovery_due.get_or_insert(due);
+    }
+
     fn start_ready(&mut self, peers: BTreeSet<NodeId>, saved: bool, now: Instant) -> Vec<NodeId> {
         const MAX_ROUNDS: usize = 4;
         self.retries.retain(|node, _| peers.contains(node));
         self.pending_saves.retain(|node| peers.contains(node));
+        self.pending_recovery.retain(|node| peers.contains(node));
         self.ready.retain(|node| peers.contains(node));
+        if self.recovery_due.is_some_and(|due| due <= now) {
+            self.pending_recovery.extend(&peers);
+            self.last_recovery = Some(now);
+            self.recovery_due = None;
+        }
         if saved {
             self.pending_saves.extend(&peers);
         }
@@ -214,7 +237,9 @@ impl SyncSchedule {
             if self.inflight.contains(&node)
                 || self.ready.contains(&node)
                 || self.retries.get(&node).is_some_and(|(failures, next)| {
-                    *next > now && (*failures != 0 || !self.pending_saves.contains(&node))
+                    *next > now
+                        && !self.pending_recovery.contains(&node)
+                        && (*failures != 0 || !self.pending_saves.contains(&node))
                 })
             {
                 continue;
@@ -227,6 +252,7 @@ impl SyncSchedule {
             self.inflight.insert(*node);
             // A later save can schedule a follow-up to this fixed-high round.
             self.pending_saves.remove(node);
+            self.pending_recovery.remove(node);
         }
         starting
     }
@@ -241,6 +267,7 @@ async fn automatic_sync(
     store: SharedStore<SqliteStore>,
     transport: Arc<NativeTransport>,
     seconds: u64,
+    mut recovery: watch::Receiver<Option<harmion_net_native::recovery::Reason>>,
 ) -> Result<()> {
     let base = Duration::from_secs(seconds);
     let mut schedule = SyncSchedule::default();
@@ -291,6 +318,14 @@ async fn automatic_sync(
                 schedule.complete(node, failed, Instant::now() + delay + Duration::from_millis(jitter));
             },
             _ = store.local_save_notified() => local_save = true,
+            changed = recovery.changed() => {
+                if changed.is_err() {
+                    return Err(DaemonError::ServiceStopped("recovery monitor").into());
+                }
+                let reason = *recovery.borrow_and_update();
+                tracing::debug!(?reason, "recovery hint; scheduling bounded sync retry");
+                schedule.request_recovery(Instant::now());
+            },
             _=tokio::time::sleep(base.min(Duration::from_secs(1))) => {},
         }
     }
@@ -442,6 +477,7 @@ async fn run(path: &str, options: RunOptions) -> Result<()> {
         endpoint: match &registration.binding {
             PeerBinding::Https { endpoint, .. } => endpoint.clone(),
             PeerBinding::Iroh { relay_url, .. } => relay_url.clone().unwrap_or_default(),
+            PeerBinding::SignedHttps { origin } => origin.clone(),
         },
     };
     let signer = membership_signer.clone();
@@ -468,12 +504,24 @@ async fn run(path: &str, options: RunOptions) -> Result<()> {
     } else {
         None
     };
+    let trust_roots = options
+        .signed_https_roots
+        .iter()
+        .map(|path| {
+            let bytes = std::fs::read(path).map_err(|_| DaemonError::InvalidTrustRoot)?;
+            if bytes.is_empty() || bytes.len() > 65536 {
+                return Err(DaemonError::InvalidTrustRoot);
+            }
+            Ok(bytes)
+        })
+        .collect::<std::result::Result<Vec<_>, DaemonError>>()?;
     let transport = Arc::new(NativeTransport {
         membership_signer: Some(membership_signer),
         tls: tls.clone(),
         iroh: iroh_endpoint
             .clone()
             .map(|endpoint| iroh_peer::IrohTransport { endpoint }),
+        signed_https_roots: trust_roots,
     });
     tasks.spawn(app::serve_with_transport(
         app_listener,
@@ -490,7 +538,13 @@ async fn run(path: &str, options: RunOptions) -> Result<()> {
     }
     let mut background = tokio::task::JoinSet::new();
     if config.sync_seconds != 0 {
-        background.spawn(automatic_sync(store, transport, config.sync_seconds));
+        let (recovery, hints) = watch::channel(None);
+        let endpoint = iroh_endpoint.clone();
+        background.spawn(async move {
+            harmion_net_native::recovery::monitor(recovery, endpoint).await;
+            Ok(())
+        });
+        background.spawn(automatic_sync(store, transport, config.sync_seconds, hints));
     }
     println!(
         "{}",
@@ -565,6 +619,115 @@ mod tests {
 
         schedule.complete(b, 0, periodic_due);
         assert_eq!(schedule.start_ready(peers, true, now), [a]);
+    }
+
+    #[test]
+    fn recovery_bypasses_backoff_once_after_settling_and_preserves_failures() {
+        let node = NodeId([1; 32]);
+        let peers = BTreeSet::from([node]);
+        let now = Instant::now();
+        let mut schedule = SyncSchedule::default();
+        assert_eq!(schedule.start_ready(peers.clone(), false, now), [node]);
+        schedule.complete(node, 4, now + Duration::from_secs(3600));
+        schedule.request_recovery(now);
+        assert!(
+            schedule
+                .start_ready(peers.clone(), false, now + Duration::from_secs(1))
+                .is_empty()
+        );
+        assert_eq!(
+            schedule.start_ready(peers.clone(), false, now + Duration::from_secs(2)),
+            [node]
+        );
+        assert_eq!(schedule.retries[&node].0, 4);
+        schedule.complete(node, 5, now + Duration::from_secs(3600));
+        assert!(
+            schedule
+                .start_ready(peers, true, now + Duration::from_secs(3))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn recovery_during_an_inflight_round_is_retained_for_one_followup() {
+        let node = NodeId([1; 32]);
+        let peers = BTreeSet::from([node]);
+        let now = Instant::now();
+        let mut schedule = SyncSchedule::default();
+        assert_eq!(schedule.start_ready(peers.clone(), false, now), [node]);
+        schedule.request_recovery(now);
+        assert!(
+            schedule
+                .start_ready(peers.clone(), false, now + Duration::from_secs(2))
+                .is_empty()
+        );
+        schedule.complete(node, 3, now + Duration::from_secs(3600));
+        assert_eq!(
+            schedule.start_ready(peers.clone(), false, now + Duration::from_secs(3)),
+            [node]
+        );
+        schedule.complete(node, 4, now + Duration::from_secs(3600));
+        assert!(
+            schedule
+                .start_ready(peers, false, now + Duration::from_secs(4))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn recovery_bursts_are_coalesced_but_a_later_reconnect_is_not_lost() {
+        let node = NodeId([1; 32]);
+        let peers = BTreeSet::from([node]);
+        let now = Instant::now();
+        let mut schedule = SyncSchedule::default();
+        schedule.start_ready(peers.clone(), false, now);
+        schedule.complete(node, 1, now + Duration::from_secs(3600));
+        schedule.request_recovery(now);
+        schedule.request_recovery(now + Duration::from_secs(1));
+        assert_eq!(
+            schedule.start_ready(peers.clone(), false, now + Duration::from_secs(2)),
+            [node]
+        );
+        schedule.complete(node, 2, now + Duration::from_secs(3600));
+        schedule.request_recovery(now + Duration::from_secs(3));
+        schedule.request_recovery(now + Duration::from_secs(20));
+        assert!(
+            schedule
+                .start_ready(peers.clone(), false, now + Duration::from_secs(31))
+                .is_empty()
+        );
+        assert_eq!(
+            schedule.start_ready(peers, false, now + Duration::from_secs(32)),
+            [node]
+        );
+    }
+
+    #[test]
+    fn recovery_preserves_four_slot_limit_and_existing_wait_order() {
+        let [a, b, c, d, e] = [1, 2, 3, 4, 5].map(|id| NodeId([id; 32]));
+        let peers = BTreeSet::from([a, b, c, d, e]);
+        let now = Instant::now();
+        let mut schedule = SyncSchedule::default();
+        assert_eq!(
+            schedule.start_ready(peers.clone(), false, now),
+            [a, b, c, d]
+        );
+        schedule.request_recovery(now);
+        assert!(
+            schedule
+                .start_ready(peers.clone(), false, now + Duration::from_secs(2))
+                .is_empty()
+        );
+        schedule.complete(a, 3, now + Duration::from_secs(3600));
+        assert_eq!(
+            schedule.start_ready(peers.clone(), false, now + Duration::from_secs(3)),
+            [e]
+        );
+        schedule.complete(b, 2, now + Duration::from_secs(3600));
+        assert_eq!(
+            schedule.start_ready(peers, false, now + Duration::from_secs(4)),
+            [a]
+        );
     }
 
     #[test]

@@ -38,6 +38,7 @@ pub async fn serve<S: Store + Send + 'static>(
             membership_signer: None,
             tls: identity,
             iroh: None,
+            signed_https_roots: Vec::new(),
         }),
         registration,
         stop,
@@ -119,15 +120,38 @@ pub async fn serve_with_transport<S: Store + Send + 'static>(
     }
 }
 
+/// Refuse each write before extending the encoded buffer beyond its budget.
+struct BoundedJson {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+impl std::io::Write for BoundedJson {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(std::io::ErrorKind::FileTooLarge.into());
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn encode_response(value: &Json, limit: usize) -> Option<Vec<u8>> {
+    let mut output = BoundedJson {
+        bytes: Vec::new(),
+        limit,
+    };
+    serde_json::to_writer(&mut output, value).ok()?;
+    Some(output.bytes)
+}
 fn response(status: StatusCode, value: Json) -> Response<Body> {
-    let bytes = serde_json::to_vec(&value).expect("JSON value is serializable");
-    let (status, bytes) = if bytes.len() > MAX_APP_RESPONSE_BYTES {
-        (
+    let (status, bytes) = match encode_response(&value, MAX_APP_RESPONSE_BYTES) {
+        Some(bytes) => (status, bytes),
+        None => (
             StatusCode::PAYLOAD_TOO_LARGE,
             br#"{"error":"response_too_large"}"#.to_vec(),
-        )
-    } else {
-        (status, bytes)
+        ),
     };
     Response::builder()
         .status(status)
@@ -157,6 +181,7 @@ fn failure(error: Error) -> Response<Body> {
         Error::Node(N::SubscriptionCapacity) => {
             (StatusCode::TOO_MANY_REQUESTS, "subscription_capacity")
         }
+        Error::Node(N::ResponseTooLarge) => (StatusCode::PAYLOAD_TOO_LARGE, "response_too_large"),
         Error::Node(N::QueryItemTooLarge) => {
             (StatusCode::PAYLOAD_TOO_LARGE, "query_item_too_large")
         }
@@ -285,14 +310,24 @@ async fn dispatch<S: Store + Send + 'static>(
         "approve" | "trust-recovery-peer" | "join" | "join-recovery"
     ) {
         let info: PeerRegistration = serde_json::from_slice(&body).map_err(|_| invalid())?;
-        if info.version
-            != if identity.membership_signer.is_some() {
-                3
-            } else {
-                2
+        let has_signer = identity.membership_signer.is_some();
+        let supported = match &info.binding {
+            // Registration v4 is the explicit signed-HTTPS binding form; it
+            // requires a membership signer and the top-level node signing key.
+            PeerBinding::SignedHttps { .. } => {
+                info.version == 4 && has_signer && info.signing_key.is_some()
             }
-        {
+            _ => info.version == if has_signer { 3 } else { 2 },
+        };
+        if !supported {
             return Err(invalid().into());
+        }
+        let signing_key: Option<[u8; 32]> =
+            info.signing_key.as_deref().map(unhex::<32>).transpose()?;
+        if let Some(key) = signing_key {
+            // A member signing key that is not a usable Ed25519 point could never
+            // authenticate; fail the registration instead of storing it.
+            harmion_node::identity::validate_signing_key(&key).map_err(|_| invalid())?;
         }
         let (key, endpoint) = match info.binding {
             PeerBinding::Https {
@@ -312,6 +347,10 @@ async fn dispatch<S: Store + Send + 'static>(
                 membership::PeerKey::Iroh(unhex(&endpoint_id)?),
                 relay_url.unwrap_or_default(),
             ),
+            PeerBinding::SignedHttps { origin } => (
+                membership::PeerKey::SignedHttps(signing_key.ok_or_else(invalid)?),
+                origin,
+            ),
         };
         let peer = membership::Peer {
             node: NodeId(unhex(&info.node_id)?),
@@ -323,13 +362,16 @@ async fn dispatch<S: Store + Send + 'static>(
             peer::validate_binding(&peer)?;
             let member = harmion_protocol::membership::Member {
                 node: peer.node,
-                signing_key: unhex(info.signing_key.as_deref().ok_or_else(invalid)?)?,
+                signing_key: signing_key.ok_or_else(invalid)?,
                 binding: match peer.key {
                     membership::PeerKey::TlsCertificate(bytes) => {
                         harmion_protocol::membership::Binding::Https(bytes)
                     }
                     membership::PeerKey::Iroh(key) => {
                         harmion_protocol::membership::Binding::Iroh(key)
+                    }
+                    membership::PeerKey::SignedHttps(key) => {
+                        harmion_protocol::membership::Binding::SignedHttps(key)
                     }
                 },
                 endpoint: peer.endpoint,
@@ -412,6 +454,10 @@ async fn dispatch<S: Store + Send + 'static>(
         let mut host = SystemHost;
         match operation.as_str() {
             "metrics" if body.is_empty() => Ok(json!(application::metrics(s, &credential, host.now_micros())?)),
+            "sync-status" => {
+                let update = if body.is_empty() { None } else { Some(harmion_domain::UpdateId(id(&body)?)) };
+                Ok(json!(harmion_node::sync_status::get(s, &credential, host.now_micros(), update)?))
+            },
             "members" if body.is_empty() => {
                 let now = host.now_micros();
                 {
@@ -509,7 +555,7 @@ async fn dispatch<S: Store + Send + 'static>(
                     "permissions" => json!(GrantSpec::from(permissions)),
                     _ => {
                         let mut methods = vec!["get","query","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants"];
-                        methods.push("metrics");
+                        methods.extend(["metrics", "sync-status"]);
                         if oauth.is_some() { methods.extend(["oauth-register","oauth-consent","oauth-preview"]); }
                         json!({"version":1,"oauth":oauth.is_some(),"query":true,"subscriptions":true,
                         "oauth_origin":oauth.as_ref().map(|service| service.origin()),
@@ -528,4 +574,46 @@ async fn dispatch<S: Store + Send + 'static>(
             _ => Err(invalid()),
         }
     }).await
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn bounded_encoding_preserves_json_and_exact_boundary() {
+        let value = json!({"body": "quoted\"\\\n\u{1}日本語", "nested": [null, true, 1]});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(encode_response(&value, bytes.len()), Some(bytes.clone()));
+        assert!(encode_response(&value, bytes.len() - 1).is_none());
+        assert!(encode_response(&value, 0).is_none());
+    }
+
+    #[tokio::test]
+    async fn preflight_error_preserves_the_existing_http_error_contract() {
+        let rejected = failure(harmion_node::Error::ResponseTooLarge.into());
+        assert_eq!(rejected.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = rejected.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), br#"{"error":"response_too_large"}"#);
+        let oversized = response(StatusCode::OK, json!("a".repeat(MAX_APP_RESPONSE_BYTES)));
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = oversized.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), br#"{"error":"response_too_large"}"#);
+    }
+
+    #[test]
+    fn oversized_write_does_not_extend_the_encoded_buffer() {
+        let mut output = BoundedJson {
+            bytes: Vec::new(),
+            limit: 5,
+        };
+        output.write_all(b"abc").unwrap();
+        assert!(output.write_all(b"def").is_err());
+        assert_eq!(output.bytes, b"abc");
+        output.write_all(b"de").unwrap();
+        assert_eq!(output.bytes, b"abcde");
+        assert!(output.write_all(b"f").is_err());
+        assert_eq!(output.bytes.len(), output.limit);
+    }
 }

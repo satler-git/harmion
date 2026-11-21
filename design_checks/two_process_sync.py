@@ -112,17 +112,39 @@ def main():
             b.cli("join", a.path / "peer.json")
             created = a.write("create", body="base")
             content = created["content_id"]
+            created_update = created["result"]["update_id"]
+
+            def status(update=None):
+                args = ["sync-status"]
+                if update is not None:
+                    args += ["--update", update]
+                result = a.cli(*args)
+                return next(peer for peer in result["peers"] if peer["node"] == b.identity["node_id"])
+
+            initial_status = status(created_update)
+            assert initial_status["last_success_at"] is None
+            assert initial_status["update_confirmed"] is None
+            assert initial_status["unconfirmed_local"] == "1"
 
             def sync():
                 a.cli("sync", b.identity["node_id"])
                 b.cli("sync", a.identity["node_id"])
 
             sync()
+            confirmed = status(created_update)
+            assert confirmed["update_confirmed"] is True
+            assert confirmed["unconfirmed_local"] == "0"
+            assert confirmed["last_failure"] is None
             old_a = a.cli("get", content)["edit_token"]
             old_b = b.cli("get", content)["edit_token"]
             b.stop()
-            a.write("edit", content, old_a, body="offline A")
+            offline_update = a.write("edit", content, old_a, body="offline A")["result"]["update_id"]
+            assert status(offline_update)["update_confirmed"] is False
             a.cli("sync", b.identity["node_id"], ok=False)
+            failed = status(created_update)
+            assert failed["update_confirmed"] is True, "failure erased historical confirmation"
+            assert failed["last_failure"]["code"] in {"transport_error", "timeout"}
+            assert status(offline_update)["update_confirmed"] is False
             b.start()
             b.write("edit", content, old_b, body="offline B")
             sync()
@@ -151,8 +173,10 @@ def main():
             assert not b.cli("get", content)["deletion_conflict"]
             # Crash after committed operations; replay original create returns original receipt.
             certificate = a.ready["peer"]["binding"]
+            status_before_restart = status(created_update)
             a.stop(crash=True)
             a.start()
+            assert status(created_update) == status_before_restart, "replication observations lost on restart"
             assert certificate == a.ready["peer"]["binding"]
             assert a.cli("save", created["request_file"]) == created["result"]
             sync()

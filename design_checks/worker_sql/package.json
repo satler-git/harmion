@@ -1,0 +1,9 @@
+{
+  "name": "harmion-local-worker-sql-probe",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Local-only workerd SQL runtime experiment; not a Harmion service",
+  "devDependencies": {
+    "workerd": "1.20261120.1"
+  }
+}

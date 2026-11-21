@@ -16,6 +16,12 @@ Cloudflareはworkers-rs経由でRustを利用できる。ただしnativeの実�
 
 このプロジェクトではno_stdを目標にしない。共有部分からソケット、ファイル、Tokio、OS秘密鍵保管、Cloudflareの型を排除する。共通traitへ一律にSend + Syncを要求しない。nativeホストのスレッド境界で必要な制約を付ける。
 
+## 実用化の優先順（2026-11-20）
+
+所有者が指定した順序は、復帰同期、大容量・長期運用の安定化、実際のOSと常設レプリカへの対応。OSはLinux → Android → Windowsとし、Interpreterはそれらの後に進める。常設レプリカはCloudflare Workers／SQLite-backed Durable Objectsを優先する。Androidはバッテリー・回線の制約がある断続接続ノードとし、常時到達可能なレプリカとは扱わない。
+
+Linuxのユーザー常駐設定は所有者が明示的に導入する。Cloudflareの初期鍵・参加情報のbootstrap、HTTPでのノード本人確認、公開する遠隔管理操作の具体的な契約は、既存nativeのloopback所有者モデルとは分けて具体化する。この優先順だけで未定の認証・資格情報・デプロイ操作を承認済みとは扱わない。
+
 ## 2. 動作単位
 
 一つの端末ノードは、一つのDBを所有する一つのサービスとして動く。アプリごとにCoreやDBを複製しない。OSプロセス・ブラウザ・サーバー境界を越える接続はAPIを使う。
@@ -73,7 +79,7 @@ workspaceの主要なビルド・依存境界を示す。
 | apps/daemon / harmiond | nativeノードの構成・起動・設定 | node、store-sqlite、net-native |
 | apps/admin / harmion-admin | 所有者セッション、標準競合解決UI、管理操作 | client、local-web |
 | apps/cli / harmion | 管理・診断・export等のCLI | client |
-| apps/worker / harmion-worker | Workers入口、DOホスト、DOストレージアダプタ | domain、node、protocol |
+| crates/worker / harmion-worker | 署名HTTPS Peer v2のDO host境界、SQL上のchallenge store、HTTP非依存のPeer入口、peer-onlyのnode Store（record/cursor/membership/pin）、host専用provisioning、読み取り専用のWorker管理API、wasm-bindgenのDO bridge。App/Query/OAuth面はfail closed。**実Cloudflare配置・Access・secret配布・TLS終端は未実装** | domain、node、protocol |
 
 nodeからstore-sqliteやnet-nativeへ依存しない。node側が必要なportを定義し、外側が実装して渡す。clientからnode・DB・irohへ依存しない。CLIもDBを直接開かず、管理権限を持つApp APIクライアントとして操作する。ノード未起動時の初回作成はharmiondの初期化経路に限定する。
 
@@ -150,7 +156,7 @@ Read<all>やWrite<all>だけではノード追加・grant発行はできない�
 
 ### Peerと遠隔管理
 
-irohの接続上の鍵とHarmion Node IDの対応、HTTPS接続上のノード鍵の証明をmembershipへ渡して参加資格を検査する。通信の暗号化だけでクラスタ参加を認めない。具体的なチャレンジ・署名・セッション結合は実装時に既存方式を選ぶ。
+irohの接続上の鍵とHarmion Node IDの対応、HTTPS接続上のノード鍵の証明をmembershipへ渡して参加資格を検査する。通信の暗号化だけでクラスタ参加を認めない。署名HTTPS v2は、通常のWebPKIに加えてNode鍵の署名で本人確認し、challenge→exchangeの順に検証してからnodeの既存transactionへ渡す。既知署名identityは参加grantとは別の永続pinとして保持し、退役後もevidence交換の本人確認に使えるが、dataには現在の有効な参加状態を必要とする。wire・bounded値・未確定点は[署名HTTPSのdraft](../contracts/https-peer-v2-draft.md)と[実装レビュー](implementation-review.md) R33〜R36を参照する。
 
 Cloudflare管理では、最初のノード鍵・参加情報の導入をデプロイ所有者のbootstrap経路で行う。その後の管理要求には所有者が明示的に与えた遠隔管理資格を必要とし、Peerとして同期できるだけでApp APIの管理メソッドを呼べるようにはしない。ユーザー操作による参加承認とその証明の伝播は既存仕様どおり。
 

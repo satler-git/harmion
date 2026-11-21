@@ -28,6 +28,9 @@ pub enum PeerBinding {
         endpoint_id: String,
         relay_url: Option<String>,
     },
+    /// Registration v4. The node signing key is the top-level `signing_key`;
+    /// `origin` is the owner-approved canonical HTTPS base origin.
+    SignedHttps { origin: String },
 }
 
 /// Owner-protected discovery file. Credential is stored separately as raw bytes.

@@ -5,6 +5,8 @@ pub mod iroh_peer;
 mod membership_sync;
 pub mod oauth_browser;
 pub mod peer;
+pub mod peer_v2;
+pub mod recovery;
 mod subscriptions;
 pub mod sync;
 pub mod tls;
@@ -48,6 +50,20 @@ fn transport(error: impl std::fmt::Display) -> Error {
     Error::Transport(error.to_string())
 }
 
+impl<S: Store + harmion_node::https_peer::ChallengeStore + Send + 'static> SharedStore<S> {
+    /// Runs one synchronous challenge-store transaction off the async runtime.
+    pub async fn run_challenge<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut S) -> Result<T, harmion_node::Error> + Send + 'static,
+    ) -> Result<T, Error> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.run_blocking(f))
+            .await
+            .map_err(transport)?
+            .map_err(Error::Node)
+    }
+}
+
 pub struct SystemHost;
 
 /// Host selection is separate from the shared synchronization state machine.
@@ -56,6 +72,9 @@ pub struct NativeTransport {
     pub membership_signer: Option<Arc<harmion_node::membership_state::MembershipSigner>>,
     pub tls: Arc<tls::TlsIdentity>,
     pub iroh: Option<iroh_peer::IrohTransport>,
+    /// Owner-supplied additional WebPKI trust anchors for signed-HTTPS targets
+    /// (for example a private CA). Empty means the standard public roots.
+    pub signed_https_roots: Vec<Vec<u8>>,
 }
 impl sync::PeerTransport for NativeTransport {
     async fn exchange(
@@ -74,6 +93,18 @@ impl sync::PeerTransport for NativeTransport {
                     .ok_or(Error::InvalidResponse)?
                     .exchange(local, peer, command)
                     .await
+            }
+            harmion_node::membership::PeerKey::SignedHttps(_) => {
+                let signer = self
+                    .membership_signer
+                    .clone()
+                    .ok_or(Error::InvalidResponse)?;
+                let client = peer_v2::SignedHttpsClient::new(
+                    peer.endpoint.clone(),
+                    signer,
+                    &self.signed_https_roots,
+                )?;
+                client.exchange(local, peer, command).await
             }
         }
     }

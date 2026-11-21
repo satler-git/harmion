@@ -14,12 +14,39 @@ pub const MAX_CERTIFICATE_BYTES: usize = 64 * 1024;
 pub enum PeerKey {
     TlsCertificate(Vec<u8>),
     Iroh([u8; 32]),
+    /// Signed-HTTPS binding: the node signing public key. The routing origin is
+    /// `Peer.endpoint`; it is owner-configured, not part of key identity.
+    SignedHttps([u8; 32]),
 }
 impl PeerKey {
     pub fn tls_certificate(&self) -> Result<&[u8], Error> {
         match self {
             Self::TlsCertificate(bytes) => Ok(bytes),
             _ => Err(Error::IdentityMismatch),
+        }
+    }
+    /// Stable storage discriminant; never compare transports by this alone.
+    pub fn kind(&self) -> u8 {
+        match self {
+            Self::TlsCertificate(_) => 0,
+            Self::Iroh(_) => 1,
+            Self::SignedHttps(_) => 2,
+        }
+    }
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Self::TlsCertificate(bytes) => bytes,
+            Self::Iroh(bytes) | Self::SignedHttps(bytes) => bytes,
+        }
+    }
+    pub fn from_parts(kind: u8, bytes: Vec<u8>) -> Result<Self, Error> {
+        match kind {
+            0 => Ok(Self::TlsCertificate(bytes)),
+            1 => Ok(Self::Iroh(bytes.try_into().map_err(|_| Error::CorruptLog)?)),
+            2 => Ok(Self::SignedHttps(
+                bytes.try_into().map_err(|_| Error::CorruptLog)?,
+            )),
+            _ => Err(Error::CorruptLog),
         }
     }
 }
@@ -50,7 +77,8 @@ pub fn approve(
         }
         if peer.retired
             || matches!(&peer.key, PeerKey::TlsCertificate(bytes) if bytes.is_empty() || bytes.len() > MAX_CERTIFICATE_BYTES)
-            || (matches!(peer.key, PeerKey::TlsCertificate(_)) && peer.endpoint.is_empty())
+            || (matches!(peer.key, PeerKey::TlsCertificate(_) | PeerKey::SignedHttps(_))
+                && peer.endpoint.is_empty())
             || peer.endpoint.len() > 2048
         {
             return Err(Error::InvalidRequest);
@@ -127,6 +155,38 @@ pub fn receive_response(
 struct PeerPrincipal {
     node: NodeId,
 }
+
+/// A signed-HTTPS requester is authenticated by its durably pinned membership
+/// signing key, not by a key it supplies. The caller must have verified the
+/// signature over the exact canonical frame with `signing_key` first.
+fn authenticate_signed_https(
+    tx: &mut dyn Transaction,
+    signing_key: [u8; 32],
+    request: &PeerRequest,
+) -> Result<PeerPrincipal, Error> {
+    let pin = tx
+        .known_peer_identity(request.node)?
+        .ok_or(Error::Unauthenticated)?;
+    if pin.node != request.node || pin.signing_key != signing_key {
+        return Err(Error::Unauthenticated);
+    }
+    if is_membership_command(&request.command) {
+        // Evidence transfer is allowed for any durably pinned identity, including
+        // retired or conflicted ones, subject to existing signed-evidence checks.
+        if tx.membership_root()?.is_none() {
+            return Err(Error::InvalidRequest);
+        }
+    } else {
+        // Data additionally requires both peers currently Active and the pin to
+        // match the effective identity in this transaction.
+        let member = crate::membership_state::active_member(tx, request.node)?;
+        if !pin.member_matches(&member) {
+            return Err(Error::IdentityMismatch);
+        }
+    }
+    Ok(PeerPrincipal { node: pin.node })
+}
+
 fn authenticate_peer(
     tx: &mut dyn Transaction,
     key: &PeerKey,
@@ -134,6 +194,9 @@ fn authenticate_peer(
 ) -> Result<PeerPrincipal, Error> {
     if request.cluster != tx.identity().cluster || request.node == tx.identity().node {
         return Err(Error::IdentityMismatch);
+    }
+    if let PeerKey::SignedHttps(signing_key) = key {
+        return authenticate_signed_https(tx, *signing_key, request);
     }
     let peer = if is_membership_command(&request.command) {
         if tx.membership_root()?.is_none() {

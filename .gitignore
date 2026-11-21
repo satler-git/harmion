@@ -1,6 +1,6 @@
 /target/
 __pycache__/
-node/
+/node/
 /node-a/
 /node-b/
 /admin-ui/

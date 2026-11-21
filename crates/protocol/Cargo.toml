@@ -9,6 +9,7 @@ publish = false
 thiserror.workspace = true
 harmion-domain = { path = "../domain" }
 sha2 = "0.10.9"
+url = "2.5.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision", "raw_value"] }
 

@@ -1,6 +1,6 @@
 # App APIの契約
 
-更新日: 2026-11-18
+更新日: 2026-11-20
 
 現在のnative実装では、証明書を固定したloopback HTTPSの`POST /app/v1/{operation}`を使う。保存要求はHRQ-v1で、返却値は明示的なJSON view。App APIはHostを検査しOrigin付き要求を拒否する。ブラウザで行うOAuth認可には専用のHTTPS入口を使う。有効にしたノードのcapabilitiesは `oauth: true` と `oauth_origin` を返す。
 
@@ -31,6 +31,8 @@ editはContent ID、編集トークン、request_id、変更項目を受け取�
 - トークンは権限を付与しない。保存時に現在のWriteを検査する。
 
 保存成功はローカル永続化の成功であり、その値が通常表示に選ばれることを保証しない。HTTP 200 の保存結果は `update_id` と `saved: true` を返す。Readがあり、応答の上限内に収まるときは、`view` に保存直後の通常値・新しい編集トークン・競合情報を返す。閲覧できる `view` が上限を超える場合は `view: null` と `view_error: "response_too_large"` を返す。同じ要求を再送しても、元の更新IDと保存完了を取得できる。SDKは編集バッファを保持する。
+
+nativeのget・conflicts・inspectは、認可・可視性を検査した後、返す内容全体のJSONサイズを編集トークン発行前に計測する。8 MiBを超える場合は HTTP 413 と `{"error":"response_too_large"}` を返し、新しい編集トークンやそのbasisを保存しない。本文・属性・競合候補を一部落として成功にはしない。最終JSONの符号化も書き込みごとに上限を検査する。これは応答生成と失敗した取得によるDB増加の制限であり、Contentの全履歴読込みやprojection全体のメモリ上限を保証するものではない。保存要求は上記のとおりreceiptを返し、大きなviewを理由に保存済み結果を失敗扱いしない。
 
 get_conflictsは権限内の候補と解決トークンを返す。resolveは解決する項目と候補を明示して新しい更新を作る。候補の一つをそのまま選ぶ場合も新しい解決更新とする。複数項目を一度に解決できるが、取得した全競合を自動的に対象にしない。未確認の並行更新は残す。
 
@@ -124,9 +126,27 @@ SDKは通知を適用してから対応カーソルを保存する。購読キ�
 
 Peer の接続コードは `harmion-peer:v1:z:BASE64URL`。ペイロードは公開 `PeerRegistration` の UTF-8 JSON を gzip 圧縮し、パディングなし Base64url で符号化したもの。展開後のデータは1 MiBまで。圧縮なしの `harmion-peer:v1:BASE64URL` も読み取れる。管理 Web アプリの `peer-preview` はクラスタ・Node ID・公開鍵を表示する単回の確認値を作る。変更を行う `peer-confirm` はその値を消費し、既存の App API の参加・承認処理を呼ぶ。読み取り・プレビューだけでは参加状態を更新しない。
 
+登録JSONのversion 3はnativeのTLS証明書またはiroh Endpoint IDを`binding`に持つ。version 4は`binding: {"transport": "signed_https", "origin": "https://..."}`を持ち、トップレベルの`signing_key`を必須とする。originは標準URL parserでcanonicalなHTTPS DNS originとして検証し、署名鍵はEd25519の公開鍵として使えることを確認する。versionとbinding種別の取り違え、Ed25519として無効な鍵、非canonicalなoriginは登録前に拒否する。v4の承認はHMC v2の`SignedHttps` bindingと署名identityのpinを作る。v3の既存経路は維持する。[署名HTTPSのdraft](../contracts/https-peer-v2-draft.md)
+
 アプリの登録コードは `harmion-app:v1:BASE64URL`。`name` と `redirect_uri` の JSON を同じ方式で符号化する。アプリが認可を開始した後は、認可画面の `harmion-auth:v1:REQUEST_ID` を所有者が管理画面に貼り付ける。`POST /app/v1/oauth-preview` は32バイトの要求IDを受け取り、ManageApps 権限を検査した上で要求元と権限を返す。所有者の確認後は既存の認可画面で許可・拒否し、登録済み callback へ戻る。
 
-capabilitiesはAPI版・対応操作・上限、permissionsは自分のgrantを返す。sync_statusは到達状況や複製確認を返し、ローカル保存成功と区別する。
+capabilitiesはAPI版・対応操作・上限、permissionsは自分のgrantを返す。
+
+### 所有者向け同期状態・更新の受領確認
+
+`POST /app/v1/sync-status` は、本文なしでノード全体の状態、または32バイトの更新 ID を本文に指定してその更新の受領確認を取得する。Content ID ではなく、保存結果の `update_id` を指定する。初版は全管理権限を持つ所有者に限定し、一般アプリへのPeer情報公開や保存結果単位の公開権限は導入しない。権限不足は HTTP 403、失効・期限切れ資格情報は HTTP 401、未知の更新 ID は HTTP 404、不正な本文長は HTTP 400。
+
+- 応答は `node`、`local_epoch`、`local_high`、指定した `update`（未指定は `null`）、既知のPeerごとの `peers`。IDとepochは16進、件数・位置・UTCマイクロ秒の時刻は10進文字列。
+- 各Peerは `node`、`retired`、`last_success_at`、`last_failure`、`local_epoch`、`acknowledged_through`、`remote_epoch`、`remote_high`、`received_through`、`unconfirmed_local`、`update_confirmed` を持つ。`retired` は保存されたPeerの退役フラグであり、参加状態の全情報や現在の到達性ではない。保留等の参加状態は `members` で確認する。
+- 自発同期の固定highラウンドが完了したときに、認証済み相手のCursor／ACKが示した自分のログ受領位置と、相手ログの取得位置を保存する。`last_success_at` はその確認時刻。移行前、未同期、異なる自分のログepochの観測は受領証拠にしない。受信側として同期しただけでは、相手による自分のログの受領位置を推測しない。
+- `update_confirmed: true` は、指定更新の自分のログ位置まで、そのPeerが永続受理したことを最後の成功ラウンドで確認できた、という意味。`false` は確認位置が足りないこと、`null` は更新未指定または有効な観測がないこと。`false`／`null` は未受領の証明ではない。中継経由での受領やACK喪失があり得る。
+- `unconfirmed_local` は確認位置より後にある自分の受理済み更新の件数。ログには中継更新も入り、欠番もあり得るため、ログ位置の差ではなく件数を数える。実際の未配達数ではない。初回同期やpullでラウンド開始後に増えた更新は、成功したラウンドの直後でも未確認になり得る。
+- 最新の自発同期が失敗した場合、`last_failure` に `attempted_at`（失敗を記録した時刻）と限定された `code` を残す。過去の成功観測は消さない。次の成功で `last_failure` を消す。時刻の大小で成否を決めないため、時計が戻っても最新の完了結果を区別できる。
+- `code` は `transport_error`、`timeout`、`invalid_response`、`record_rejected`、`peer_retired`、`membership_conflict`、`unauthenticated`、`identity_mismatch`、`storage_error`、`sync_error`。資格情報、本文、接続先、外部由来のエラーメッセージは保存・公開しない。
+- 取得はローカル状態を読み、ネットワーク接続や同期を起こさない。手動・自動の自発同期が観測を更新する。途中失敗したラウンドの一部ACKは初版では新しい成功観測にしない。観測のDB保存要求を出す前のキャンセルや、保存がコミットされない終了・保存失敗では以前の観測が残る。DB workerへ保存を依頼した後は、呼出し元がキャンセルされても保存が完了し得る。その場合も実際の保存完了まで同一Peerの自発同期を直列化し、古い結果が新しい試行を上書きしない。受領済みの更新や受信cursorを取り消す処理ではない。
+- 観測はSQLite schema v10で保持し再起動後も取得できる。バックアップを新しい Node ID で復元したノードには引き継がない。過去の受領確認は現在オンラインであること、第三ノードへの伝播、将来のバックアップ耐久性、クラスタ全体の最新性を保証しない。何台で保存完了とするかというポリシーも追加しない。
+
+Rust SDK は型付き `Client::sync_status(Option<UpdateId>)`、CLI は `sync-status [--update UPDATE_ID]` を提供する。ローカル保存成功のreceiptとは独立した照会とする。
 
 ネイティブの管理者は `POST /app/v1/export` で固定時点の本文、属性・kind、競合候補、削除記録を取得できる。転送形式とCLI出力は [Export v1](../contracts/export-v1.md) を参照。
 

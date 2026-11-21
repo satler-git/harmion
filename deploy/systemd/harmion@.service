@@ -1,0 +1,20 @@
+[Unit]
+Description=Harmion user node (%i)
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart="%h/.local/bin/harmiond" run "%h/.local/share/harmion/%i"
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=harmiond-%i
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,34 @@
+[package]
+name = "harmion-worker"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+harmion-domain = { path = "../domain" }
+harmion-protocol = { path = "../protocol" }
+harmion-node = { path = "../node" }
+url = "2.5.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2.6.1"
+base64 = "0.22"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[dev-dependencies]
+harmion-store-sqlite = { path = "../store-sqlite" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.130"
+js-sys = "=0.3.107"
+wasm-bindgen-futures = "=0.4.80"

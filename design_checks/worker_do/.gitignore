@@ -1,0 +1,4 @@
+pkg/
+ui/
+__pycache__/
+native-config.capnp

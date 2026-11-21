@@ -49,6 +49,13 @@ impl Node {
             .await
             .unwrap();
     }
+    async fn status(&self) -> harmion_protocol::sync_status::SyncStatus {
+        let credential = self.admin.clone();
+        self.store
+            .run(move |s| harmion_node::sync_status::get(s, &credential, 0, None))
+            .await
+            .unwrap()
+    }
     async fn create(&self, content: u8) {
         let credential = self.admin.clone();
         self.store
@@ -174,10 +181,22 @@ async fn same_round_runs_without_a_tls_host_and_stops_echoing() {
         remote: &b,
         retire_on_page: false,
     };
+    let unknown = a.status().await;
+    assert!(unknown.peers[0].last_success_at.is_none());
+    assert_eq!(unknown.peers[0].unconfirmed_local, "1");
     let first = sync::sync_once(&a.store, &transport, b.identity.node)
         .await
         .unwrap();
     assert_eq!((first.uploaded, first.downloaded), (1, 1));
+    let status = a.status().await;
+    assert!(status.peers[0].last_success_at.is_some());
+    assert_eq!(status.peers[0].acknowledged_through.as_deref(), Some("1"));
+    // The pulled update was accepted after the frozen upload high. A successful
+    // round does not imply every entry currently in our log was acknowledged.
+    assert_eq!(status.local_high, "2");
+    assert_eq!(status.peers[0].unconfirmed_local, "1");
+    // B received a push but did not initiate a round: don't invent a B-side proof.
+    assert!(b.status().await.peers[0].last_success_at.is_none());
     sync::sync_once(&a.store, &transport, b.identity.node)
         .await
         .unwrap();
@@ -185,6 +204,7 @@ async fn same_round_runs_without_a_tls_host_and_stops_echoing() {
         .await
         .unwrap();
     assert_eq!((quiet.uploaded, quiet.downloaded), (0, 0));
+    assert_eq!(a.status().await.peers[0].unconfirmed_local, "0");
     for node in [&a, &b] {
         node.store
             .run(|s| {
@@ -201,6 +221,164 @@ async fn same_round_runs_without_a_tls_host_and_stops_echoing() {
     }
 }
 #[tokio::test]
+async fn failed_round_preserves_proof_and_successful_retry_clears_failure() {
+    let a = Node::new(2);
+    let b = Node::new(3);
+    a.approve(&b).await;
+    b.approve(&a).await;
+    a.create(4).await;
+    let transport = InProcess {
+        local: &a,
+        remote: &b,
+        retire_on_page: false,
+    };
+    sync::sync_once(&a.store, &transport, b.identity.node)
+        .await
+        .unwrap();
+    let before = a.status().await;
+    a.create(5).await;
+    struct Offline;
+    impl PeerTransport for Offline {
+        async fn exchange(
+            &self,
+            _: Identity,
+            _: &Peer,
+            _: PeerCommand,
+        ) -> Result<PeerReply, Error> {
+            Err(Error::Transport(
+                "sensitive transport detail must not be persisted".into(),
+            ))
+        }
+    }
+    assert!(
+        sync::sync_once(&a.store, &Offline, b.identity.node)
+            .await
+            .is_err()
+    );
+    let failed = a.status().await;
+    assert_eq!(
+        failed.peers[0].last_success_at,
+        before.peers[0].last_success_at
+    );
+    assert_eq!(
+        failed.peers[0].acknowledged_through,
+        before.peers[0].acknowledged_through
+    );
+    assert_eq!(failed.peers[0].unconfirmed_local, "1");
+    assert_eq!(
+        failed.peers[0].last_failure.as_ref().unwrap().code,
+        "transport_error"
+    );
+    assert!(
+        !serde_json::to_string(&failed)
+            .unwrap()
+            .contains("sensitive")
+    );
+    sync::sync_once(&a.store, &transport, b.identity.node)
+        .await
+        .unwrap();
+    let retried = a.status().await;
+    assert!(retried.peers[0].last_failure.is_none());
+    assert_eq!(retried.peers[0].unconfirmed_local, "0");
+}
+
+#[tokio::test]
+async fn lost_ack_does_not_fabricate_confirmation_and_cursor_retry_recovers_it() {
+    let a = Node::new(2);
+    let b = Node::new(3);
+    a.approve(&b).await;
+    b.approve(&a).await;
+    a.create(4).await;
+    struct LoseAck<'a>(InProcess<'a>);
+    impl PeerTransport for LoseAck<'_> {
+        async fn exchange(
+            &self,
+            local: Identity,
+            peer: &Peer,
+            command: PeerCommand,
+        ) -> Result<PeerReply, Error> {
+            let accepting = matches!(&command, PeerCommand::Accept(_));
+            let reply = self.0.exchange(local, peer, command).await?;
+            if accepting {
+                Err(Error::Timeout)
+            } else {
+                Ok(reply)
+            }
+        }
+    }
+    let transport = InProcess {
+        local: &a,
+        remote: &b,
+        retire_on_page: false,
+    };
+    assert!(
+        sync::sync_once(&a.store, &LoseAck(transport), b.identity.node)
+            .await
+            .is_err()
+    );
+    assert_eq!(b.status().await.local_high, "1"); // Data arrived; ACK did not.
+    let failed = a.status().await;
+    assert!(failed.peers[0].acknowledged_through.is_none());
+    assert_eq!(failed.peers[0].unconfirmed_local, "1");
+    assert_eq!(
+        failed.peers[0].last_failure.as_ref().unwrap().code,
+        "timeout"
+    );
+    let transport = InProcess {
+        local: &a,
+        remote: &b,
+        retire_on_page: false,
+    };
+    let report = sync::sync_once(&a.store, &transport, b.identity.node)
+        .await
+        .unwrap();
+    assert_eq!(report.uploaded, 0);
+    assert_eq!(a.status().await.peers[0].unconfirmed_local, "0");
+}
+
+#[tokio::test]
+async fn invalid_remote_cursor_is_not_recorded_as_a_confirmation() {
+    let a = Node::new(2);
+    let b = Node::new(3);
+    a.approve(&b).await;
+    b.approve(&a).await;
+    a.create(4).await;
+    struct BadCursor<'a>(InProcess<'a>);
+    impl PeerTransport for BadCursor<'_> {
+        async fn exchange(
+            &self,
+            local: Identity,
+            peer: &Peer,
+            command: PeerCommand,
+        ) -> Result<PeerReply, Error> {
+            if let PeerCommand::Cursor { epoch } = command {
+                Ok(PeerReply::Cursor {
+                    epoch,
+                    through: u64::MAX,
+                })
+            } else {
+                self.0.exchange(local, peer, command).await
+            }
+        }
+    }
+    let transport = BadCursor(InProcess {
+        local: &a,
+        remote: &b,
+        retire_on_page: false,
+    });
+    assert!(matches!(
+        sync::sync_once(&a.store, &transport, b.identity.node).await,
+        Err(Error::InvalidResponse)
+    ));
+    let status = a.status().await;
+    assert!(status.peers[0].acknowledged_through.is_none());
+    assert_eq!(
+        status.peers[0].last_failure.as_ref().unwrap().code,
+        "invalid_response"
+    );
+}
+
+#[tokio::test]
 async fn retirement_while_response_is_in_flight_rejects_page_and_cursor() {
     let a = Node::new(2);
     let b = Node::new(3);
@@ -216,6 +394,12 @@ async fn retirement_while_response_is_in_flight_rejects_page_and_cursor() {
         sync::sync_once(&a.store, &transport, b.identity.node).await,
         Err(Error::Node(harmion_node::Error::PeerRetired))
     ));
+    let status = a.status().await;
+    assert!(status.peers[0].last_success_at.is_none());
+    assert_eq!(
+        status.peers[0].last_failure.as_ref().unwrap().code,
+        "peer_retired"
+    );
     let identity = b.identity;
     a.store
         .run(move |s| {

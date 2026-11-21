@@ -73,6 +73,13 @@ async fn execute(cli: &Cli) -> Result<serde_json::Value> {
         | CliCommand::Capabilities
         | CliCommand::Permissions
         | CliCommand::Members => Ok(client.call(command, &[]).await?),
+        CliCommand::SyncStatus { update } => {
+            let update = update
+                .as_ref()
+                .map(|id| unhex(id).map(UpdateId))
+                .transpose()?;
+            Ok(serde_json::to_value(client.sync_status(update).await?)?)
+        }
         CliCommand::Export { path } => Ok(client.export_directory(path).await?),
         CliCommand::OauthRegister { name, redirect } => Ok(client
             .call(

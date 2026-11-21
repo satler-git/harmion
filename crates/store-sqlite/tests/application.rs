@@ -119,13 +119,14 @@ fn v3_peer_migration_preserves_tls_binding_and_separates_iroh_keys() {
     let mut t = Test::new();
     // Simulate a deployed v3 database, retaining all other state.
     let db = rusqlite::Connection::open(t.path.join("node.db")).unwrap();
-    db.execute_batch("DROP TABLE oauth_refresh; DROP TABLE oauth_access; DROP TABLE oauth_families;
+    db.execute_batch("DROP TABLE sync_failures; DROP TABLE sync_observations;
+        DROP TABLE oauth_refresh; DROP TABLE oauth_access; DROP TABLE oauth_families;
         DROP TABLE oauth_codes; DROP TABLE oauth_pending; DROP TABLE oauth_clients;
         DROP TABLE grant_generations; DROP TABLE content_changes;
         DROP TABLE query_cursors; DROP TABLE query_basis; DROP TABLE query_sessions;
         DROP TABLE search_basis; DROP TABLE content_records;
         DROP TABLE search_elements; DROP TABLE search_attributes; DROP TABLE search_kinds; DROP TABLE search_contents;
-        DROP TABLE membership_identity; DROP TABLE membership_recovery_roots; DROP TABLE membership_root; DROP TABLE membership_log; DROP TABLE membership_cursors; DROP TABLE peers; CREATE TABLE peers(node BLOB PRIMARY KEY, certificate BLOB UNIQUE NOT NULL, endpoint TEXT NOT NULL, retired INTEGER NOT NULL); PRAGMA user_version=3;").unwrap();
+        DROP TABLE membership_identity; DROP TABLE membership_recovery_roots; DROP TABLE membership_root; DROP TABLE membership_log; DROP TABLE membership_cursors; DROP TABLE identity_pins; DROP TABLE https_state; DROP TABLE https_challenges; DROP TABLE https_rate; DROP TABLE peers; CREATE TABLE peers(node BLOB PRIMARY KEY, certificate BLOB UNIQUE NOT NULL, endpoint TEXT NOT NULL, retired INTEGER NOT NULL); PRAGMA user_version=3;").unwrap();
     db.execute(
         "INSERT INTO peers VALUES(?1,?2,?3,0)",
         rusqlite::params![[8u8; 32], [9u8; 32], "127.0.0.1:1"],
@@ -1554,14 +1555,15 @@ fn migration_preserves_v1_records_and_cursor_generation() {
     let db = rusqlite::Connection::open(t.path.join("node.db")).unwrap();
     // Reproduce the previous schema with its original log and identity intact.
     db.execute_batch(
-        "DROP TABLE oauth_refresh; DROP TABLE oauth_access; DROP TABLE oauth_families;
+        "DROP TABLE sync_failures; DROP TABLE sync_observations;
+        DROP TABLE oauth_refresh; DROP TABLE oauth_access; DROP TABLE oauth_families;
         DROP TABLE oauth_codes; DROP TABLE oauth_pending; DROP TABLE oauth_clients;
         DROP TABLE grant_generations; DROP TABLE content_changes;
         DROP TABLE query_cursors; DROP TABLE query_basis; DROP TABLE query_sessions;
         DROP TABLE search_basis; DROP TABLE content_records;
         DROP TABLE search_elements; DROP TABLE search_attributes; DROP TABLE search_kinds; DROP TABLE search_contents;
         DROP TABLE request_results; DROP TABLE token_basis; DROP TABLE edit_tokens;
-        DROP TABLE app_kinds; DROP TABLE apps; DROP TABLE peers; DROP TABLE membership_identity; DROP TABLE membership_recovery_roots; DROP TABLE membership_root; DROP TABLE membership_log; DROP TABLE membership_cursors; PRAGMA user_version=1;",
+        DROP TABLE app_kinds; DROP TABLE apps; DROP TABLE identity_pins; DROP TABLE https_state; DROP TABLE https_challenges; DROP TABLE https_rate; DROP TABLE peers; DROP TABLE membership_identity; DROP TABLE membership_recovery_roots; DROP TABLE membership_root; DROP TABLE membership_log; DROP TABLE membership_cursors; PRAGMA user_version=1;",
     )
     .unwrap();
     t.restart();
@@ -1579,7 +1581,7 @@ fn migration_preserves_v1_records_and_cursor_generation() {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 9);
+    assert_eq!(version, 12);
 }
 
 #[test]

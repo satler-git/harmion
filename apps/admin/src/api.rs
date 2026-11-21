@@ -2,8 +2,8 @@ use crate::transfer::{self, Confirmations, PeerAction};
 use harmion_client::{
     Client, Error, ProtectedDir,
     protocol::{
-        ChangeGrantsRequest, Command, EditToken, OAuthRegistration, PeerRegistration, RequestId,
-        SaveRequest,
+        ChangeGrantsRequest, Command, EditToken, OAuthRegistration, PeerBinding, PeerRegistration,
+        RequestId, SaveRequest,
         domain::{Change, ContentId, Field, UpdateId, Value as FieldValue},
         query::{Condition, QueryCursor},
         resolution::{
@@ -141,7 +141,15 @@ pub(crate) async fn dispatch(
             let request: PeerPreview = parse(body)?;
             let registration = transfer::decode_peer(&request.input)?;
             let local = client.call("identity", &[]).await.map_err(remote)?;
-            if registration.version != 3
+            // v3 is the native TLS/iroh registration; v4 is the explicit
+            // signed-HTTPS binding. Never reinterpret one version as the other.
+            let version_ok = match (&registration.binding, registration.version) {
+                (PeerBinding::SignedHttps { .. }, 4) => true,
+                (PeerBinding::SignedHttps { .. }, _) => false,
+                (_, 3) => true,
+                (_, _) => false,
+            };
+            if !version_ok
                 || registration.cluster_id != local["cluster_id"]
                 || registration.node_id == local["node_id"]
                 || id(&registration.node_id).is_err()

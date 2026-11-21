@@ -1163,7 +1163,9 @@ dependencies = [
  "hyper-util",
  "iroh",
  "iroh-relay",
+ "netwatch",
  "rcgen",
+ "rustix",
  "rustls",
  "serde_json",
  "thiserror 2.0.21",
@@ -1171,6 +1173,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "url",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1196,6 +1199,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
+ "url",
 ]
 
 [[package]]
@@ -1207,6 +1211,28 @@ dependencies = [
  "harmion-protocol",
  "rusqlite",
  "serde_json",
+]
+
+[[package]]
+name = "harmion-worker"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "harmion-domain",
+ "harmion-node",
+ "harmion-protocol",
+ "harmion-store-sqlite",
+ "js-sys",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror 2.0.21",
+ "tokio",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

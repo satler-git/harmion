@@ -48,6 +48,9 @@ pub fn validate_binding(peer: &Peer) -> Result<(), Error> {
                 peer.endpoint.parse::<iroh::RelayUrl>().map_err(transport)?;
             }
         }
+        membership::PeerKey::SignedHttps(_) => {
+            harmion_protocol::https_peer::validate_origin(&peer.endpoint)?;
+        }
     }
     Ok(())
 }

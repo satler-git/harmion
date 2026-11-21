@@ -1,0 +1,5 @@
+{
+  "name": "harmion-cloudflare-hub",
+  "private": true,
+  "type": "module"
+}

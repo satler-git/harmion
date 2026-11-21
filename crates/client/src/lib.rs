@@ -214,6 +214,17 @@ impl Client {
         self.call("get", &content.0).await
     }
 
+    /// Read owner-only historical replication confirmations without contacting peers.
+    /// An unconfirmed update may already have arrived through another node.
+    pub async fn sync_status(
+        &self,
+        update: Option<protocol::domain::UpdateId>,
+    ) -> Result<protocol::sync_status::SyncStatus, Error> {
+        let body = update.as_ref().map_or(&[][..], |id| id.0.as_slice());
+        serde_json::from_value(self.call("sync-status", body).await?)
+            .map_err(|_| Error::InvalidResponse)
+    }
+
     pub async fn query(&self, condition: Condition, limit: u32) -> Result<QueryPage, Error> {
         self.query_page(QueryRequest::Start { condition, limit })
             .await

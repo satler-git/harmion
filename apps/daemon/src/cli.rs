@@ -52,6 +52,9 @@ pub(crate) struct RunOptions {
     pub relay_url: Option<String>,
     #[arg(long, value_enum)]
     pub discovery: Option<Discovery>,
+    /// Additional DER trust anchors for signed-HTTPS peers (private CA).
+    #[arg(long = "signed-https-root", value_name = "PATH")]
+    pub signed_https_roots: Vec<std::path::PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -145,6 +148,24 @@ mod tests {
             assert!(
                 Cli::try_parse_from(["harmiond", "run", "node"].into_iter().chain(args)).is_err()
             );
+        }
+    }
+
+    #[test]
+    fn signed_https_roots_are_repeatable() {
+        let cli = Cli::try_parse_from([
+            "harmiond",
+            "run",
+            "node-dir",
+            "--signed-https-root",
+            "ca.der",
+            "--signed-https-root",
+            "other.der",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Run { options, .. } => assert_eq!(options.signed_https_roots.len(), 2),
+            _ => panic!("run command"),
         }
     }
 }

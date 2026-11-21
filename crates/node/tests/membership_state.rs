@@ -239,3 +239,57 @@ fn signed_proofs_cannot_replace_a_node_key_or_alias_another_identity() {
         Err(Error::IdentityMismatch)
     ));
 }
+
+fn signed_https_member(n: u8) -> Member {
+    let key = MembershipSigner::from_bytes(&[n; 32]).public_key();
+    Member {
+        node: NodeId([n; 32]),
+        signing_key: key,
+        binding: Binding::SignedHttps(key),
+        endpoint: "https://replica.example".to_owned(),
+    }
+}
+
+#[test]
+fn signed_https_binding_key_must_equal_signing_key_and_is_unique() {
+    // The typed binding repeats the membership key; a different key is not a
+    // second credential and cannot be encoded at all.
+    let mut wrong = signed_https_member(4);
+    wrong.binding = Binding::SignedHttps([77; 32]);
+    assert!(
+        MembershipSigner::from_bytes(&[3; 32])
+            .sign(Statement {
+                cluster: CLUSTER,
+                issuer: member(3).node,
+                signing_key: MembershipSigner::from_bytes(&[3; 32]).public_key(),
+                nonce: [1; 32],
+                action: Action::Admit(wrong),
+            })
+            .is_err()
+    );
+
+    // Two Node IDs may not share the same signed-HTTPS binding key.
+    let shared = MembershipSigner::from_bytes(&[4; 32]).public_key();
+    let first = Member {
+        node: NodeId([4; 32]),
+        signing_key: shared,
+        binding: Binding::SignedHttps(shared),
+        endpoint: String::new(),
+    };
+    let second = Member {
+        node: NodeId([5; 32]),
+        signing_key: shared,
+        binding: Binding::SignedHttps(shared),
+        endpoint: String::new(),
+    };
+    let admit_first = signed(3, 1, Action::Admit(first));
+    let admit_second = signed(3, 2, Action::Admit(second));
+    assert!(matches!(
+        membership_state::evaluate(
+            CLUSTER,
+            &[member(2)],
+            &[admit(2, 3), admit_first, admit_second]
+        ),
+        Err(Error::IdentityMismatch)
+    ));
+}

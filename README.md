@@ -4,13 +4,15 @@
 
 Rustで初期実装を進めています。Content・SQLite保存・App HTTPS API・daemon/CLI・HTTPS/irohのPeer同期、署名付き参加・退役・却下証明の伝播を実装しています。nativeではQuery/Subscribe、所有者向けExport、専用CAを使うブラウザOAuthも利用できます。5つの独立プロセスで中継・分断・再起動・周期同期を検証し、管理情報の伝播・保留・所有者回復は別の実プロセステストで確認しています。DOは未実装です。各機能の範囲は[実装全体レビュー](docs/implementation-review.md)を参照してください。
 
-ネイティブの App HTTPS と Rust SDK は、固定スナップショットの Query、初回取得と変更通知をつなぐ Subscribe、購読キャッシュを提供します。
+ネイティブの App HTTPS と Rust SDK は、固定スナップショットの Query、初回取得と変更通知をつなぐ Subscribe、購読キャッシュを提供します。所有者向けの `sync-status` では、最後の自発同期の成功・失敗と、保存した更新のPeerごとの受領確認を取得できます。ローカル保存成功・過去の受領確認・現在の到達性は区別します。
 
 - [native 複数ノード同期の実行手順](docs/native-quickstart.md)
+- [Linuxユーザーサービスと日常運用](docs/linux-service.md)
 
 - [現時点の仕様と設計方針](docs/specification.md)
 - [過去の議論との照合・整合性レビュー](docs/review.md)
 - [実装全体レビュー・仕様との差異・暫定対応](docs/implementation-review.md)
+- [実用化改善の引継ぎ・停止位置と再開手順](docs/implementation-handoff.md)
 - [参加・退役の設計判断](docs/membership-design.md)
 - [署名付き参加・退役・却下証明の契約](contracts/membership-v1.md)
 - [内部表現と同期の初期設計](docs/internal-design.md)
@@ -23,6 +25,8 @@ Rustで初期実装を進めています。Content・SQLite保存・App HTTPS AP
 - [HTTPS Peerと直接承認の契約](contracts/peer-v1.md)
 
 `crates/domain` はI/Oや非同期ランタイムに依存しないRustライブラリです。エラー型の定義には `thiserror` を使います。型で区別したID、create/edit/delete/keep/restore、項目と存在の候補、通常値選択、重複受理と不正参照の検証を扱います。Python意味モデルの10シナリオに対応する到着順テストと、追加の境界テストを用意しています。
+
+Nixを使う場合、`nix develop`でrustc/cargo/clippy/rustfmt（wasm32 std込み）、管理UI用のnode/npm、検証スクリプト用のpython3、C toolchainが揃う。`flake.nix`・`flake.lock`はgitの追跡対象に含める必要がある。Nixを使わない場合は、同じものを個別に用意する。
 
 ```sh
 npm ci --prefix apps/admin/ui

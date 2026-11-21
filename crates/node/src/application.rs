@@ -168,6 +168,14 @@ pub fn get(
         if !principal.app.grants.can_read_snapshot(&snapshot) {
             return Err(Error::NotFound);
         }
+        // Reject before minting a durable token or cloning the output. The
+        // snapshot and visibility checks still use the complete stored history.
+        harmion_protocol::snapshot_read_view_size(
+            &snapshot,
+            principal.app.grants.is_administrator(),
+            harmion_protocol::MAX_APP_RESPONSE_BYTES,
+        )
+        .ok_or(Error::ResponseTooLarge)?;
         let token = mint_token(tx, host, &snapshot, TokenPurpose::Edit)?;
         Ok(view(&snapshot, token, &principal.app.grants))
     })
@@ -226,6 +234,12 @@ fn read_conflicts(
         if !grants.can_read(&snapshot.content) || (!management && snapshot.life == Life::Deleted) {
             return Err(Error::NotFound);
         }
+        harmion_protocol::snapshot_conflict_view_size(
+            &snapshot,
+            grants.is_administrator(),
+            harmion_protocol::MAX_APP_RESPONSE_BYTES,
+        )
+        .ok_or(Error::ResponseTooLarge)?;
         let purpose = if management {
             TokenPurpose::Manage
         } else {

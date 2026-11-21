@@ -50,6 +50,24 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
     let capabilities = client.call("capabilities", &[]).await.unwrap();
     assert_eq!(capabilities["oauth"], false);
     assert_eq!(capabilities["query"], true);
+    assert!(
+        capabilities["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|method| method == "sync-status")
+    );
+    let status = client.sync_status(None).await.unwrap();
+    assert_eq!(status.local_high, "0");
+    assert!(status.peers.is_empty());
+    assert!(matches!(
+        client.call("sync-status", &[0; 31]).await,
+        Err(harmion_client::Error::Http(400))
+    ));
+    assert!(matches!(
+        client.sync_status(Some(UpdateId([99; 32]))).await,
+        Err(harmion_client::Error::Http(404))
+    ));
     let content = ContentId([4; 32]);
     let request = SaveRequest {
         request_id: RequestId([5; 32]),
@@ -129,6 +147,14 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
         reader.call("metrics", &[]).await,
         Err(harmion_client::Error::Http(403))
     ));
+    assert!(matches!(
+        reader.sync_status(None).await,
+        Err(harmion_client::Error::Http(403))
+    ));
+    let saved_update = UpdateId(unhex(saved["update_id"].as_str().unwrap()).unwrap());
+    let status = client.sync_status(Some(saved_update)).await.unwrap();
+    assert_eq!(status.local_high, "2");
+    assert_eq!(status.update, Some(hex(&saved_update.0)));
     let metrics = client.call("metrics", &[]).await.unwrap();
     assert_eq!(metrics["contents"], "2");
     assert_eq!(metrics["visible_contents"], "2");
@@ -247,6 +273,20 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
         },
     };
     let created = client.save(&create).await.unwrap();
+    // The current view fits, but including its full candidate set does not.
+    assert_eq!(
+        client.get(oversized).await.unwrap()["content"]["body"]
+            .as_str()
+            .unwrap()
+            .len(),
+        800_000
+    );
+    for operation in ["conflicts", "inspect"] {
+        assert!(matches!(
+            client.call(operation, &oversized.0).await,
+            Err(harmion_client::Error::Http(413))
+        ));
+    }
     let edit = SaveRequest {
         request_id: RequestId([12; 32]),
         content_id: oversized,
@@ -267,9 +307,20 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
     assert!(receipt["view"].is_null());
     assert_eq!(receipt["view_error"], "response_too_large");
     assert_eq!(client.save(&edit).await.unwrap(), receipt);
+    for _ in 0..2 {
+        for operation in ["get", "conflicts", "inspect"] {
+            assert!(matches!(
+                client.call(operation, &oversized.0).await,
+                Err(harmion_client::Error::Http(413))
+            ));
+        }
+    }
+    // Rejected large reads must neither change the durable receipt nor reveal
+    // response size to a credential that has already been revoked.
+    assert_eq!(client.save(&edit).await.unwrap(), receipt);
     assert!(matches!(
-        client.get(oversized).await,
-        Err(harmion_client::Error::Http(413))
+        reader.get(oversized).await,
+        Err(harmion_client::Error::Http(401))
     ));
     stop.send(true).unwrap();
     server.await.unwrap().unwrap();

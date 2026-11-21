@@ -1,0 +1,45 @@
+name = "harmion-hub"
+main = "src/worker.js"
+compatibility_date = "2026-11-01"
+workers_dev = false
+
+# Set the custom domain that matches ORIGIN before deploying, for example:
+# routes = [{ pattern = "hub.example/*", zone_name = "example" }]
+
+[build]
+command = "bash build.sh"
+
+[assets]
+directory = "./public"
+run_worker_first = [
+  "/state",
+  "/peer/*",
+  "/admin/*",
+  "/provision",
+  "/capabilities",
+  "/overview",
+  "/members",
+  "/peers",
+  "/provision-status",
+  "/registration-code",
+  "/internal/*",
+]
+
+[[durable_objects.bindings]]
+name = "NODE"
+class_name = "Node"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Node"]
+
+[vars]
+CLUSTER = "REPLACE_CLUSTER_ID"
+NODE_ID = "REPLACE_NODE_ID"
+EPOCH = "REPLACE_EPOCH"
+ORIGIN = "https://hub.example"
+SYNC_INTERVAL_MS = "300000"
+# Secrets (wrangler secret put, never in this file):
+#   SEED            node membership signing seed (32 bytes hex)
+#   ADMIN_TOKEN     app-layer bearer for /admin/* and /internal/*
+#   BOOTSTRAP_TOKEN one-time provisioning token; remove/rotate after provisioning
