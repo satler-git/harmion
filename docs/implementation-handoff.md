@@ -29,12 +29,26 @@ quota節約のため、**Cloudflareレプリカ本体・Android・Windowsの新�
 - native daemonへのPeer v2 listener配線は、所有者提供のWebPKI証明書・origin設定の手順が未確定のため行っていない。
 - Android・Windows、Interpreter。
 
+2026-11-22: ここまでの作業を commit `174bc2f` に記録した（未コミット差分なし）。直ちにデプロイする予定はないため、次はInterpreterのローカル実装に進む。
+
 次の実装順:
 
-1. Workers版の運用準備（Accessポリシー、secret配布、provision後のbootstrap無効化、TLS終端、isolate単位のschemaキャッシュ）を設計・実装する。
-2. native daemonとローカルreplicaのend-to-end（中断・退役・cold start・再送）を検証する。
-3. 所有者が運用構成（origin・証明書・secret・課金）を確認した後に実配置を検証する。
-4. Android → WindowsのOSホストへ進む。
+1. Interpreter（契約確定 → registry/provider_session/invocation → App/Provider API → SDK/CLI → 管理UI）
+2. native daemonを設定から起動するE2E（App/管理API・管理画面の初期化を含む）
+3. 所有者が必要とした時点でWorkersの本番運用準備（Accessポリシー、secret配布、TLS終端、isolate単位のschemaキャッシュ）
+4. Android → WindowsのOSホスト
+
+### Interpreterを始めるための準備
+
+仕様は[specification.md](specification.md) §7と[app-api.md](app-api.md)、モジュール境界は[architecture.md](architecture.md)にある。実装前に次を確定する。
+
+- 登録情報の契約: 名前、契約バージョン、入出力スキーマ、デフォルトQuery宣言の形式
+- JSON-RPC 2.0のメソッド名とエラーコード、callのタイムアウト・キャンセル・部分応答の扱い
+- Provide/Call権限のgrant表現と、同名提供元の承認・選択（ノード内で一意）
+- Provider接続の認証（loopback WS＋アプリ資格情報）と、未接続・再起動・提供元交代時の挙動
+- 入力スナップショットのサイズ上限と、displayの扱い
+
+初期スライスは、registryとprovider_session、1つの`call`（入力スナップショット、タイムアウト、キャンセル、構造化data/display/error）、偽提供元を使ったnodeテスト、App APIのlist/describe/call/cancelまでとする。管理UIとSDKはその後。
 
 ## 1. native本体で実装済み
 
