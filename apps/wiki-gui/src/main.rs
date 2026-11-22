@@ -2567,7 +2567,7 @@ fn inspector_info(state: &AppState) -> Div {
                 .items_center()
                 .gap(4.0_f32)
                 .child(section_label("接続"))
-                .child(ui_text("4", 10.0, theme().text_disabled)),
+                .child(ui_text("—", 10.0, theme().text_disabled)),
         )
         .child(
             div()
@@ -2575,7 +2575,7 @@ fn inspector_info(state: &AppState) -> Div {
                 .flex()
                 .items_center()
                 .gap(7.0_f32)
-                .child(dot(theme().success))
+                .child(dot(theme().text_disabled))
                 .child(ui_text("provider 状態は未取得", 12.0, theme().text_muted)),
         )
         .child(

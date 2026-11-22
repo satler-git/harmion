@@ -20,7 +20,7 @@ Last updated: 2026-11-23
 - `[[target|label]]`, `![[target]]`, `![provider(args)]`
 - Markdown outline extraction, code-fence masking
 - Link index: outgoing, backlinks, 2-hop suggestions
-- 17 unit tests pass
+- 19 unit tests pass
 
 ### `apps/wiki-server`
 
@@ -37,7 +37,7 @@ Last updated: 2026-11-23
 - Dev-only `--node DIR` snapshot using `harmion-client::Client::from_directory`
   (admin secret). `save` is body-only and refuses if the node body changed since
   the snapshot; create/convert/delete still return 501.
-- 34 + 2 tests pass (unit + integration)
+- 36 + 2 tests pass (unit + integration)
 
 ### `apps/wiki-lsp`
 

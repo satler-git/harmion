@@ -1293,6 +1293,11 @@ mod tests {
         assert_eq!(updated.tags, ["a", "b"]);
         assert_eq!(updated.rev, page.rev + 1);
         assert_eq!(state.open("p-test").unwrap().title, "Renamed");
+
+        let error = state
+            .update_meta("p-test", Some(99), Some("Nope".to_owned()), None, None)
+            .unwrap_err();
+        assert_eq!(error.code, 409);
     }
 
     #[test]
