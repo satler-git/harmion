@@ -392,9 +392,9 @@ async fn automatic_sync(
                     Err(harmion_net_native::Error::Node(
                         harmion_node::Error::PeerRetired | harmion_node::Error::MembershipConflict,
                     )) => 0,
-                    Err(_) => {
+                    Err(error) => {
                         if previous == 0 {
-                            tracing::warn!(peer = %hex(&node.0), "peer unavailable; retrying");
+                            tracing::warn!(peer = %hex(&node.0), %error, "peer unavailable; retrying");
                         }
                         previous.saturating_add(1)
                     }
