@@ -104,6 +104,8 @@ pub trait OwnerSigner: Send + Sync {
 pub struct SshSigner {
     pub key: PathBuf,
     pub namespace: String,
+    /// Effective agent socket (for example 1Password from `IdentityAgent`).
+    pub agent_socket: Option<PathBuf>,
 }
 
 impl SshSigner {
@@ -111,24 +113,56 @@ impl SshSigner {
         Self {
             key: key.into(),
             namespace: protocol::owner::NAMESPACE.to_owned(),
+            agent_socket: None,
+        }
+    }
+
+    pub fn with_agent_socket(key: impl Into<PathBuf>, socket: impl Into<PathBuf>) -> Self {
+        Self {
+            key: key.into(),
+            namespace: protocol::owner::NAMESPACE.to_owned(),
+            agent_socket: Some(socket.into()),
         }
     }
 }
 
 /// Probe `ssh-add -L` with a short deadline. A locked or unresponsive agent
 /// must not hang every CLI/admin startup; callers fall back to a key file.
-fn agent_keys() -> Option<String> {
+fn agent_socket() -> Option<PathBuf> {
+    if let Some(socket) = std::env::var_os("HARMION_SSH_AUTH_SOCK") {
+        return Some(PathBuf::from(socket));
+    }
+    let current = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
+    let output = Command::new("ssh")
+        .args(["-G", "harmion.invalid"])
+        .output()
+        .ok()?;
+    let config = String::from_utf8(output.stdout).ok()?;
+    let Some(configured) = config
+        .lines()
+        .find_map(|line| line.strip_prefix("identityagent "))
+    else {
+        return current;
+    };
+    let path = PathBuf::from(configured.trim());
+    path.exists().then_some(path).or(current)
+}
+
+fn agent_keys(socket: Option<&Path>) -> Option<String> {
     use std::{
         io::Read,
         process::Stdio,
         time::{Duration, Instant},
     };
-    let mut child = Command::new("ssh-add")
+    let mut command = Command::new("ssh-add");
+    command
         .arg("-L")
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    if let Some(socket) = socket {
+        command.env("SSH_AUTH_SOCK", socket);
+    }
+    let mut child = command.spawn().ok()?;
     let deadline = Instant::now() + Duration::from_secs(2);
     let status = loop {
         match child.try_wait() {
@@ -156,7 +190,8 @@ fn agent_keys() -> Option<String> {
 /// exposed by `ssh-add -L`. `ssh-keygen -Y sign -f <public key>` asks the
 /// agent for the signature, so no private key is read here.
 pub fn ssh_agent_signer() -> Option<SshSigner> {
-    let keys = agent_keys()?;
+    let socket = agent_socket();
+    let keys = agent_keys(socket.as_deref())?;
 
     let mut lines = keys.lines().filter(|line| {
         line.starts_with("ssh-")
@@ -173,7 +208,10 @@ pub fn ssh_agent_signer() -> Option<SshSigner> {
     fs::create_dir_all(&directory).ok()?;
     let path = directory.join("owner-agent.pub");
     fs::write(&path, format!("{line}\n")).ok()?;
-    Some(SshSigner::new(path))
+    Some(match socket {
+        Some(socket) => SshSigner::with_agent_socket(path, socket),
+        None => SshSigner::new(path),
+    })
 }
 
 impl OwnerSigner for SshSigner {
@@ -182,13 +220,18 @@ impl OwnerSigner for SshSigner {
         let result = (|| {
             let statement_path = directory.join("statement");
             fs::write(&statement_path, statement)?;
-            let output = Command::new("ssh-keygen")
+            let mut command = Command::new("ssh-keygen");
+            command
                 .args(["-Y", "sign", "-f"])
                 .arg(&self.key)
                 .args(["-n", &self.namespace])
                 .arg(&statement_path)
                 .stdin(Stdio::null())
-                .env("LC_ALL", "C")
+                .env("LC_ALL", "C");
+            if let Some(socket) = &self.agent_socket {
+                command.env("SSH_AUTH_SOCK", socket);
+            }
+            let output = command
                 .output()
                 .map_err(|error| Error::Signer(error.to_string()))?;
             if !output.status.success() {

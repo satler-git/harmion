@@ -566,3 +566,9 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - 退役後、2台目の daemon を停止し、`~/.local/share/harmion/second` を削除した。`harmion node list` は `main` だけになった。main の membership には退役履歴が retired として残る。
 - 所有者署名は1Password SSH agent（`SSH_AUTH_SOCK=~/.1password/agent.sock`）で実行した。`ssh-agent` がロックされていても通常のR1コマンドが固まらないよう、agent 検出は2秒で打ち切り、R2実行時だけ遅延検出するようにした。
 - Worker の `/admin/members` は Access 有効化後、一時 Service Token では `401` になり直接再取得できなかった。Worker 側の反映は main→Worker 同期の成功（remote_high=2）まで確認し、Access 経由の画面確認は未実施。
+
+### R63 — OpenSSH IdentityAgent の尊重
+
+- `~/.ssh/config` の `IdentityAgent ~/.1password/agent.sock` を `ssh -G` で解決し、`ssh-add -L` と `ssh-keygen -Y sign` の両方に `SSH_AUTH_SOCK` として渡すようにした。`HARMION_SSH_AUTH_SOCK` で明示上書きもできる。
+- 既定の `SSH_AUTH_SOCK` がロックされた gpg-agent を向いていても、IdentityAgent が有効なら R2 署名が通る。`harmion export` を `SSH_AUTH_SOCK` 上書きなしで実行し、1Password 経由で成功することを確認した。
+- agent の列挙は2秒で打ち切り、R1 コマンドでは agent を触らない。R2 実行時だけ遅延検出する。
