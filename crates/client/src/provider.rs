@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    time::timeout,
+    time::{sleep, timeout},
 };
 use tokio_rustls::TlsConnector;
 
@@ -43,6 +43,9 @@ pub struct ProviderClient {
     io: TokioIo<hyper::upgrade::Upgraded>,
     buffer: Vec<u8>,
     mask: [u8; 4],
+    info: ConnectionInfo,
+    credential: [u8; 32],
+    provider: ProviderId,
     _connection: Connection,
 }
 impl ProviderClient {
@@ -118,6 +121,9 @@ impl ProviderClient {
             io: TokioIo::new(upgraded),
             buffer: Vec::new(),
             mask: random[16..20].try_into().expect("four bytes"),
+            info,
+            credential,
+            provider: provider_id,
             _connection: connection,
         };
         provider
@@ -208,6 +214,48 @@ impl ProviderClient {
         self.send_json(&rpc_result(&json!(protocol::hex(&invocation.0)), result))
             .await
     }
+    /// Reattach after the previous connection closed. The caller remains
+    /// responsible for deciding which in-flight work must be retried.
+    pub async fn reconnect(&mut self) -> Result<(), Error> {
+        let next = Self::connect(self.info.clone(), self.credential, self.provider).await?;
+        *self = next;
+        Ok(())
+    }
+
+    /// Reattach with bounded exponential backoff for transport-level failures.
+    /// Attach rejections and invalid responses are returned immediately.
+    pub async fn reconnect_with_retry(&mut self, attempts: u32) -> Result<(), Error> {
+        let next =
+            Self::connect_with_retry(self.info.clone(), self.credential, self.provider, attempts)
+                .await?;
+        *self = next;
+        Ok(())
+    }
+
+    /// Initial connection with bounded exponential backoff for transient
+    /// transport failures.
+    pub async fn connect_with_retry(
+        info: ConnectionInfo,
+        credential: [u8; 32],
+        provider: ProviderId,
+        attempts: u32,
+    ) -> Result<Self, Error> {
+        let attempts = attempts.max(1);
+        let mut attempt = 0;
+        loop {
+            match Self::connect(info.clone(), credential, provider).await {
+                Ok(client) => return Ok(client),
+                Err(error) if attempt + 1 < attempts && retryable(&error) => {
+                    let delay = Duration::from_millis(100_u64 << attempt.min(5))
+                        .min(Duration::from_secs(2));
+                    sleep(delay).await;
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     pub async fn close(&mut self) -> Result<(), Error> {
         self.send_frame(Frame::close(1000, "")).await
     }
@@ -274,6 +322,13 @@ impl ProviderClient {
         protocol::decode_app_json(text.as_bytes()).map_err(|_| Error::InvalidResponse)
     }
 }
+fn retryable(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Transport | Error::Timeout | Error::Http(429 | 503)
+    )
+}
+
 fn decode_invocation(id: &Json) -> Result<InvocationId, Error> {
     let text = id.as_str().ok_or(Error::InvalidResponse)?;
     protocol::unhex::<32>(text)

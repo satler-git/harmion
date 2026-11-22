@@ -159,6 +159,10 @@ impl WsConnection {
         self.send_frame(Frame::new(true, Opcode::Text, text.as_bytes().to_vec()))
             .await
     }
+    pub async fn send_ping(&mut self) -> Result<(), WsError> {
+        self.send_frame(Frame::new(true, Opcode::Ping, Vec::new()))
+            .await
+    }
     pub async fn send_close(&mut self, code: u16, reason: &str) -> Result<(), WsError> {
         if self.closed {
             return Ok(());

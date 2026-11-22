@@ -81,7 +81,8 @@ grantはアプリ単位の`call`と`provide`、および`provide`時の任意の
 - 登録がapprovedで、認証されたアプリが登録の所有元で、現在`provide`を持つ場合だけ成功する。
 - 拒否はJSON-RPC error。`-32010`は未承認・他アプリ所有、`-32011`は提供元不一致、`-32012`は同じ接続での二重attach。接続は閉じる。
 - 一つの`provider_id`に同時に接続できるセッションは一つ。新しいattachは古いセッションを閉じ、古いセッションの実行中呼び出しを503相当で終了させる。
-- セッションはプロセス内だけに保持し、ノード再起動で失われる。Providerは再接続する。Rustの`ProviderClient`は1接続を順に扱うAPIで、自動再接続や呼び出しの並列実行ループは提供しない。
+- セッションはプロセス内だけに保持し、ノード再起動で失われる。ノードは20秒ごとにWebSocket Pingを送り、ProviderはPongを返す。Pingの書込み失敗で接続を閉じるが、Pongの期限監視による半切断検出はv1では行わない。
+- Rustの`ProviderClient`は1接続を順に扱う。`reconnect`で同じProviderへ再接続でき、`reconnect_with_retry`/`connect_with_retry`はtransport/timeout/429/503だけを指数backoffで再試行する。呼び出しの並列実行ループや、失われたinvocationの自動再送は提供しない。
 
 ### 4.2 呼び出し
 
@@ -180,7 +181,7 @@ OAuth originでは、access tokenで同じticketを再発行できる。
 - `timeout_ms`は省略時10000、100〜30000。範囲外は400。
 - 成功はHTTP 200で`{"invocation_id":"hex","status":"ok","data":...,"display":...}`。
 - ProviderアプリケーションエラーはHTTP 200で`{"invocation_id":"hex","status":"error","error":{...}}`。
-- Provider未接続・セッション消失は503 `interpreter_unavailable`。タイムアウトは504 `interpreter_timeout`。呼び出し元によるキャンセルは409 `interpreter_cancelled`。同時実行上限は429 `interpreter_capacity`。ノード全体32件、アプリごと8件。
+- Provider未接続・セッション消失は503 `interpreter_unavailable`。タイムアウトは504 `interpreter_timeout`。呼び出し元によるキャンセルは409 `interpreter_cancelled`。同時実行上限は429 `interpreter_capacity`。ノード全体32件、アプリごと8件、Providerごと8件。
 - 呼び出し元のHTTPタスクが消えた場合、ノードはcancelを送り、待機状態を回収する。
 - 呼び出しは冪等ではない。同じ要求の再送は別のinvocationになり得る。request receiptはv1にない。
 
@@ -238,6 +239,7 @@ OAuth originでは、access tokenで同じticketを再発行できる。
   - 承認済みでsecretとPKCEが一致した場合だけ、access token（10分）、refresh token（30日系列）、scope、`client_id`、任意のProvider `ticket`/`websocket_url`を返す。完了は単回で、応答を失った場合は要求を作り直す。
   - 未承認は409 `connection_pending`、拒否は403 `connection_denied`、期限切れは410 `connection_expired`、完了済みは409 `connection_completed`。secret不一致は404。
   - 応答のscopeは承認時のgrantを表す。App APIの認証時はDBの現在grantを再検査するため、以後の縮小・失効は既存access tokenにも及ぶ。
+  - 同じ`connection_id`・request secret・PKCE verifierの完了要求は、成功後60秒間プロセス内キャッシュから同じ応答を返す。ノード再起動後はキャッシュが消えるため409 `connection_completed`になる。
 
 ### 6.4 Webアプリの完了通知
 

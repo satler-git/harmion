@@ -55,7 +55,9 @@ pub enum FilterSpec {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantSpec {
+    #[serde(default)]
     pub read: Option<FilterSpec>,
+    #[serde(default)]
     pub write: Option<FilterSpec>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub call: bool,
@@ -63,7 +65,9 @@ pub struct GrantSpec {
     pub provide: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provide_names: Vec<String>,
+    #[serde(default)]
     pub manage_apps: bool,
+    #[serde(default)]
     pub manage_nodes: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -116,6 +116,7 @@ impl ActiveInvocation {
 pub enum BeginError {
     NodeCapacity,
     AppCapacity,
+    ProviderCapacity,
     Duplicate,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,22 +130,27 @@ pub enum CancelOutcome {
 pub struct InvocationTable {
     max_node: usize,
     max_app: usize,
+    max_provider: usize,
     active: BTreeMap<InvocationId, ActiveInvocation>,
     per_app: BTreeMap<AppId, usize>,
+    per_provider: BTreeMap<ProviderId, usize>,
 }
 impl InvocationTable {
-    pub fn new(max_node: usize, max_app: usize) -> Self {
+    pub fn new(max_node: usize, max_app: usize, max_provider: usize) -> Self {
         Self {
             max_node,
             max_app,
+            max_provider,
             active: BTreeMap::new(),
             per_app: BTreeMap::new(),
+            per_provider: BTreeMap::new(),
         }
     }
     pub fn default_limits() -> Self {
         Self::new(
             harmion_protocol::interpreter::MAX_ACTIVE_INVOCATIONS,
             harmion_protocol::interpreter::MAX_ACTIVE_INVOCATIONS_PER_APP,
+            harmion_protocol::interpreter::MAX_ACTIVE_INVOCATIONS_PER_PROVIDER,
         )
     }
     pub fn begin(&mut self, invocation: ActiveInvocation) -> Result<(), BeginError> {
@@ -158,7 +164,17 @@ impl InvocationTable {
         if count >= self.max_app {
             return Err(BeginError::AppCapacity);
         }
+        let provider_count = self
+            .per_provider
+            .get(&invocation.provider)
+            .copied()
+            .unwrap_or(0);
+        if provider_count >= self.max_provider {
+            return Err(BeginError::ProviderCapacity);
+        }
         self.per_app.insert(invocation.app, count + 1);
+        self.per_provider
+            .insert(invocation.provider, provider_count + 1);
         self.active.insert(invocation.id, invocation);
         Ok(())
     }
@@ -166,7 +182,7 @@ impl InvocationTable {
     /// already finished; the caller must not deliver a second outcome.
     pub fn finish(&mut self, id: InvocationId) -> Option<ActiveInvocation> {
         let invocation = self.active.remove(&id)?;
-        self.decrement(invocation.app);
+        self.decrement(invocation.app, invocation.provider);
         Some(invocation)
     }
     pub fn cancel(&mut self, id: InvocationId, app: AppId) -> CancelOutcome {
@@ -214,11 +230,17 @@ impl InvocationTable {
     pub fn is_empty(&self) -> bool {
         self.active.is_empty()
     }
-    fn decrement(&mut self, app: AppId) {
+    fn decrement(&mut self, app: AppId, provider: ProviderId) {
         if let Some(count) = self.per_app.get_mut(&app) {
             *count -= 1;
             if *count == 0 {
                 self.per_app.remove(&app);
+            }
+        }
+        if let Some(count) = self.per_provider.get_mut(&provider) {
+            *count -= 1;
+            if *count == 0 {
+                self.per_provider.remove(&provider);
             }
         }
     }
@@ -240,7 +262,7 @@ mod tests {
 
     #[test]
     fn node_and_app_capacity_are_independent_and_released() {
-        let mut table = InvocationTable::new(2, 1);
+        let mut table = InvocationTable::new(2, 1, 2);
         table.begin(invocation(1, 1, 9, 100)).unwrap();
         assert_eq!(
             table.begin(invocation(2, 1, 9, 100)),
@@ -256,8 +278,21 @@ mod tests {
     }
 
     #[test]
+    fn provider_capacity_is_independent_of_app_capacity() {
+        let mut table = InvocationTable::new(8, 8, 1);
+        table.begin(invocation(1, 1, 9, 100)).unwrap();
+        assert_eq!(
+            table.begin(invocation(2, 2, 9, 100)),
+            Err(BeginError::ProviderCapacity)
+        );
+        table.begin(invocation(3, 2, 8, 100)).unwrap();
+        table.finish(InvocationId([1; 32])).unwrap();
+        table.begin(invocation(4, 1, 9, 100)).unwrap();
+    }
+
+    #[test]
     fn cancel_requires_the_owner_and_expiry_only_returns_due_entries() {
-        let mut table = InvocationTable::new(8, 8);
+        let mut table = InvocationTable::new(8, 8, 8);
         table.begin(invocation(1, 1, 9, 50)).unwrap();
         table.begin(invocation(2, 2, 9, 150)).unwrap();
         assert_eq!(
@@ -282,7 +317,7 @@ mod tests {
 
     #[test]
     fn provider_disconnect_and_app_revocation_remove_only_their_entries() {
-        let mut table = InvocationTable::new(8, 8);
+        let mut table = InvocationTable::new(8, 8, 8);
         table.begin(invocation(1, 1, 9, 100)).unwrap();
         table.begin(invocation(2, 1, 8, 100)).unwrap();
         table.begin(invocation(3, 2, 9, 100)).unwrap();

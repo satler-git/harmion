@@ -175,7 +175,7 @@ nativeのApp APIは次の操作を提供する。証明書固定のloopback HTTP
 | `interpreter-cancel` | `call`（開始したアプリのみ） | 32バイトのinvocation ID。Providerへ通知し、待機中の呼び出しを409で終了する。 |
 | `interpreter-ticket` | `provide` | 32バイトのprovider ID（または`{"provider_id":"hex"}`）。ブラウザ用の単回ticketとOAuth originの`websocket_url`を返す。WebはOAuth originの`/connect/ticket`でaccess tokenから再発行できる。 |
 
-Providerは`GET /provider/v1/connect`へアプリ資格情報付きのloopback WebSocketを開き、`interpreter.attach`で接続する。ブラウザProviderは`interpreter-ticket`または統合接続の完了応答が返す`wss://.../provider/connect?ticket=...`を使う。ticketを失った場合やWebSocket接続に失敗した場合は、OAuth originの`POST /connect/ticket`へ`Authorization: Bearer <access token>`と`{"provider_id":"hex"}`を送って再発行する。ticketは30秒・単回・アプリごと8件・全体128件。ノード再起動でメモリ上のticketは失効する。ノードは現在の`provide`・`provide_names`と承認状態をDBで再検査する。callの本文は`get`/`query`で得た編集トークンが固定したスナップショットを使い、ProviderへトークンやRead権限を渡さない。Content入力は最大64件、呼び出し全体は2 MiB、`data`は1 MiB、`display.text`は64 KiBまで。timeoutは100〜30,000 ms（既定10,000 ms）。ノード全体32件・アプリごと8件の同時上限を持つ。
+Providerは`GET /provider/v1/connect`へアプリ資格情報付きのloopback WebSocketを開き、`interpreter.attach`で接続する。ブラウザProviderは`interpreter-ticket`または統合接続の完了応答が返す`wss://.../provider/connect?ticket=...`を使う。ticketを失った場合やWebSocket接続に失敗した場合は、OAuth originの`POST /connect/ticket`へ`Authorization: Bearer <access token>`と`{"provider_id":"hex"}`を送って再発行する。ticketは30秒・単回・アプリごと8件・全体128件。ノード再起動でメモリ上のticketは失効する。ノードは現在の`provide`・`provide_names`と承認状態をDBで再検査する。callの本文は`get`/`query`で得た編集トークンが固定したスナップショットを使い、ProviderへトークンやRead権限を渡さない。Content入力は最大64件、呼び出し全体は2 MiB、`data`は1 MiB、`display.text`は64 KiBまで。timeoutは100〜30,000 ms（既定10,000 ms）。ノード全体32件・アプリごと8件・Providerごと8件の同時上限を持つ。ノードはProviderへ20秒ごとにPingを送る。
 
 未接続は503 `interpreter_unavailable`、タイムアウトは504 `interpreter_timeout`、キャンセルは409 `interpreter_cancelled`、Providerのアプリケーションエラーは200で`status:"error"`を返す。呼び出しは冪等ではなく、v1にrequest receiptはない。capabilitiesは`interpreter: true`と契約バージョン・上限を返す。
 
@@ -190,7 +190,7 @@ Rust SDKは`Client::interpreter_list`・`interpreter_describe`・`interpreter_re
 1. アプリが`connect-start`へアプリ名、loopback callback、任意の`web_origin`、PKCE challenge、state、grant、任意のProvider manifestを送る。応答の`connection_id`と`request_secret`を保持する。OAuth originが有効なら`verification_url`も返る。
 2. 所有者は管理UIの「接続」画面で内容を確認し、承認・拒否する。承認はOAuthクライアント作成、grant確定、Provider登録・承認を1つのDB transactionで行う。同名Providerの置換は所有者が明示的に選ぶ。
 3. アプリは`connect-status`をポーリングするか、Webアプリは`verification_url`をポップアップで開く。ヘルパーページは承認を`window.opener.postMessage`で通知するが、secretやトークンは渡さない。
-4. アプリは`connect-complete`へsecretとPKCE verifierを送り、access token・refresh token・Provider ticketを受け取る。完了は単回。応答を失った場合は要求を作り直す。Provider ticketだけを失った場合は、OAuth originの`/connect/ticket`へaccess tokenを提示して再発行できる。
+4. アプリは`connect-complete`へsecretとPKCE verifierを送り、access token・refresh token・Provider ticketを受け取る。同じsecretとverifierの再送は60秒間同じ応答を返す（プロセス内キャッシュ）。60秒経過後やノード再起動後は要求を作り直す。Provider ticketだけを失った場合は、OAuth originの`/connect/ticket`へaccess tokenを提示して再発行できる。
 
 OAuth専用originでは同じ操作を`/connect/start`・`/connect/status`・`/connect/complete`として提供し、loopback originにだけCORSを許可する。認証情報・Cookieは使わない。ticket再発行だけは`/connect/ticket`で`Authorization: Bearer`を受け付ける。
 

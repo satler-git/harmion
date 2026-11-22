@@ -57,6 +57,10 @@ quota節約のため、**Cloudflareレプリカ本体・Android・Windowsの新�
 
 統合接続・OAuth決定経路でもgrant変更後のセッション再評価を行うようにし、`provide_names`の手動上限、OAuth originのticket再発行（`/connect/ticket`）を追加した。詳細は[R54](implementation-review.md)。`connect-complete`の単回性とticketのメモリ保持は残る制約。
 
+### 2026-11-22 追記（R55）
+
+実`harmiond`＋`harmion-admin`の統合接続E2E、Provider WebSocket Ping、`ProviderClient`の再接続/backoff、`connect-complete`の60秒再送キャッシュ、Providerごと8件の同時上限を追加した。詳細は[R55](implementation-review.md)。Pong期限監視・永続audit・invocation自動再送は残る制約。
+
 次の実装順:
 
 1. Interpreter（契約確定 → registry/provider_session/invocation → App/Provider API → SDK/CLI → 管理UI） — native v1初期スライスはR52、統合接続と権限はR53で完了

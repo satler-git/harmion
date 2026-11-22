@@ -12,6 +12,62 @@ use harmion_protocol::connect::{
 use harmion_protocol::interpreter::ProviderId;
 use harmion_protocol::{GrantSpec, hex, unhex};
 use serde_json::{Value as Json, json};
+use std::{
+    collections::BTreeMap,
+    sync::{Mutex, OnceLock},
+};
+
+const COMPLETION_CACHE_TTL: i64 = 60_000_000;
+const COMPLETION_CACHE_MAX: usize = 128;
+
+struct CachedCompletion {
+    verifier: String,
+    expires_at: i64,
+    response: Json,
+}
+
+fn completion_cache() -> &'static Mutex<BTreeMap<[u8; 32], CachedCompletion>> {
+    static CACHE: OnceLock<Mutex<BTreeMap<[u8; 32], CachedCompletion>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn cached_completion(key: [u8; 32], verifier: &str, now: i64) -> Result<Option<Json>, Error> {
+    let mut cache = completion_cache()
+        .lock()
+        .map_err(|_| harmion_node::Error::Storage("completion cache poisoned".into()))?;
+    cache.retain(|_, entry| entry.expires_at > now);
+    let Some(entry) = cache.get(&key) else {
+        return Ok(None);
+    };
+    if entry.verifier != verifier {
+        return Err(harmion_node::Error::InvalidRequest.into());
+    }
+    Ok(Some(entry.response.clone()))
+}
+
+fn remember_completion(key: [u8; 32], verifier: String, response: Json) {
+    let Ok(mut cache) = completion_cache().lock() else {
+        return;
+    };
+    let now = SystemHost.now_micros();
+    cache.retain(|_, entry| entry.expires_at > now);
+    if cache.len() >= COMPLETION_CACHE_MAX
+        && let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.expires_at)
+            .map(|(key, _)| *key)
+    {
+        cache.remove(&oldest);
+    }
+    cache.insert(
+        key,
+        CachedCompletion {
+            verifier,
+            expires_at: now.saturating_add(COMPLETION_CACHE_TTL),
+            response,
+        },
+    );
+}
 
 pub(crate) async fn handle_public<S: Store + Send + 'static>(
     store: &SharedStore<S>,
@@ -60,10 +116,17 @@ pub(crate) async fn handle_public<S: Store + Send + 'static>(
             let id = harmion_protocol::connect::connection_id(&request.connection_id)?;
             let secret = unhex(&request.request_secret)?;
             let verifier = request.code_verifier;
-            let completion = store
-                .run(move |s| node_connect::complete(s, &mut SystemHost, id, secret, &verifier))
-                .await?;
+            let key = Credential::from_bytes(secret).verifier();
             let now = SystemHost.now_micros();
+            if let Some(response) = cached_completion(key, &verifier, now)? {
+                return Ok(response);
+            }
+            let verifier_for_node = verifier.clone();
+            let completion = store
+                .run(move |s| {
+                    node_connect::complete(s, &mut SystemHost, id, secret, &verifier_for_node)
+                })
+                .await?;
             let provider = completion
                 .provider
                 .map(|provider| -> Result<ProviderConnectionInfo, Error> {
@@ -104,7 +167,7 @@ pub(crate) async fn handle_public<S: Store + Send + 'static>(
                 })
                 .transpose()?;
             let tokens = completion.tokens;
-            Ok(serde_json::to_value(ConnectionCompletion {
+            let response = serde_json::to_value(ConnectionCompletion {
                 token_type: "Bearer",
                 access_token: hex(tokens.access.expose_bytes()),
                 refresh_token: hex(&tokens.refresh),
@@ -113,7 +176,9 @@ pub(crate) async fn handle_public<S: Store + Send + 'static>(
                 client_id: hex(&completion.app.0),
                 provider,
             })
-            .map_err(|_| harmion_node::Error::InvalidRequest)?)
+            .map_err(|_| harmion_node::Error::InvalidRequest)?;
+            remember_completion(key, verifier, response.clone());
+            Ok(response)
         }
         _ => Err(harmion_node::Error::InvalidRequest.into()),
     }

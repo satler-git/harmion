@@ -113,14 +113,15 @@ async fn integrated_connection_approval_registers_provider_and_call_works() {
             .unwrap()["status"],
         "approved"
     );
-    let completed = anonymous
-        .connect_complete(&ConnectionCompleteRequest {
-            connection_id,
-            request_secret,
-            code_verifier: VERIFIER.into(),
-        })
-        .await
-        .unwrap();
+    let complete_request = ConnectionCompleteRequest {
+        connection_id,
+        request_secret,
+        code_verifier: VERIFIER.into(),
+    };
+    let completed = anonymous.connect_complete(&complete_request).await.unwrap();
+    let retried = anonymous.connect_complete(&complete_request).await.unwrap();
+    assert_eq!(retried["access_token"], completed["access_token"]);
+    assert_eq!(retried["refresh_token"], completed["refresh_token"]);
     assert_eq!(completed["token_type"], "Bearer");
     assert_eq!(completed["provider"]["name"], "ledger/balance");
     assert!(completed["provider"].get("ticket").is_none());

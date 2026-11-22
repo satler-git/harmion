@@ -238,7 +238,7 @@ Interpreterはノード内の登録・承認・呼び出し仲介だけを行い
 1. Providerアプリは`provide`（と任意の`provide_names`）、呼び出し元アプリは`call`（と必要な`read`）を持つよう、所有者が`issue-app`または`change-grants`で付与する。`provide_names`は許可するProvider名だけを列挙し、空なら全名前を許可する。
 2. Providerアプリは`POST /app/v1/interpreter-register`へmanifestを送る。grantが名前を事前許可していれば`approved`、そうでなければ`pending`。
 3. 所有者が`harmion --node NODE_DIR interpreter-list`で確認し、必要なら`harmion --node NODE_DIR interpreter-approve PROVIDER_ID`で承認する。同名の承認済みProviderを置き換えるときだけ`--replace`を付ける。統合接続では手順1〜3が管理UIの「接続」承認にまとまる。
-4. ProviderはRust SDKの`ProviderClient::connect`で`/provider/v1/connect`へ接続し、`next()`で`interpreter.invoke`を受けて`succeed`/`fail`を返す。ブラウザProviderは`interpreter-ticket`または統合接続完了応答の`websocket_url`へticket付きで接続する。
+4. ProviderはRust SDKの`ProviderClient::connect`で`/provider/v1/connect`へ接続し、`next()`で`interpreter.invoke`を受けて`succeed`/`fail`を返す。`next()`が`Closed`を返した後は`reconnect`または`reconnect_with_retry`で再接続できる。ノードは20秒ごとにPingを送る。ブラウザProviderは`interpreter-ticket`または統合接続完了応答の`websocket_url`へticket付きで接続する。
 5. 呼び出し元は`interpreter-call`へ、Provider名・明示入力・`get`/`query`で得たContent IDと編集トークン・timeoutを渡す。CLIでは次の形。
 
 ```sh

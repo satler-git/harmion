@@ -156,6 +156,14 @@ async fn provider_sdk_attaches_invokes_and_observes_timeout_cancel() {
     assert_eq!(result["status"], "ok");
     assert_eq!(result["data"]["balance"], "1.00");
 
+    let replacement =
+        ProviderClient::connect(info.clone(), provider_credential, ProviderId(provider_id))
+            .await
+            .unwrap();
+    assert!(matches!(sdk.next().await.unwrap(), ProviderEvent::Closed));
+    sdk.reconnect().await.unwrap();
+    drop(replacement);
+
     let short = serde_json::to_vec(&json!({
         "provider": "ledger/balance",
         "contents": [{"id": hex(&content.0), "token": view["edit_token"]}],

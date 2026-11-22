@@ -477,6 +477,16 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - 検証: 統合接続の再承認で接続済みProviderがcloseされるE2E、サービス単体の名前縮小close、手動register/approveの名前上限、ticketの単回・期限・アプリ単位容量、OAuth originのticket再発行CORSを追加した。全workspaceテスト、Clippy、fmt、wasm check、管理UI check/build、設計チェックが成功した。
 - 限界: ticketは引き続きメモリ保持で、ノード再起動時はaccess tokenから再発行が必要。`connect-complete`自体は単回のままで、トークン応答を失った場合は要求の作り直しが必要。grant変更とセッション通知の間には短い非transaction区間があり、同時grant変更では古い許可名で閉じる可能性がある。
 
+### R55 — 実プロセス接続E2EとProvider運用hardening
+
+- 実`harmiond`＋`harmion-admin`を起動する統合接続E2E [connect_process.py](../design_checks/connect_process.py) を追加した。`connection.json`の`oauth_origin`、OAuth originの`/connect/start`・CORS、管理UI APIの`/connect-list`・`/connect-approve`、`/connect/status`・`/connect/complete`、Provider ticketの再発行、pinned App APIのaccess token、OAuth originのticket WebSocket attach、ヘルパーページを確認する。
+- Provider WebSocketに20秒間隔のPingを追加した。書込み失敗でセッションを閉じる。Pongの期限監視はv1では行わない。
+- Rust SDKの`ProviderClient`に`reconnect`、`reconnect_with_retry`、`connect_with_retry`を追加した。transport/timeout/429/503だけを指数backoffで再試行し、attach拒否は即時失敗する。E2Eで同一Providerの新しい接続による旧セッションcloseと、その後のreconnectを確認した。
+- `connect-complete`の成功応答を60秒間プロセス内キャッシュし、同じsecret・PKCE verifierの再送に同じトークン応答を返すようにした。ノード再起動後はキャッシュされない。
+- Interpreterの同時実行上限にProviderごと8件を追加した。ノード全体32件・アプリごと8件と独立して検査する。
+- 検証: 全workspaceテスト、Clippy、fmt、wasm check、管理UI check/build、`connect_process.py`、既存の設計チェックが成功した。
+- 限界: 完了キャッシュはメモリのみで、生のaccess/refresh tokenを最大60秒保持する。Pongの期限監視・自動invocation再送・永続auditは未実装。Providerごとのquotaはプロセス内の同時実行上限だけで、永続的な課金・監査はない。`connect-complete`のキャッシュはプロセスごとなので、複数プロセス配置では同じ応答を保証しない。
+
 ## 基準時点の複数ノード同期の検証条件
 
 1. 3〜5ノードで、A↔B↔Cの中継、循環、分断中の別々の編集、後着の競合解決、再送が収束し、静止後のログ件数が増えない。

@@ -33,6 +33,7 @@ pub const MAX_PROVIDER_ERROR_MESSAGE_BYTES: usize = 1024;
 pub const MAX_PROVIDER_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_ACTIVE_INVOCATIONS: usize = 32;
 pub const MAX_ACTIVE_INVOCATIONS_PER_APP: usize = 8;
+pub const MAX_ACTIVE_INVOCATIONS_PER_PROVIDER: usize = 8;
 
 pub const RPC_VERSION: &str = "2.0";
 pub const RPC_ATTACH: &str = "interpreter.attach";

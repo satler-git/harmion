@@ -539,8 +539,16 @@ impl Service {
         {
             return Err(harmion_node::Error::InterpreterUnavailable.into());
         }
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        heartbeat.tick().await;
         loop {
             tokio::select! {
+                _ = heartbeat.tick() => {
+                    if ws.send_ping().await.is_err() {
+                        break;
+                    }
+                }
                 incoming = ws.read_message() => {
                     match incoming {
                         Ok(WsMessage::Text(text)) => {
@@ -729,7 +737,7 @@ async fn reject_attach(ws: &mut WsConnection, request_id: &Json, error: &Error) 
 
 fn begin_error(error: BeginError) -> harmion_node::Error {
     match error {
-        BeginError::NodeCapacity | BeginError::AppCapacity => {
+        BeginError::NodeCapacity | BeginError::AppCapacity | BeginError::ProviderCapacity => {
             harmion_node::Error::InterpreterCapacity
         }
         BeginError::Duplicate => harmion_node::Error::InvalidRequest,
