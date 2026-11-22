@@ -65,6 +65,36 @@ local function lsp_start()
   end
 end
 
+local autosave_timers = {}
+
+local function cancel_autosave(buf)
+  local timer = autosave_timers[buf]
+  if timer then
+    timer:stop()
+    timer:close()
+    autosave_timers[buf] = nil
+  end
+end
+
+local function schedule_autosave(buf)
+  if vim.g.wiki_autosave == false or not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  cancel_autosave(buf)
+  local timer = vim.uv.new_timer()
+  autosave_timers[buf] = timer
+  timer:start(1500, 0, function()
+    vim.schedule(function()
+      autosave_timers[buf] = nil
+      if vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified then
+        vim.api.nvim_buf_call(buf, function()
+          vim.cmd("silent write")
+        end)
+      end
+    end)
+  end)
+end
+
 local function resolve_id(value)
   local opened = pcall(run, { "open", value })
   if opened then
@@ -123,6 +153,19 @@ local function open(id_or_title)
         vim.notify("wiki: fence conversion: " .. table.concat(response.failed, "; "), vim.log.levels.WARN)
       end
       vim.notify(message, vim.log.levels.INFO)
+    end,
+  })
+
+  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "InsertLeave" }, {
+    buffer = buf,
+    callback = function()
+      schedule_autosave(buf)
+    end,
+  })
+  vim.api.nvim_create_autocmd("BufWipeout", {
+    buffer = buf,
+    callback = function()
+      cancel_autosave(buf)
     end,
   })
   vim.notify(("wiki: opened %s"):format(content.title), vim.log.levels.INFO)
