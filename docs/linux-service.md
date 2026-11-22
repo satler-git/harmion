@@ -142,11 +142,24 @@ chmod 600 "$HOME/.config/harmion/backup.key"
 nix profile install nixpkgs#wrangler
 wrangler login
 wrangler kv namespace create harmion-backups
-# 表示された id を HARMION_BACKUP_KV に入れる（例）
+# 表示された namespace id と account id を控える。
+
+# OAuth access token は1時間で切れる。script が refresh_token で更新するため、
+# wrangler の設定から初期 JSON を作る（以後は script が更新する）。
+OAUTH=$HOME/.config/.wrangler/config/default.toml
+ACCESS=$(sed -n 's/^oauth_token = "\(.*\)"/\1/p' "$OAUTH")
+REFRESH=$(sed -n 's/^refresh_token = "\(.*\)"/\1/p' "$OAUTH")
+EXPIRES=$(date -d "$(sed -n 's/^expiration_time = "\(.*\)"/\1/p' "$OAUTH")" +%s)
+jq -n --arg a "$ACCESS" --arg r "$REFRESH" --argjson e "$EXPIRES" \
+  '{access_token:$a,refresh_token:$r,expires_at:$e}' \
+  > "$HOME/.config/harmion/cf-oauth.json"
+chmod 600 "$HOME/.config/harmion/cf-oauth.json"
+
 cat > "$HOME/.config/harmion/backup.env" <<EOF
 HARMION_BACKUP_KEY=$HOME/.config/harmion/backup.key
 HARMION_BACKUP_KV=<namespace-id>
-WRANGLER=$HOME/.nix-profile/bin/wrangler
+CLOUDFLARE_ACCOUNT_ID=<account-id>
+HARMION_CF_OAUTH=$HOME/.config/harmion/cf-oauth.json
 EOF
 chmod 600 "$HOME/.config/harmion/backup.env"
 
