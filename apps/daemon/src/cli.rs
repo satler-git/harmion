@@ -23,6 +23,8 @@ pub(crate) enum Command {
     ResetPeerV2 { dir: String },
     /// Write a consistent snapshot of a running node to a new directory.
     Snapshot { dir: String, out: String },
+    /// Create a bearer token for the loopback wake endpoint. Daemon stopped.
+    WakeToken { dir: String },
     /// Provision the OAuth browser TLS identity and print its trust root.
     OauthProvision {
         dir: String,
@@ -55,6 +57,9 @@ pub(crate) struct RunOptions {
     pub oauth_listen: Option<OAuthListen>,
     #[arg(long)]
     pub peer_listen: Option<SocketAddr>,
+    /// Loopback listener for the Cloudflare Tunnel wake request.
+    #[arg(long, value_name = "127.0.0.1:PORT")]
+    pub wake_listen: Option<SocketAddr>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(0..=3600))]
     pub sync_seconds: Option<u64>,
     #[arg(long, action = clap::ArgAction::Set)]

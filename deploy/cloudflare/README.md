@@ -68,10 +68,25 @@ wrangler deploy
 wrangler deploy
 ```
 
-`wrangler.toml` sets `SYNC_INTERVAL_MS = "0"` by default. Native initiates sync;
-native is not a SignedHttps v2 server, so a Worker-originated alarm cannot reach
-native peers. Set it to a non-zero value only for Worker-to-Worker clusters.
-`/internal/alarm` (bearer) can still force one round manually.
+`SYNC_INTERVAL_MS = "300000"` makes the Durable Object alarm run every five
+minutes. The alarm first calls `WAKE_URL` with `WAKE_TOKEN`; native's loopback
+wake endpoint then schedules an immediate native-initiated sync. After that the
+Worker runs its own SignedHttps outbound round. `WAKE_URL` is empty until a
+Cloudflare Tunnel route exists; `WAKE_TOKEN` is the value printed by
+`harmiond wake-token <NODE_DIR>`.
+
+A Worker cannot open a TCP connection to a NATed native node by itself. Expose
+only the wake endpoint, never the app API:
+
+```sh
+# on native
+harmiond wake-token ~/.local/share/harmion/main > wake.json   # service stopped
+# unit already runs: harmiond run ... --wake-listen 127.0.0.1:8787
+# tunnel ingress: native.satler.dev -> http://127.0.0.1:8787
+# then set WAKE_URL=https://native.satler.dev/wake and WAKE_TOKEN secret
+```
+
+`/internal/alarm` (bearer) forces both the wake call and the Worker round.
 
 ## Cloudflare Access and authentication
 
@@ -86,13 +101,19 @@ Initial deployment uses the app-layer boundary explicitly:
 - `/state` is an unauthenticated liveness probe; `/ready` reports missing or
   placeholder configuration and whether the node has been provisioned.
 
-Cloudflare Access is optional defense in depth, not the app authentication. If
-it is enabled, keep `/state`, `/ready`, `/peer/*`, `/provision` and `/internal/*`
-outside the Access application (or give monitoring a Service Token) and leave
-the bearer checks in place. Otherwise the bearer curl examples below receive an
-Access redirect instead of JSON. The admin UI uses `credentials: 'same-origin'`,
-so Access cookies work when `/`, `/assets/*` and `/admin/*` are behind Access.
-No Access policy is applied by this repository.
+Cloudflare Access is optional defense in depth, not the app authentication. To
+enable it, create a One-time PIN (or your IdP) and self-hosted applications:
+
+- `hub.satler.dev` → allow the owner email; covers `/`, `/assets/*` and
+  `/admin/*` and the root-level admin paths.
+- Bypass applications for `hub.satler.dev/peer`, `/provision`, `/internal`,
+  `/state` and `/ready`; peers and monitoring cannot hold Access cookies.
+- Keep the app-layer bearer checks enabled. The admin UI uses
+  `credentials: 'same-origin'`, so Access cookies work for `/` and `/admin/*`.
+
+Creating these requires an API token with **Access: Apps and Policies: Edit**
+and **Zone: DNS: Edit** (or the equivalent dashboard action). The wrangler OAuth
+token cannot create Access policies or DNS records.
 
 ## Provisioning
 

@@ -1,4 +1,5 @@
 mod cli;
+mod wake;
 
 use clap::Parser;
 use cli::{Cli, Command, Discovery, PeerTransport, RunOptions};
@@ -23,7 +24,11 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{net::TcpListener, sync::watch, time::Instant};
+use tokio::{
+    net::TcpListener,
+    sync::{Notify, watch},
+    time::Instant,
+};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 /// Edit tokens and request receipts older than this are reclaimed. Rows that
@@ -172,6 +177,16 @@ fn reset_peer_v2(path: &str) -> Result<()> {
         "{}",
         serde_json::json!({"reset":true,"generation":hex(&generation)})
     );
+    Ok(())
+}
+
+fn wake_token(path: &str) -> Result<()> {
+    let directory = ProtectedDir::open(path)?;
+    let _lock = directory.lock()?;
+    let token = SystemHost.random_bytes()?;
+    let encoded = hex(&token);
+    directory.write_new(wake::TOKEN_FILE, encoded.as_bytes())?;
+    println!("{}", serde_json::json!({"wake_token": encoded}));
     Ok(())
 }
 
@@ -337,6 +352,7 @@ async fn automatic_sync(
     transport: Arc<NativeTransport>,
     seconds: u64,
     mut recovery: watch::Receiver<Option<harmion_net_native::recovery::Reason>>,
+    wake: Arc<Notify>,
 ) -> Result<()> {
     let base = Duration::from_secs(seconds);
     let mut schedule = SyncSchedule::default();
@@ -405,6 +421,10 @@ async fn automatic_sync(
                 schedule.complete(node, failed, Instant::now() + delay + Duration::from_millis(jitter));
             },
             _ = store.local_save_notified() => local_save = true,
+            _ = wake.notified() => {
+                tracing::debug!("wake request; scheduling an immediate sync");
+                schedule.request_recovery(Instant::now());
+            },
             changed = recovery.changed() => {
                 if changed.is_err() {
                     return Err(DaemonError::ServiceStopped("recovery monitor").into());
@@ -646,6 +666,23 @@ async fn run(path: &str, options: RunOptions) -> Result<()> {
             }
         });
     }
+    let wake = Arc::new(Notify::new());
+    if let Some(address) = options.wake_listen {
+        if !address.ip().is_loopback() {
+            return Err("wake listener must be loopback".into());
+        }
+        if config.sync_seconds == 0 {
+            return Err("wake listener requires periodic sync to be enabled".into());
+        }
+        let token = wake::load_token(&directory)?;
+        let listener = TcpListener::bind(address).await?;
+        let notify = wake.clone();
+        tokio::spawn(async move {
+            if let Err(error) = wake::serve(listener, token, notify).await {
+                tracing::error!(%error, "wake listener stopped");
+            }
+        });
+    }
     if config.sync_seconds != 0 {
         let (recovery, hints) = watch::channel(None);
         let endpoint = iroh_endpoint.clone();
@@ -653,7 +690,13 @@ async fn run(path: &str, options: RunOptions) -> Result<()> {
             harmion_net_native::recovery::monitor(recovery, endpoint).await;
             Ok(())
         });
-        background.spawn(automatic_sync(store, transport, config.sync_seconds, hints));
+        background.spawn(automatic_sync(
+            store,
+            transport,
+            config.sync_seconds,
+            hints,
+            wake,
+        ));
     }
     println!(
         "{}",
@@ -738,6 +781,7 @@ async fn main() {
         } => restore(&backup_dir, &new_dir),
         Command::ResetPeerV2 { dir } => reset_peer_v2(&dir),
         Command::Snapshot { dir, out } => snapshot(&dir, &out),
+        Command::WakeToken { dir } => wake_token(&dir),
         Command::OauthProvision { dir, replace } => provision_oauth(&dir, replace),
         Command::OauthRoot { dir } => ProtectedDir::open(&dir)
             .map_err(Into::into)
