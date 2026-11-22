@@ -57,6 +57,26 @@
               pkgs.python3
               # Inspecting node DBs during operation/recovery.
               pkgs.sqlite
+              # AntiWebUI (Wiki M0): pkg-config metadata, fonts and Wayland.
+              pkgs.pkg-config
+              pkgs.fontconfig
+              pkgs.freetype
+              pkgs.wayland
+              pkgs.libxkbcommon
+              pkgs.vulkan-loader
+              pkgs.mesa
+              pkgs.libglvnd
+              # X11 backend (Xvfb screenshots) and the XCB libraries it links.
+              pkgs.libxcb
+              pkgs.xcbutil
+              pkgs.xcbutilcursor
+              pkgs.xcbutilimage
+              pkgs.xcbutilkeysyms
+              pkgs.xcbutilrenderutil
+              pkgs.xcbutilwm
+              pkgs.xcbutilxrm
+              pkgs.libx11
+              pkgs.xkeyboardconfig
             ];
             shellHook = ''
               echo "harmion dev shell: $(rustc --version), node $(node --version), $(python3 --version)"
