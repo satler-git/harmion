@@ -151,6 +151,8 @@ enum Command {
     UpdateMeta {
         id: String,
         #[arg(long)]
+        rev: Option<u64>,
+        #[arg(long)]
         title: Option<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
@@ -256,6 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         Command::UpdateMeta {
             id,
+            rev,
             title,
             tags,
             aliases,
@@ -263,7 +266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => print_call(
             &socket,
             "update_meta",
-            json!({ "id": id, "title": title, "tags": tags, "aliases": aliases }),
+            json!({ "id": id, "rev": rev, "title": title, "tags": tags, "aliases": aliases }),
         ),
         Command::Delete { id, socket } => print_call(&socket, "delete", json!({ "id": id })),
     }
@@ -425,6 +428,7 @@ fn dispatch_result(state: &Arc<Mutex<State>>, request: &Request) -> RpcResult<Va
         }
         "update_meta" => {
             let id = required_str(params, "id")?;
+            let rev = optional_u64(params, "rev")?;
             let title = optional_str(params, "title")?;
             let tags = if params.get("tags").is_some() {
                 Some(optional_str_array(params, "tags")?)
@@ -438,7 +442,7 @@ fn dispatch_result(state: &Arc<Mutex<State>>, request: &Request) -> RpcResult<Va
             };
             let mut state = state.lock().expect("state lock");
             Ok(
-                serde_json::to_value(state.update_meta(&id, title, tags, aliases)?)
+                serde_json::to_value(state.update_meta(&id, rev, title, tags, aliases)?)
                     .expect("content serializes"),
             )
         }

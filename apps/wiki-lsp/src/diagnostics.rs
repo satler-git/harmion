@@ -5,7 +5,7 @@
 //! call succeeded, so a stopped server cannot produce bogus "unresolved"
 //! warnings.
 
-use harmion_wiki_core::{parse_info, parse_links, scan_embedded_blocks};
+use harmion_wiki_core::{normalize_target, parse_info, parse_links, scan_embedded_blocks};
 
 use crate::protocol::{Diagnostic, Position, Range, SEVERITY_ERROR, SEVERITY_WARNING};
 use crate::server::ContentSummary;
@@ -92,6 +92,7 @@ pub fn compute(
 }
 
 fn resolves(target: &str, index: &[ContentSummary]) -> bool {
+    let target = normalize_target(target);
     let lowered = target.to_lowercase();
     index.iter().any(|content| {
         content.id == target || content.title == target || content.title.to_lowercase() == lowered
@@ -105,12 +106,23 @@ fn canonical_fence_ids(text: &str) -> Vec<(usize, usize, String)> {
     let mut found = Vec::new();
     let mut offset = 0usize;
     let mut in_fence = None::<usize>;
+    let mut plain_fence = None::<usize>;
 
     for (line_index, line) in text.split_inclusive('\n').enumerate() {
         let line_start = offset;
         offset += line.len();
         let line_end = line_start + line.trim_end_matches(['\r', '\n']).len();
 
+        if let Some(fence_len) = plain_fence {
+            if is_closing_fence(line, fence_len) {
+                plain_fence = None;
+            }
+            continue;
+        }
+        if let Some(fence_len) = plain_fence_start(line) {
+            plain_fence = Some(fence_len);
+            continue;
+        }
         if let Some(fence_len) = in_fence {
             if is_closing_fence(line, fence_len) {
                 in_fence = None;
@@ -132,6 +144,12 @@ fn canonical_fence_ids(text: &str) -> Vec<(usize, usize, String)> {
         }
     }
     found
+}
+
+fn plain_fence_start(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    let backticks = trimmed.bytes().take_while(|byte| *byte == b'`').count();
+    (backticks >= 3).then_some(backticks)
 }
 
 fn prefixed_fence(line: &str, line_start: usize) -> Option<(usize, usize)> {

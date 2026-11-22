@@ -10,6 +10,13 @@ use serde_json::{Value, json};
 use crate::error::{RpcError, RpcResult, optional_u64, required_str};
 use crate::store::State;
 
+fn md_text(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace(['\n', '\r'], " ")
+}
+
 pub fn list() -> Value {
     json!({
         "providers": [
@@ -44,7 +51,10 @@ pub fn call(state: &State, name: &str, params: &Value) -> RpcResult<Value> {
         "wiki/backlinks" => {
             let workspace = state.workspace(&id)?;
             let items = workspace.links.backlinks;
-            let mut display = format!("### {} へのバックリンク\n\n", workspace.page.title);
+            let mut display = format!(
+                "### {} へのバックリンク\n\n",
+                md_text(&workspace.page.title)
+            );
             if items.is_empty() {
                 display.push_str("(なし)\n");
             } else {
@@ -65,12 +75,12 @@ pub fn call(state: &State, name: &str, params: &Value) -> RpcResult<Value> {
         "wiki/outline" => {
             let workspace = state.workspace(&id)?;
             let items = workspace.outline;
-            let mut display = format!("### {} のアウトライン\n\n", workspace.page.title);
+            let mut display = format!("### {} のアウトライン\n\n", md_text(&workspace.page.title));
             for item in &items {
                 display.push_str(&format!(
                     "{}- {} (line {})\n",
                     "  ".repeat(item.level.saturating_sub(1) as usize),
-                    item.title,
+                    md_text(&item.title),
                     item.line
                 ));
             }

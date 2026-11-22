@@ -242,6 +242,7 @@ impl ServerClient {
     /// A 64-hex target is opened as an id. Anything else is searched by title:
     /// exact (case-insensitive) first, then a sole search result.
     pub fn resolve_target(&self, target: &str) -> Result<Option<ContentSummary>, ServerError> {
+        let target = harmion_wiki_core::normalize_target(target);
         if is_content_id(target) {
             return self
                 .open(target)

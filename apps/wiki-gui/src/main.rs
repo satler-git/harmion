@@ -215,6 +215,13 @@ struct TwoHop {
     reason: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct EmbedView {
+    #[serde(default)]
+    before: Vec<String>,
+    snippet: Content,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 struct Links {
     #[serde(default)]
@@ -246,6 +253,8 @@ struct Workspace {
     after: Vec<String>,
     #[serde(default)]
     snippet: Option<Content>,
+    #[serde(default)]
+    embeds: Vec<EmbedView>,
     #[serde(default)]
     outline: Vec<OutlineItem>,
     #[serde(default)]
@@ -1859,8 +1868,22 @@ fn article(state: &AppState, workspace: &Workspace) -> Div {
         );
     }
 
-    if let Some(snippet) = &workspace.snippet {
-        body = body.child(embed(state, snippet));
+    if !workspace.embeds.is_empty() {
+        for (index, embedded) in workspace.embeds.iter().enumerate() {
+            if index > 0 {
+                for paragraph in &embedded.before {
+                    if paragraph.trim().is_empty() {
+                        continue;
+                    }
+                    body = body.child(
+                        ui_text(paragraph, 15.5, theme().text)
+                            .mt(24.0_f32)
+                            .line_height(LineHeight::Relative(1.68_f32)),
+                    );
+                }
+            }
+            body = body.child(embed(state, &embedded.snippet));
+        }
     } else if page.content_type == "snippet" {
         let language = page
             .language
@@ -1877,9 +1900,11 @@ fn article(state: &AppState, workspace: &Workspace) -> Div {
         );
     }
 
-    if workspace.snippet.is_some() {
-        body = body.child(balance_section());
+    if workspace.embeds.is_empty() && workspace.snippet.is_some() {
+        body = body.child(embed(state, workspace.snippet.as_ref().unwrap()));
     }
+    // Balance/provenance is rendered only when a real interpreter result exists.
+    // The shell must not show a fabricated amount or connection state.
 
     for paragraph in &workspace.after {
         if paragraph.trim().is_empty() {
@@ -1918,12 +1943,6 @@ fn quote_for(workspace: &Workspace) -> Option<(String, String)> {
                 return Some((quote, "引用".to_owned()));
             }
         }
-    }
-    if workspace.page.id == HOME_ID || workspace.page.title == "家計の記録" {
-        return Some((
-            "固定費は先に把握する。".to_owned(),
-            "2026年の目標".to_owned(),
-        ));
     }
     None
 }
@@ -2031,11 +2050,11 @@ fn balance_section() -> Div {
                         .flex()
                         .flex_col()
                         .child(
-                            ui_text("¥12,400", 39.0, theme().text)
+                            ui_text("—", 39.0, theme().text)
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .letter_spacing(-1.0_f32),
                         )
-                        .child(ui_text("2026-11-16 時点", 12.0, theme().text_muted).mt(6.0_f32)),
+                        .child(ui_text("未取得", 12.0, theme().text_muted).mt(6.0_f32)),
                 )
                 .child(
                     div()
@@ -2044,7 +2063,7 @@ fn balance_section() -> Div {
                         .items_center()
                         .gap(6.0_f32)
                         .child(dot(theme().success))
-                        .child(ui_text("接続中", 11.0, theme().text_muted)),
+                        .child(ui_text("未取得", 11.0, theme().text_muted)),
                 ),
         )
 }
@@ -2438,7 +2457,7 @@ fn suggestion(state: &AppState, hop: &TwoHop, selected: bool, index: usize) -> D
 
 fn next_reason(hop: &TwoHop) -> String {
     if hop.target.refs > 0 {
-        format!("{} か所から参照", hop.target.refs)
+        format!("{} リンク", hop.target.refs)
     } else if !hop.reason.is_empty() && hop.reason != hop.target.excerpt {
         truncate_chars(&hop.reason, 72)
     } else {
@@ -2557,11 +2576,12 @@ fn inspector_info(state: &AppState) -> Div {
                 .items_center()
                 .gap(7.0_f32)
                 .child(dot(theme().success))
-                .child(ui_text("4 providers 接続中", 12.0, theme().text_muted)),
+                .child(ui_text("provider 状態は未取得", 12.0, theme().text_muted)),
         )
         .child(
             ui_text(
-                "ledger/balance · wiki/backlinks · wiki/outline · wiki/transclude",
+                "ローカル関数: wiki/backlinks · wiki/outline · wiki/transclude
+provider 接続は未取得",
                 10.5,
                 theme().text_disabled,
             )
@@ -2601,7 +2621,7 @@ fn inspector_info(state: &AppState) -> Div {
                     if source == Source::Fallback {
                         "フォールバック · 未接続"
                     } else {
-                        "保存済み · 同期済み"
+                        "閲覧ビュー · 保存は Neovim"
                     },
                     12.0,
                     theme().text_muted,
@@ -2615,7 +2635,7 @@ fn inspector_info(state: &AppState) -> Div {
                         state.boot_error.clone().unwrap_or_default()
                     )
                 } else {
-                    format!("競合なし\n{}", state.socket)
+                    format!("競合情報は未取得\n{}", state.socket)
                 },
                 10.5,
                 theme().text_disabled,
@@ -2812,7 +2832,7 @@ fn hop_row(state: &AppState, hop: &TwoHop, group_count: usize) -> Div {
         .child(
             ui_text(
                 format!(
-                    "更新 {} · {} 参照 · {}",
+                    "更新 {} · {} リンク · {}",
                     hop.target.updated_label,
                     count,
                     hop.target.kind_label()
@@ -3019,7 +3039,7 @@ fn status_bar(state: &AppState) -> Div {
                     if source == Source::Fallback {
                         "内蔵 fixture  ·  サーバー未接続"
                     } else {
-                        "保存済み  ·  同期済み"
+                        "閲覧のみ  ·  保存は Neovim"
                     },
                     9.5,
                     theme().text_muted,
@@ -3031,7 +3051,7 @@ fn status_bar(state: &AppState) -> Div {
                 }),
         )
         .child(ui_text(
-            format!("4 providers  ·  {title}  ·  {}", editor.detail),
+            format!("provider 未取得  ·  {title}  ·  {}", editor.detail),
             9.5,
             theme().text_disabled,
         ))
@@ -3386,7 +3406,7 @@ fn fixture_home() -> Workspace {
             "引き落とし日と未払いを確認する。",
             3,
         ),
-        "3 か所から参照",
+        "3 リンク",
     );
     hop(
         &fixed,
@@ -3511,6 +3531,7 @@ fn fixture_home() -> Workspace {
         before: vec!["毎月の支出を hledger のジャーナルで管理している。".to_owned()],
         after: vec!["固定費の見直しは月1回、日曜日にまとめて行う。".to_owned()],
         snippet: Some(snippet),
+        embeds: Vec::new(),
         outline: vec![
             OutlineItem {
                 level: 1,
@@ -3569,6 +3590,7 @@ fn publish_reading(mut page: Content) -> Workspace {
         before: vec!["読んだ本の要点を残す。".to_owned()],
         after: Vec::new(),
         snippet: None,
+        embeds: Vec::new(),
         outline: vec![
             OutlineItem {
                 level: 1,
@@ -3612,6 +3634,7 @@ fn fixture_rust() -> Workspace {
         before: vec!["所有権と借用のメモ。".to_owned()],
         after: Vec::new(),
         snippet: None,
+        embeds: Vec::new(),
         outline: vec![OutlineItem {
             level: 1,
             title: "Rustのメモ".to_owned(),
@@ -3654,6 +3677,7 @@ fn generic_workspace(summary: &Summary) -> Workspace {
         before: vec![summary.excerpt.clone()],
         after: Vec::new(),
         snippet: None,
+        embeds: Vec::new(),
         outline: vec![OutlineItem {
             level: 1,
             title: summary.title.clone(),

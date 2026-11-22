@@ -242,6 +242,19 @@ fn extension_for(language: Option<&str>) -> &'static str {
 
 /// Rewrite canonical `[[id:...]]` links to relative paths. Embed links were
 /// already expanded; unresolved and title-form links are left untouched.
+fn md_escape_label(label: &str) -> String {
+    label
+        .replace('\\', "\\\\")
+        .replace(']', "\\]")
+        .replace(['\n', '\r'], " ")
+}
+
+fn md_escape_href(href: &str) -> String {
+    href.replace(' ', "%20")
+        .replace('(', "%28")
+        .replace(')', "%29")
+}
+
 fn rewrite_links(
     contents: &BTreeMap<String, Content>,
     paths: &BTreeMap<String, String>,
@@ -268,7 +281,11 @@ fn rewrite_links(
                 None => href,
             };
             let label = link.label.clone().unwrap_or_else(|| content.title.clone());
-            Some((link.start, link.end, format!("[{label}]({href})")))
+            Some((
+                link.start,
+                link.end,
+                format!("[{}]({})", md_escape_label(&label), md_escape_href(&href)),
+            ))
         })
         .collect::<Vec<_>>();
     links.sort_by_key(|(start, _, _)| *start);

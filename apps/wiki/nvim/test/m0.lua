@@ -16,6 +16,10 @@ vim.cmd("write")
 assert(vim.b.wiki_rev == 2, "expected rev 2, got " .. tostring(vim.b.wiki_rev))
 print("saved p-home, rev=" .. vim.b.wiki_rev)
 
+local first = vim.api.nvim_get_current_buf()
+vim.cmd("WikiOpen p-home")
+assert(vim.api.nvim_get_current_buf() == first, "reopen should reuse the existing buffer")
+
 vim.cmd("WikiOpen 3f2a9c1e00000000000000000000000000000000000000000000000000000001")
 assert(vim.bo.filetype == "ledger", "expected ledger, got " .. vim.bo.filetype)
 assert(vim.api.nvim_buf_get_name(0):match("wiki://3f2a"), "unexpected buffer name")

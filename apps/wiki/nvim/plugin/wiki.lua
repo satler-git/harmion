@@ -116,6 +116,19 @@ end
 
 local function open(id_or_title)
   local id = resolve_id(id_or_title)
+  local existing = vim.fn.bufnr("wiki://" .. id)
+  if existing > 0 then
+    vim.api.nvim_set_current_buf(existing)
+    if not vim.bo[existing].modified then
+      local fresh = run({ "open", id })
+      vim.api.nvim_buf_set_lines(existing, 0, -1, false, body_to_lines(fresh.body))
+      set_metadata(existing, fresh)
+      vim.bo[existing].modified = false
+    end
+    lsp_start()
+    vim.notify(("wiki: switched to %s"):format(vim.b[existing].wiki_title), vim.log.levels.INFO)
+    return
+  end
   local content = run({ "open", id })
   local buf = vim.api.nvim_create_buf(true, false)
   vim.bo[buf].buftype = "acwrite"
@@ -254,13 +267,15 @@ local function current_id()
 end
 
 vim.api.nvim_create_user_command("WikiTitle", function(args)
-  local updated = run({ "update_meta", current_id(), "--title", args.args })
+  local updated = run({ "update_meta", current_id(), "--rev", tostring(vim.b.wiki_rev), "--title", args.args })
   vim.api.nvim_buf_set_var(0, "wiki_title", updated.title)
+  vim.api.nvim_buf_set_var(0, "wiki_rev", updated.rev)
   vim.notify("wiki: title = " .. updated.title, vim.log.levels.INFO)
 end, { nargs = 1 })
 
 vim.api.nvim_create_user_command("WikiTags", function(args)
-  local updated = run({ "update_meta", current_id(), "--tags", args.args })
+  local updated = run({ "update_meta", current_id(), "--rev", tostring(vim.b.wiki_rev), "--tags", args.args })
+  vim.api.nvim_buf_set_var(0, "wiki_rev", updated.rev)
   vim.b.wiki_tags = table.concat(updated.tags or {}, ",")
   vim.notify("wiki: tags = " .. (vim.b.wiki_tags ~= "" and vim.b.wiki_tags or "(none)"), vim.log.levels.INFO)
 end, { nargs = 1 })

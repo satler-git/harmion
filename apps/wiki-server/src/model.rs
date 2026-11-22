@@ -143,11 +143,18 @@ pub struct PageInfo {
 
 /// The GUI contract. Keep the key set and value types stable.
 #[derive(Debug, Clone, Serialize)]
+pub struct EmbedView {
+    pub before: Vec<String>,
+    pub snippet: Content,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Workspace {
     pub page: Content,
     pub before: Vec<String>,
     pub after: Vec<String>,
     pub snippet: Option<Content>,
+    pub embeds: Vec<EmbedView>,
     pub outline: Vec<OutlineView>,
     pub links: LinksView,
     pub related: Vec<Summary>,

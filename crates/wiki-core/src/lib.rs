@@ -155,11 +155,25 @@ pub fn scan_embedded_blocks(doc: &str) -> Result<Vec<EmbeddedBlock>, ParseError>
     let mut blocks = Vec::new();
     let mut offset = 0usize;
     let mut line_no = 1usize;
+    let mut plain_fence_len = None::<usize>;
     let mut lines = doc.split_inclusive('\n').peekable();
 
     while let Some(line) = lines.next() {
         let line_start = offset;
         offset += line.len();
+
+        if let Some(fence_len) = plain_fence_len {
+            if is_closing_fence(line, fence_len) {
+                plain_fence_len = None;
+            }
+            line_no += 1;
+            continue;
+        }
+        if let Some((fence_len, _)) = plain_fence(line) {
+            plain_fence_len = Some(fence_len);
+            line_no += 1;
+            continue;
+        }
 
         let Some((fence_len, info)) = prefixed_fence(line) else {
             line_no += 1;
@@ -545,6 +559,14 @@ pub struct LinkIndex {
     pub incoming: std::collections::BTreeMap<String, Vec<String>>,
 }
 
+/// Normalize a stored link target for indexing: strip the canonical `id:`
+/// prefix and an optional `#fragment`, then trim. Titles and aliases pass through.
+pub fn normalize_target(target: &str) -> &str {
+    let target = target.trim();
+    let target = target.strip_prefix("id:").unwrap_or(target);
+    target.split('#').next().unwrap_or(target).trim()
+}
+
 impl LinkIndex {
     pub fn from_documents<I>(documents: I) -> Self
     where
@@ -554,17 +576,18 @@ impl LinkIndex {
         for (id, body) in documents {
             let mut seen = std::collections::BTreeSet::new();
             for link in parse_links(&body) {
-                if !seen.insert(link.target.clone()) {
+                let target = normalize_target(&link.target);
+                if target.is_empty() || !seen.insert(target.to_owned()) {
                     continue;
                 }
                 index
                     .outgoing
                     .entry(id.clone())
                     .or_default()
-                    .push(link.target.clone());
+                    .push(target.to_owned());
                 index
                     .incoming
-                    .entry(link.target)
+                    .entry(target.to_owned())
                     .or_default()
                     .push(id.clone());
             }
@@ -654,6 +677,12 @@ mod link_tests {
     }
 
     #[test]
+    fn ignores_embedded_fences_inside_plain_code() {
+        let doc = "````markdown\n!```rust\nfn main() {}\n```\n````\n";
+        assert!(scan_embedded_blocks(doc).unwrap().is_empty());
+    }
+
+    #[test]
     fn extracts_outline() {
         let doc = "# 家計\n\n## 今月\n\n```rust\n# not heading\n```\n### 残高\n";
         let items = outline(doc);
@@ -663,6 +692,15 @@ mod link_tests {
         assert_eq!(items[1].title, "今月");
         assert_eq!(items[2].level, 3);
         assert_eq!(items[2].title, "残高");
+    }
+
+    #[test]
+    fn canonical_ids_and_fragments_are_normalized() {
+        let index =
+            LinkIndex::from_documents([("a".to_owned(), "[[id:b|B]] [[id:b#section]]".to_owned())]);
+        assert_eq!(index.backlinks("b"), ["a"]);
+        assert_eq!(index.outgoing_links("a"), ["b"]);
+        assert_eq!(normalize_target(" id:b#x "), "b");
     }
 
     #[test]

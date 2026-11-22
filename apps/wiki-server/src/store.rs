@@ -18,8 +18,8 @@ use crate::backend::NodeAdapter;
 use crate::error::{RpcError, RpcResult};
 use crate::export;
 use crate::model::{
-    Content, LinksView, OutlineView, PageInfo, Summary, TwoHopView, Workspace, clean_lines,
-    excerpt, with_wiki_kind,
+    Content, EmbedView, LinksView, OutlineView, PageInfo, Summary, TwoHopView, Workspace,
+    clean_lines, excerpt, with_wiki_kind,
 };
 use crate::transclude;
 
@@ -197,24 +197,32 @@ impl State {
 
     pub fn workspace(&self, id: &str) -> RpcResult<Workspace> {
         let page = self.open(id)?;
-        let block = scan_embedded_blocks(&page.body)
-            .map_err(|error| RpcError::internal(format!("invalid page body: {error}")))?
-            .into_iter()
-            .find(|block| block.spec.id.is_some());
-        let (before, after, snippet) = match block {
-            Some(block) => {
-                let before = clean_lines(&page.body[..block.start]);
-                let after = clean_lines(&page.body[block.end..]);
-                let snippet = block
-                    .spec
-                    .id
-                    .as_deref()
-                    .and_then(|id| self.contents.get(id))
-                    .cloned();
-                (before, after, snippet)
-            }
-            None => (clean_lines(&page.body), Vec::new(), None),
-        };
+        let blocks = scan_embedded_blocks(&page.body)
+            .map_err(|error| RpcError::internal(format!("invalid page body: {error}")))?;
+        let mut embeds = Vec::new();
+        let mut cursor = 0usize;
+        for block in blocks.iter().filter(|block| block.spec.id.is_some()) {
+            let Some(snippet) = block
+                .spec
+                .id
+                .as_deref()
+                .and_then(|id| self.contents.get(id))
+                .cloned()
+            else {
+                continue;
+            };
+            embeds.push(EmbedView {
+                before: clean_lines(&page.body[cursor..block.start]),
+                snippet,
+            });
+            cursor = block.end;
+        }
+        let before = embeds
+            .first()
+            .map(|embed| embed.before.clone())
+            .unwrap_or_else(|| clean_lines(&page.body));
+        let after = clean_lines(&page.body[cursor..]);
+        let snippet = embeds.first().map(|embed| embed.snippet.clone());
 
         let index = LinkIndex::from_documents(
             self.contents
@@ -286,6 +294,7 @@ impl State {
             before,
             after,
             snippet,
+            embeds,
             outline,
             links: LinksView {
                 outgoing,
@@ -468,13 +477,24 @@ impl State {
             }
         };
 
+        let requested_kinds = with_wiki_kind(block.spec.kinds.clone());
+        let existing = self
+            .contents
+            .values()
+            .find(|content| {
+                content.is_snippet()
+                    && content.body == block.body
+                    && content.format.as_deref() == Some(block.spec.preset.as_str())
+                    && content.kinds == requested_kinds
+            })
+            .cloned();
         let snippet_title = title
             .and_then(|title| {
                 let title = title.trim();
                 (!title.is_empty()).then(|| title.to_owned())
             })
             .unwrap_or_else(|| derived_snippet_title(&block));
-        let snippet = Content {
+        let snippet = existing.unwrap_or_else(|| Content {
             id: self.fresh_id(),
             content_type: "snippet".to_owned(),
             title: snippet_title,
@@ -484,14 +504,14 @@ impl State {
             // Every kind parsed from the fence is carried. The local backend
             // has no grant model, so it does not drop kinds; node mode rejects
             // the whole operation before reaching here.
-            kinds: with_wiki_kind(block.spec.kinds.clone()),
+            kinds: requested_kinds,
             tags: Vec::new(),
             aliases: Vec::new(),
             rev: 1,
             created: today_utc(),
             updated_at: now_micros(),
             updated_label: "たった今".to_owned(),
-        };
+        });
         let canonical = canonical_block(&block.spec, &snippet.id);
         let after_body = format!(
             "{}{}{}",
@@ -541,11 +561,12 @@ impl State {
             })));
         }
         let mut content = current;
-        if let Backend::Node(node) = &self.backend {
-            node.save_body(id, &body, &content.body)?;
-        }
+        let previous_body = content.body.clone();
         content.body = body;
         check_size(&content)?;
+        if let Backend::Node(node) = &self.backend {
+            node.save_body(id, &content.body, &previous_body)?;
+        }
         content.rev += 1;
         content.updated_at = now_micros();
         content.updated_label = "たった今".to_owned();
@@ -560,12 +581,26 @@ impl State {
     pub fn update_meta(
         &mut self,
         id: &str,
+        rev: Option<u64>,
         title: Option<String>,
         tags: Option<Vec<String>>,
         aliases: Option<Vec<String>>,
     ) -> RpcResult<Content> {
         self.ensure_writable("update_meta")?;
         let mut content = self.open(id)?;
+        if let Some(rev) = rev {
+            if content.rev != rev {
+                return Err(RpcError::conflict("revision conflict").with_data(json!({
+                    "type": "revision_conflict",
+                    "id": id,
+                    "field": {"type": "metadata"},
+                    "provided_rev": rev,
+                    "current_rev": content.rev,
+                    "current_updated_label": content.updated_label,
+                    "resolution": "reload the Content and retry with the current rev",
+                })));
+            }
+        }
         if let Some(title) = title {
             content.title = checked_title(&title)?;
         }
@@ -606,7 +641,7 @@ impl State {
         let mut failed = Vec::new();
         // Convert one loose fence at a time. Each conversion rewrites the host,
         // so re-scan instead of holding stale byte spans.
-        for _ in 0..64 {
+        loop {
             let page = self.open(id)?;
             let loose = match scan_embedded_blocks(&page.body) {
                 Ok(blocks) => blocks
@@ -970,7 +1005,7 @@ fn fixtures() -> BTreeMap<String, Content> {
         "page",
         "家計の記録",
         format!(
-            "# 家計の記録\n\n毎月の支出を hledger のジャーナルで管理している。\n\n## 買い物ジャーナル\n\n!```hledger|ledger,free||{JOURNAL_ID}\n```\n\n## 今月の残高\n\n固定費の見直しは月1回、日曜日にまとめて行う。\n\n## 固定費の見直し\n\n関連: [[p-goals|2026年の目標]] [[p-receipts|レシート処理]] [[p-fixed|固定費の見直し]]\n"
+            "# 家計の記録\n\n> 固定費は先に把握する。 — 2026年の目標\n\n毎月の支出を hledger のジャーナルで管理している。\n\n## 買い物ジャーナル\n\n!```hledger|ledger,free||{JOURNAL_ID}\n```\n\n## 今月の残高\n\n固定費の見直しは月1回、日曜日にまとめて行う。\n\n## 固定費の見直し\n\n関連: [[p-goals|2026年の目標]] [[p-receipts|レシート処理]] [[p-fixed|固定費の見直し]]\n"
         ),
     );
     home.kinds = vec!["wiki".to_owned(), "ledger".to_owned()];
@@ -1248,6 +1283,7 @@ mod tests {
         let updated = state
             .update_meta(
                 "p-test",
+                None,
                 Some("Renamed".to_owned()),
                 Some(vec!["a".to_owned(), "a".to_owned(), "b".to_owned()]),
                 None,
@@ -1283,6 +1319,27 @@ mod tests {
             .unwrap();
         assert!(again.converted.is_empty());
         assert!(again.failed.is_empty());
+    }
+
+    #[test]
+    fn auto_convert_reuses_snippet_on_retry() {
+        let mut state = sample_state();
+        let page = state.open("p-test").unwrap();
+        let loose = "# Test\n\n!```rust|code\nfn main() {}\n```\n".to_owned();
+        let first = state
+            .save_with_conversion("p-test", page.rev, loose.clone())
+            .unwrap();
+        let second = state
+            .save_with_conversion("p-test", first.page.rev, loose)
+            .unwrap();
+        assert_eq!(second.converted, first.converted);
+        let snippets = state
+            .list()
+            .into_iter()
+            .filter(|summary| summary.content_type == "snippet")
+            .count();
+        assert_eq!(snippets, 1, "retry must not create an orphan snippet");
+        assert!(second.page.body.contains("!```rust|code||"));
     }
 
     #[test]
@@ -1482,8 +1539,8 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "after", "before", "info", "links", "outline", "page", "recent", "related",
-                "snippet"
+                "after", "before", "embeds", "info", "links", "outline", "page", "recent",
+                "related", "snippet"
             ]
         );
         let link_keys = value["links"]

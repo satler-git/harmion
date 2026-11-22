@@ -46,6 +46,13 @@ pub struct TranscludeResponse {
     pub depth: u32,
 }
 
+fn comment_safe(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace("--", "-&dash;")
+}
+
 /// Resolve `id:<hex>`, a Content ID, a title, or an alias.
 pub fn resolve_target<'a>(
     contents: &'a BTreeMap<String, Content>,
@@ -213,7 +220,10 @@ fn expand_body(
                         resolved: false,
                         reason: Some("missing content".to_owned()),
                     });
-                    out.push_str(&format!("<!-- transclude missing: {} -->", link.target));
+                    out.push_str(&format!(
+                        "<!-- transclude missing: {} -->",
+                        comment_safe(&link.target)
+                    ));
                     continue;
                 };
                 if path.iter().any(|id| id == &found.id) {
@@ -250,7 +260,7 @@ fn expand_body(
                     });
                     out.push_str(&format!(
                         "<!-- transclude missing section: {} -->",
-                        link.target
+                        comment_safe(&link.target)
                     ));
                     continue;
                 };
