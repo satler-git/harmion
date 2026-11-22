@@ -1,16 +1,15 @@
 //! Dev-only node App API adapter.
 //!
 //! `serve --node DIR` uses `harmion-client::Client::from_directory` (which reads
-//! the node's `admin.secret`) to load the `kind=wiki` read snapshot. Local reads
+//! the node's `admin.secret`) to load the `kind=wiki` snapshot. Local reads
 //! (`list`, `open`, `workspace`, `search`, `transclude`, `export`) then operate
 //! on that snapshot.
 //!
-//! Writes are deliberately not wired in this M0/M3 slice. The adapter contains
-//! compile-checked `get_content` / `save_body` calls for the future integration,
-//! but every RPC mutation returns a 501 with an explicit reason. Converting a
-//! local revision into a node edit token, grant/kind Write checks, request-id
-//! replay and subscription/refresh are still missing; silently guessing would
-//! risk data loss. Use the default fixture / `--data` backend for editing.
+//! Body `save` is wired for development: it compares the node's current body
+//! with the snapshot, fetches a fresh edit token and saves only the body. Create,
+//! conversion and delete still return 501. OAuth refresh, grant checks,
+//! subscriptions and full conflict resolution are not implemented; use the
+//! fixture / `--data` backend for normal editing.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -97,15 +96,30 @@ impl NodeAdapter {
             .ok_or_else(|| RpcError::new(502, "node get returned an invalid Content view"))
     }
 
-    /// Compile-checked write path. The future wiring must first decide how a
-    /// local `rev` maps to the node's edit token and conflict set.
-    #[allow(dead_code)]
-    pub fn save_body(&self, id: &str, body: &str) -> RpcResult<Json> {
+    /// Dev-only body write: compare the node's current body with the local
+    /// snapshot, fetch a fresh edit token, then save only the body field.
+    pub fn save_body(&self, id: &str, body: &str, expected_body: &str) -> RpcResult<Json> {
         let bytes = parse_content_id(id)?;
         let view = self
             .runtime
             .block_on(self.client.get(ContentId(bytes)))
             .map_err(|error| RpcError::new(502, format!("node get failed: {error}")))?;
+        let current_body = view
+            .pointer("/content/body")
+            .and_then(Json::as_str)
+            .unwrap_or_default();
+        if current_body != expected_body {
+            return Err(RpcError::conflict(
+                "the node Content changed since this snapshot; reload before saving",
+            )
+            .with_data(json!({
+                "type": "revision_conflict",
+                "id": id,
+                "field": {"type": "body"},
+                "reason": "node body differs from the local snapshot",
+                "resolution": "re-open the Content from the node snapshot and merge manually",
+            })));
+        }
         let token = view
             .get("edit_token")
             .and_then(Json::as_str)
@@ -145,7 +159,7 @@ impl NodeAdapter {
             "reason": "local rev <-> node edit token mapping, grant/kind Write checks and subscription refresh are not implemented",
             "limitations": [
                 "reads are a startup snapshot; no subscribe/resume catch-up",
-                "create/convert/delete/save are disabled in node mode",
+                "node save is body-only; create/convert/delete are disabled",
                 "admin.secret is used directly; no OAuth refresh flow",
             ],
             "workaround": "run the fixture or --data backend for local editing",

@@ -50,10 +50,12 @@ CLI helpers: `list`, `open`, `workspace`, `search`, `save`, `status`,
 
 ## Dev node mode
 
-`serve --node DIR` loads a read snapshot of `kind=wiki` Contents using the
-node's `admin.secret` (`harmion-client`). It is intentionally read-only until
-the OAuth token/refresh and edit-session path lands. Do not point production
-credentials at this mode.
+`serve --node DIR` loads a snapshot of `kind=wiki` Contents using the node's
+`admin.secret` (`harmion-client`). Body saves are wired for development: the
+server re-reads the node, refuses if the body changed since the snapshot, gets a
+fresh edit token and saves only the body. Create/convert/delete and full
+conflict handling still return 501. OAuth refresh and subscriptions are not
+implemented. Do not point production credentials at this mode.
 
 ## Tests
 

@@ -541,6 +541,9 @@ impl State {
             })));
         }
         let mut content = current;
+        if let Backend::Node(node) = &self.backend {
+            node.save_body(id, &body, &content.body)?;
+        }
         content.body = body;
         check_size(&content)?;
         content.rev += 1;
@@ -639,6 +642,7 @@ impl State {
 
     fn ensure_writable(&self, method: &str) -> RpcResult<()> {
         match &self.backend {
+            Backend::Node(node) if method == "save" => Ok(()),
             Backend::Node(node) => Err(node.write_unsupported(method)),
             _ => Ok(()),
         }

@@ -34,8 +34,9 @@ Last updated: 2026-11-23
   the host; the Neovim plugin rewrites the buffer after conversion
 - `provider_list`/`provider_call` implement local `wiki/backlinks`,
   `wiki/outline` and `wiki/transclude`; platform registration is separate
-- Dev-only `--node DIR` read snapshot using `harmion-client::Client::from_directory`
-  (admin secret). Writes return 501 instead of guessing tokens.
+- Dev-only `--node DIR` snapshot using `harmion-client::Client::from_directory`
+  (admin secret). `save` is body-only and refuses if the node body changed since
+  the snapshot; create/convert/delete still return 501.
 - 33 + 2 tests pass (unit + integration)
 
 ### `apps/wiki-lsp`
