@@ -51,10 +51,15 @@ Last updated: 2026-11-23
 - Headless test opens p-home, saves rev 1 → 2, opens a ledger snippet with
   `filetype=ledger`
 
-## In progress
+## GUI
 
-- `apps/wiki-gui`: porting the frozen v5 shell to AntiWebUI (tabs, inspector
-  modes, bottom shelf, syntax highlighting, Neovide manager, Ctrl shortcuts).
+- Frozen v5 shell is implemented in AntiWebUI: 4 columns, tabs, inspector
+  `リンク`/`情報`, centered outline, bottom 2-hop shelf, Ctrl shortcuts,
+  syntax highlighting and the Neovide manager.
+- `target/wiki-final.png` is a 1600x1000 snapshot; the actual window was
+  launched on niri and the server-backed list/workspace path was verified.
+- New page is wired through `create_page` and `Ctrl+N`; suggestions choose
+  distinct via groups.
 
 ## Platform gaps / honest limits
 
@@ -73,7 +78,7 @@ Last updated: 2026-11-23
 
 ## Next
 
-1. Finish the AntiWebUI v5 port and Neovide manager.
+1. Finish automatic fence conversion on save.
 2. Wire App API writes with an OAuth token store/refresh path.
 3. Add the Wiki provider loop (`wiki/backlinks`, `wiki/outline`,
    `wiki/transclude`) and streaming contract.
