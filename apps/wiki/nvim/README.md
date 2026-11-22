@@ -1,0 +1,42 @@
+# wiki.nvim
+
+Neovim integration for the Harmion Wiki app. It talks only to `wiki-server`;
+the server owns credentials, edit tokens and the local index. Buffers are
+virtual `wiki://<content-id>` documents and are saved with `BufWriteCmd`.
+
+## Setup
+
+```lua
+vim.opt.runtimepath:prepend("/path/to/harmion/apps/wiki/nvim")
+vim.g.wiki_socket = "/path/to/harmion/target/wiki.sock"
+vim.g.wiki_server_cmd = { "/path/to/harmion/target/debug/wiki-server" }
+vim.g.wiki_lsp_cmd = { "/path/to/harmion/target/debug/wiki-lsp" }
+```
+
+`wiki-server` and `wiki-lsp` must be running / executable. The LSP is optional;
+if it fails, the plugin keeps editing and saving through JSON-RPC.
+
+## Commands
+
+| Command | Action |
+|---|---|
+| `:WikiOpen [id-or-title]` | Open a page/snippet as `wiki://<id>` |
+| `:WikiSave` | `:write` through the server |
+| `:WikiList` | Quickfix list of pages and snippets |
+| `:WikiSearch <query>` | Quickfix search |
+| `:WikiWorkspace <id-or-title>` | Quickfix outline + 2-hop links |
+| `:WikiLspStart` | Start/attach the LSP explicitly |
+
+The LSP starts automatically when a Wiki buffer is opened. It provides
+diagnostics, definition, references, completion and hover for
+`[[...]]`, `![[...]]`, `!` fences and interpreter calls. It never writes.
+
+## Test
+
+```sh
+# with a server on target/wiki-m0.sock
+nvim --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/m0.lua'
+```
+
+The test opens `p-home`, edits it, saves it, then opens a ledger snippet and
+checks `filetype=ledger`.

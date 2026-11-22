@@ -581,14 +581,10 @@ impl LinkIndex {
     }
 
     /// Pages reachable from a backlink, excluding the page itself and its
-    /// direct neighbours. This is the "what should I read next" projection.
+    /// direct outgoing links. Backlinks themselves can be useful suggestions.
     pub fn two_hop(&self, id: &str) -> Vec<TwoHopLink> {
-        let direct: std::collections::BTreeSet<&str> = self
-            .outgoing_links(id)
-            .iter()
-            .chain(self.backlinks(id).iter())
-            .map(String::as_str)
-            .collect();
+        let direct: std::collections::BTreeSet<&str> =
+            self.outgoing_links(id).iter().map(String::as_str).collect();
         let mut seen = std::collections::BTreeSet::new();
         let mut out = Vec::new();
         for via in self.backlinks(id) {
@@ -681,7 +677,7 @@ mod link_tests {
         assert!(hops.iter().any(|hop| hop.via == "b" && hop.target == "d"));
         assert!(
             hops.iter()
-                .all(|hop| hop.target != "c" && hop.target != "a" && hop.target != "b")
+                .all(|hop| hop.target != "c" && hop.target != "a")
         );
     }
 }

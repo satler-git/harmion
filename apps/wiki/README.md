@@ -1,67 +1,66 @@
-# Wiki M0 slice
+# Wiki app
 
-This is the first executable slice of the Wiki app. It is intentionally small:
-the server serves fixtures, the GUI is read-only, and editing happens in an
-external Neovim.
+A local-first personal wiki on Harmion. The design is frozen in
+[docs/wiki-ui-design.html](../../docs/wiki-ui-design.html); the current
+implementation status and platform gaps are in
+[docs/wiki-implementation-status.md](../../docs/wiki-implementation-status.md).
 
-## Pieces
+## Layout
 
-- [`crates/wiki-core`](../../crates/wiki-core): `!` fenced blocks, preset/kinds,
-  the canonical `preset|kinds||id` form, and snippet extraction.
-- [`apps/wiki-server`](../wiki-server): Unix-socket JSON-RPC server with fixed
-  fixtures and an in-memory `save`.
-- [`apps/wiki-gui`](../wiki-gui): AntiWebUI screen. It reads the page and the
-  embedded snippet from the server. The `Neovide で開く` button calls
-  `nvim --server ... --remote-send`.
-- [`apps/wiki/nvim`](nvim): `:WikiOpen`, `:WikiSave`, `:WikiList`.
+- [`crates/wiki-core`](../../crates/wiki-core): wiki syntax, links,
+  transclusion, outline, canonical fences, link index.
+- [`apps/wiki-server`](../wiki-server): Unix-socket JSON-RPC, local store,
+  workspace/index, snippet conversion, export, dev node snapshot.
+- [`apps/wiki-gui`](../wiki-gui): AntiWebUI shell.
+- [`apps/wiki-lsp`](../wiki-lsp): stdio LSP for `wiki://<id>`.
+- [`apps/wiki/nvim`](nvim): Neovim plugin and integration test.
 
-## Run
+## Run locally
 
 ```sh
 nix develop
-cargo build -p harmion-wiki-server -p harmion-wiki-gui
-./target/debug/wiki-server serve --socket target/wiki-m0.sock
-WIKI_SOCKET=target/wiki-m0.sock ./target/debug/wiki-gui
+cargo build -p harmion-wiki-server -p harmion-wiki-gui -p harmion-wiki-lsp
+./target/debug/wiki-server serve --socket target/wiki.sock --data target/wiki-data.json
+WIKI_SOCKET=target/wiki.sock ./target/debug/wiki-gui
 ```
 
-The GUI is read-only. Clicking `Neovide で開く` expects a listening Neovim:
+If the GUI cannot create a window, run it inside `nix develop`; the devShell
+sets the Vulkan/EGL paths. `wiki-gui --snapshot PATH` renders offscreen.
+
+Neovim:
 
 ```sh
 nvim --headless -u NONE -i NONE --listen target/nvim.sock \
   -c 'set rtp+='"$PWD"'/apps/wiki/nvim' \
-  -c 'lua vim.g.wiki_socket=vim.fn.getcwd().."/target/wiki-m0.sock"; vim.g.wiki_server_cmd={vim.fn.getcwd().."/target/debug/wiki-server"}; vim.cmd("runtime! plugin/wiki.lua")'
+  -c 'lua vim.g.wiki_socket=vim.fn.getcwd().."/target/wiki.sock"; vim.g.wiki_server_cmd={vim.fn.getcwd().."/target/debug/wiki-server"}; vim.g.wiki_lsp_cmd={vim.fn.getcwd().."/target/debug/wiki-lsp"}; vim.cmd("runtime! plugin/wiki.lua")'
 ```
 
-Then, in another shell:
+See [apps/wiki/nvim/README.md](nvim/README.md).
+
+## Local API
+
+`wiki-server` speaks one JSON object per line over a Unix socket:
+
+- `list`, `open`, `workspace`, `search`, `save`
+- `status`, `create_page`, `create_snippet`, `convert_fence`, `delete`,
+  `transclude`, `export`, `conflicts`
+
+CLI helpers: `list`, `open`, `workspace`, `search`, `save`, `status`,
+`conflicts`, `transclude`, `export`.
+
+## Dev node mode
+
+`serve --node DIR` loads a read snapshot of `kind=wiki` Contents using the
+node's `admin.secret` (`harmion-client`). It is intentionally read-only until
+the OAuth token/refresh and edit-session path lands. Do not point production
+credentials at this mode.
+
+## Tests
 
 ```sh
-nvim --server target/nvim.sock --remote-send ':WikiOpen p-home<CR>'
-nvim --server target/nvim.sock --remote-expr 'bufname("%")'
-nvim --server target/nvim.sock --remote-expr '&filetype'
+cargo test -p harmion-wiki-core
+cargo test -p harmion-wiki-server
+cargo test -p harmion-wiki-lsp
+# with a server on target/wiki-m0.sock:
+nvim --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/m0.lua'
 ```
-
-For interactive use, put the plugin directory on `runtimepath`, set
-`vim.g.wiki_socket` and `vim.g.wiki_server_cmd`, and run `:WikiOpen p-home`.
-The buffer uses `wiki://<id>` and `BufWriteCmd` saves through the server.
-
-## Snapshot
-
-`wiki-gui --snapshot PATH` renders the same layout offscreen and writes a PNG.
-On NixOS with a Mesa lavapipe ICD:
-
-```sh
-VK_ICD_FILENAMES=/run/opengl-driver/share/vulkan/icd.d/lvp_icd.x86_64.json \
-WGPU_BACKEND=vulkan \
-WIKI_SOCKET=target/wiki-m0.sock \
-./target/debug/wiki-gui --snapshot docs/wiki-m0-screen.png
-```
-
-The current screenshot is [docs/wiki-m0-screen.png](../../docs/wiki-m0-screen.png).
-
-## Not in M0
-
-- Real App API, OAuth, Query/Subscribe, persistence.
-- Snippet creation and kind Write checks.
-- niri window groups and focus sync.
-- LSP.
-- GUI editing (deliberately).

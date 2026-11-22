@@ -1707,13 +1707,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "harmion-wiki-lsp"
+version = "0.1.0"
+dependencies = [
+ "harmion-wiki-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "harmion-wiki-server"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "harmion-client",
  "harmion-wiki-core",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

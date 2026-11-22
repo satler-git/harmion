@@ -1,6 +1,6 @@
--- M0 Wiki plugin: open a Content, edit it, save it through wiki-server.
--- The socket/server command are configurable so the M0 fake server can be
--- replaced by the real one later without changing the plugin.
+-- Wiki Neovim integration.
+-- The server is the only component that holds Harmion credentials. Neovim
+-- talks to it over a Unix socket and uses wiki://<id> virtual buffers.
 
 local function server_cmd()
   local cmd = vim.g.wiki_server_cmd or { "wiki-server" }
@@ -49,7 +49,41 @@ local function set_metadata(buf, content)
   end
 end
 
-local function open(id)
+local function lsp_start()
+  if vim.g.wiki_lsp == false then
+    return
+  end
+  local cmd = vim.g.wiki_lsp_cmd or { "wiki-lsp" }
+  local ok, client = pcall(vim.lsp.start, {
+    name = "wiki",
+    cmd = cmd,
+    root_dir = vim.fn.getcwd(),
+    init_options = { socket = socket() },
+  })
+  if not ok then
+    vim.notify("wiki: LSP start failed: " .. tostring(client), vim.log.levels.DEBUG)
+  end
+end
+
+local function resolve_id(value)
+  local opened = pcall(run, { "open", value })
+  if opened then
+    return value
+  end
+  local data = run({ "search", value })
+  for _, item in ipairs(data.items or {}) do
+    if item.title == value then
+      return item.id
+    end
+  end
+  if data.items and data.items[1] then
+    return data.items[1].id
+  end
+  error("WikiOpen: no Content matches " .. value)
+end
+
+local function open(id_or_title)
+  local id = resolve_id(id_or_title)
   local content = run({ "open", id })
   local buf = vim.api.nvim_create_buf(true, false)
   vim.bo[buf].buftype = "acwrite"
@@ -59,12 +93,17 @@ local function open(id)
   set_metadata(buf, content)
   vim.bo[buf].modified = false
   vim.api.nvim_set_current_buf(buf)
+  lsp_start()
 
   vim.api.nvim_create_autocmd("BufWriteCmd", {
     buffer = buf,
     callback = function()
       local body = lines_to_body(buf)
-      local saved = run({ "save", content.id, "--rev", tostring(vim.b[buf].wiki_rev) }, body)
+      local ok, saved = pcall(run, { "save", content.id, "--rev", tostring(vim.b[vim.api.nvim_get_current_buf()].wiki_rev) }, body)
+      if not ok then
+        vim.notify("wiki: save failed (conflict?): " .. tostring(saved), vim.log.levels.ERROR)
+        return
+      end
       vim.api.nvim_buf_set_var(buf, "wiki_rev", saved.rev)
       vim.bo[buf].modified = false
       vim.notify(("wiki: saved %s (rev %d)"):format(saved.title, saved.rev), vim.log.levels.INFO)
@@ -87,11 +126,47 @@ local function list()
   vim.cmd("copen")
 end
 
+local function search(query)
+  local data = run({ "search", query })
+  local items = {}
+  for _, item in ipairs(data.items or {}) do
+    table.insert(items, {
+      filename = "wiki://" .. item.id,
+      lnum = 1,
+      text = ("[%s] %s — %s"):format(item.type, item.title, item.excerpt or ""),
+    })
+  end
+  vim.fn.setqflist(items)
+  vim.cmd("copen")
+end
+
+local function workspace(id_or_title)
+  local id = resolve_id(id_or_title)
+  local ws = run({ "workspace", id })
+  local items = {}
+  for _, section in ipairs(ws.outline or {}) do
+    table.insert(items, {
+      filename = "wiki://" .. ws.page.id,
+      lnum = section.line,
+      text = ("%s%s"):format(string.rep("  ", section.level - 1), section.title),
+    })
+  end
+  for _, link in ipairs((ws.links or {}).two_hop or {}) do
+    table.insert(items, {
+      filename = "wiki://" .. link.target.id,
+      lnum = 1,
+      text = ("2-hop via %s: %s"):format(link.via.title, link.target.title),
+    })
+  end
+  vim.fn.setqflist(items)
+  vim.cmd("copen")
+end
+
 vim.api.nvim_create_user_command("WikiOpen", function(args)
   if args.args == "" then
     local id = vim.b.wiki_id
     if not id then
-      error("WikiOpen: content id required")
+      error("WikiOpen: content id or title required")
     end
     open(id)
     return
@@ -100,6 +175,13 @@ vim.api.nvim_create_user_command("WikiOpen", function(args)
 end, { nargs = "?" })
 
 vim.api.nvim_create_user_command("WikiList", list, {})
+vim.api.nvim_create_user_command("WikiSearch", function(args)
+  search(args.args)
+end, { nargs = 1 })
+vim.api.nvim_create_user_command("WikiWorkspace", function(args)
+  workspace(args.args)
+end, { nargs = 1 })
+vim.api.nvim_create_user_command("WikiLspStart", lsp_start, {})
 vim.api.nvim_create_user_command("WikiSave", function()
   vim.cmd("write")
 end, {})

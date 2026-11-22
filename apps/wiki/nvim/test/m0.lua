@@ -2,6 +2,7 @@ vim.opt.runtimepath:prepend(vim.fn.getcwd() .. "/apps/wiki/nvim")
 vim.cmd("runtime! plugin/wiki.lua")
 vim.g.wiki_socket = vim.fn.getcwd() .. "/target/wiki-m0.sock"
 vim.g.wiki_server_cmd = { vim.fn.getcwd() .. "/target/debug/wiki-server" }
+vim.g.wiki_lsp_cmd = { vim.fn.getcwd() .. "/target/debug/wiki-lsp" }
 
 vim.cmd("WikiOpen p-home")
 local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/domain", "crates/wiki-core", "crates/protocol", "crates/node", "crates/store-sqlite", "crates/net-native", "crates/local", "crates/local-web", "crates/client", "crates/worker", "apps/daemon", "apps/admin", "apps/cli", "apps/wiki-server", "apps/wiki-gui"]
+members = ["crates/domain", "crates/wiki-core", "crates/protocol", "crates/node", "crates/store-sqlite", "crates/net-native", "crates/local", "crates/local-web", "crates/client", "crates/worker", "apps/daemon", "apps/admin", "apps/cli", "apps/wiki-server", "apps/wiki-gui", "apps/wiki-lsp"]
 resolver = "3"
 
 [workspace.package]
