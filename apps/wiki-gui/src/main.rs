@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Harmion Wiki GUI — the frozen v5 shell.
 //!
 //! The GUI is a reading surface: a four-column workspace (library, article, outline,
@@ -11,9 +13,8 @@
 mod highlight;
 mod neovide;
 
-#![allow(dead_code)]
-
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
@@ -387,6 +388,59 @@ impl AppState {
 
     fn open_summary(&self, summary: &Summary) {
         self.open_id(&summary.id, &summary.title, &summary.content_type);
+    }
+
+    fn new_page(&self) {
+        if !matches!(self.source.get_untracked(), Source::Server) {
+            self.editor.update(|editor| {
+                editor.error = Some("新規ページ: wiki-server に接続していません".to_owned());
+            });
+            return;
+        }
+        let value = match rpc(
+            "create_page",
+            json!({
+                "title": "無題のページ",
+                "body": "# 無題のページ\n\n",
+                "tags": [],
+                "aliases": [],
+            }),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                self.editor
+                    .update(|editor| editor.error = Some(format!("新規ページ: {error}")));
+                return;
+            }
+        };
+        let content = match serde_json::from_value::<Content>(value) {
+            Ok(content) => content,
+            Err(error) => {
+                self.editor.update(|editor| {
+                    editor.error = Some(format!("新規ページの解釈に失敗: {error}"));
+                });
+                return;
+            }
+        };
+        let summary = Summary {
+            id: content.id.clone(),
+            content_type: content.content_type.clone(),
+            title: content.title.clone(),
+            format: content.format.clone(),
+            language: content.language.clone(),
+            kinds: content.kinds.clone(),
+            rev: content.rev,
+            updated_label: "たった今".to_owned(),
+            excerpt: "# 無題のページ".to_owned(),
+            refs: 0,
+        };
+        self.summaries.update(|items| {
+            if !items.iter().any(|item| item.id == summary.id) {
+                items.insert(0, summary);
+            }
+        });
+        self.editor.update(|editor| editor.error = None);
+        self.open_id(&content.id, &content.title, &content.content_type);
     }
 
     fn open_id(&self, id: &str, title: &str, kind: &str) {
@@ -1048,6 +1102,9 @@ fn handle_key(state: &AppState, event: &KeyboardEvent) {
     } else if event.key.is_char('e') {
         event.prevent_default();
         state.open_editor();
+    } else if event.key.is_char('n') {
+        event.prevent_default();
+        state.new_page();
     } else if event.key.is_char('i') {
         event.prevent_default();
         state
@@ -1358,6 +1415,11 @@ fn sidebar(state: &AppState) -> Div {
                 .items_center()
                 .justify_center()
                 .gap(6.0_f32)
+                .hover(|style| style.bg(theme().surface_muted))
+                .on_click({
+                    let state = state.clone();
+                    move |_| state.new_page()
+                })
                 .child(ui_text("新規ページ", 12.0, theme().text))
                 .child(kbd("Ctrl+N")),
         )
@@ -1379,7 +1441,11 @@ fn sidebar(state: &AppState) -> Div {
 }
 
 fn side_section(label: &str) -> Div {
-    div().mt(16.0_f32).mb(5.0_f32).px(10.0_f32).child(section_label(label))
+    div()
+        .mt(16.0_f32)
+        .mb(5.0_f32)
+        .px(10.0_f32)
+        .child(section_label(label))
 }
 
 fn nav_row(
@@ -1590,12 +1656,11 @@ fn tabs(state: &AppState) -> Div {
             .child(ui_text("＋", 15.0, theme().text_disabled)),
     )
     .child(div().flex_1())
-    .child(
-        div()
-            .pb(7.0_f32)
-            .pr(2.0_f32)
-            .child(ui_text("Ctrl+W 閉じる", 9.5, theme().text_disabled)),
-    )
+    .child(div().pb(7.0_f32).pr(2.0_f32).child(ui_text(
+        "Ctrl+W 閉じる",
+        9.5,
+        theme().text_disabled,
+    )))
 }
 
 fn article_scroll(state: &AppState) -> Div {
@@ -1610,11 +1675,14 @@ fn article_scroll(state: &AppState) -> Div {
             .p(40.0_f32)
             .child(ui_text("タブがありません。", 13.0, theme().text_muted)),
     };
-    div()
-        .w_full()
-        .flex()
-        .justify_center()
-        .child(div().w_full().max_w(700.0_f32).px(48.0_f32).py(44.0_f32).child(body))
+    div().w_full().flex().justify_center().child(
+        div()
+            .w_full()
+            .max_w(700.0_f32)
+            .px(48.0_f32)
+            .py(44.0_f32)
+            .child(body),
+    )
 }
 
 fn placeholder(state: &AppState, index: usize, tab: &Tab) -> Div {
@@ -1767,7 +1835,12 @@ fn article(state: &AppState, workspace: &Workspace) -> Div {
                         .justify_between()
                         .child(mono_text(language, 10.0, theme().text_disabled)),
                 )
-                .child(div().px(14.0_f32).pb(11.0_f32).child(code_block(&lines, language))),
+                .child(
+                    div()
+                        .px(14.0_f32)
+                        .pb(11.0_f32)
+                        .child(code_block(&lines, language)),
+                ),
         );
     }
 
@@ -1908,7 +1981,12 @@ fn embed(state: &AppState, snippet: &Content) -> Div {
                     theme().text_disabled,
                 )),
         )
-        .child(div().px(14.0_f32).pb(11.0_f32).child(code_block(&lines, &language)))
+        .child(
+            div()
+                .px(14.0_f32)
+                .pb(11.0_f32)
+                .child(code_block(&lines, &language)),
+        )
         .child(
             div()
                 .px(14.0_f32)
@@ -2150,11 +2228,33 @@ fn inspector_links(state: &AppState) -> Div {
     let two_hop = &workspace.links.two_hop;
     let total = two_hop.len();
     let groups = ordered_groups(&workspace);
-    let preview = groups
-        .iter()
-        .take(3)
-        .filter_map(|(_, items)| items.first().cloned())
-        .collect::<Vec<_>>();
+    let mut preview = Vec::new();
+    let mut seen_vias = BTreeSet::new();
+    for (via, items) in &groups {
+        if !seen_vias.insert(via.id.clone()) {
+            continue;
+        }
+        if let Some(first) = items.first() {
+            preview.push(first.clone());
+        }
+        if preview.len() == 3 {
+            break;
+        }
+    }
+    if preview.len() < 3 {
+        for hop in two_hop {
+            if preview
+                .iter()
+                .any(|existing| existing.target.id == hop.target.id)
+            {
+                continue;
+            }
+            preview.push(hop.clone());
+            if preview.len() == 3 {
+                break;
+            }
+        }
+    }
     let shown = preview.len();
     let selected = state.next_selected.get().min(shown.saturating_sub(1));
     let mut content = div().flex().flex_col().child(
@@ -2359,7 +2459,10 @@ fn ordered_groups(workspace: &Workspace) -> Vec<(Summary, Vec<TwoHop>)> {
     }
     let mut ordered = Vec::new();
     for via in &workspace.links.outgoing {
-        if let Some(position) = groups.iter().position(|(candidate, _)| candidate.id == via.id) {
+        if let Some(position) = groups
+            .iter()
+            .position(|(candidate, _)| candidate.id == via.id)
+        {
             ordered.push(groups.remove(position));
         }
     }
@@ -2557,7 +2660,7 @@ fn shelf(state: &AppState) -> Div {
         .right(0.0_f32)
         .bottom(0.0_f32)
         .h(SHELF_HEIGHT)
-        .z_index(20_f32)
+        .z_index(20)
         .bg(theme().surface)
         .border_t(1.0_f32)
         .border_color(theme().border)
@@ -2629,10 +2732,7 @@ fn shelf(state: &AppState) -> Div {
 
 fn shelf_body(state: &AppState) -> Div {
     let workspace = state.active_workspace();
-    let groups = workspace
-        .as_ref()
-        .map(ordered_groups)
-        .unwrap_or_default();
+    let groups = workspace.as_ref().map(ordered_groups).unwrap_or_default();
     if groups.is_empty() {
         return div().child(ui_text(
             "このページから 2-hop で辿れるリンクはありません。",
@@ -2747,7 +2847,7 @@ fn palette_card(state: &AppState) -> Div {
         .top(58.0_f32)
         .left(320.0_f32)
         .w(620.0_f32)
-        .z_index(40_f32)
+        .z_index(40)
         .rounded(10.0_f32)
         .bg(theme().surface)
         .border(1.0_f32)
@@ -2811,15 +2911,21 @@ fn palette_card(state: &AppState) -> Div {
                 )
                 .child(kbd("Esc")),
         )
-        .child(div().px(10.0_f32).pt(6.0_f32).pb(4.0_f32).child(dyn_view(move || {
-            let mode = header_state.palette.get().unwrap_or(PaletteMode::Search);
-            let label = if mode == PaletteMode::Search {
-                "検索"
-            } else {
-                "クイックオープン"
-            };
-            ui_text(label, 9.5, theme().text_disabled)
-        })))
+        .child(
+            div()
+                .px(10.0_f32)
+                .pt(6.0_f32)
+                .pb(4.0_f32)
+                .child(dyn_view(move || {
+                    let mode = header_state.palette.get().unwrap_or(PaletteMode::Search);
+                    let label = if mode == PaletteMode::Search {
+                        "検索"
+                    } else {
+                        "クイックオープン"
+                    };
+                    ui_text(label, 9.5, theme().text_disabled)
+                })),
+        )
         .child(dyn_view(move || {
             let results = results_state.results.get();
             let error = results_state.palette_error.get();
@@ -3229,16 +3335,15 @@ fn fixture_home() -> Workspace {
     let goals = fixture_summary("p-goals").unwrap();
     let receipts = fixture_summary("p-receipts").unwrap();
     let fixed = fixture_summary("p-fixed").unwrap();
-    let target =
-        |id: &str, title: &str, kind: &str, updated: &str, excerpt: &str, refs: usize| {
-            let mut summary = fixture_summary(id).unwrap();
-            summary.title = title.to_owned();
-            summary.kinds = vec!["wiki".to_owned(), kind.to_owned()];
-            summary.updated_label = updated.to_owned();
-            summary.excerpt = excerpt.to_owned();
-            summary.refs = refs;
-            summary
-        };
+    let target = |id: &str, title: &str, kind: &str, updated: &str, excerpt: &str, refs: usize| {
+        let mut summary = fixture_summary(id).unwrap();
+        summary.title = title.to_owned();
+        summary.kinds = vec!["wiki".to_owned(), kind.to_owned()];
+        summary.updated_label = updated.to_owned();
+        summary.excerpt = excerpt.to_owned();
+        summary.refs = refs;
+        summary
+    };
     let mut two_hop = Vec::new();
     let mut hop = |via: &Summary, target: Summary, reason: &str| {
         two_hop.push(TwoHop {
