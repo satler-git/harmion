@@ -115,15 +115,49 @@ impl SshSigner {
     }
 }
 
+/// Probe `ssh-add -L` with a short deadline. A locked or unresponsive agent
+/// must not hang every CLI/admin startup; callers fall back to a key file.
+fn agent_keys() -> Option<String> {
+    use std::{
+        io::Read,
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+    let mut child = Command::new("ssh-add")
+        .arg("-L")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    let mut stdout = child.stdout.take()?;
+    let mut bytes = Vec::new();
+    stdout.read_to_end(&mut bytes).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
 /// Build a signer from the first (preferably `harmion-owner`) public key
 /// exposed by `ssh-add -L`. `ssh-keygen -Y sign -f <public key>` asks the
 /// agent for the signature, so no private key is read here.
 pub fn ssh_agent_signer() -> Option<SshSigner> {
-    let output = Command::new("ssh-add").arg("-L").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let keys = String::from_utf8(output.stdout).ok()?;
+    let keys = agent_keys()?;
+
     let mut lines = keys.lines().filter(|line| {
         line.starts_with("ssh-")
             || line.starts_with("ecdsa-")

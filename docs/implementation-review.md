@@ -557,3 +557,12 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - デプロイ済みの `main` は `https://127.0.0.1:8788`、CA は `~/harmion-oauth-root.pem`。管理 UI の CA `~/harmion-admin-root.pem` とは別。
 - `harmion-admin` に `tracing` + `tracing-subscriber` を追加し、stderr / `RUST_LOG`（既定 `harmion_admin=info`）で出力する。stdout は起動URLのJSONのみ。起動、所有者強制/署名鍵、launch link発行、セッション確立・終了、接続上限、認証/Origin拒否、ボディ上限、R2承認の承認/拒否/タイムアウト、transfer上限を記録する。トークン、launch URL、署名、秘密鍵、本文、承認summaryはログに出さない。
 - `design_checks/oauth_process.py` と `admin_process.py` が成功。`harmion-admin` の tracing 有効化後も stdout のJSON契約を確認した。
+
+### R62 — 2台目 native の参加・同期・退役
+
+- 本番クラスタに2台目 node `f78c6f25…` を追加した。`init --cluster`、`owner-enroll`、main から `approve`、2台目から `join` を実行し、main/2台目/Worker の3 member が active になった。
+- main で `multi node test` を作成し、2台目の `get` で本文を取得できた。2台目から Worker への同期も確認した。
+- main から2台目を `retire` し、main の `members` で `state=retired`、pending retirement なしを確認した。main → Worker の同期は `remote_high=2`、失敗なし。
+- 退役後、2台目の daemon を停止し、`~/.local/share/harmion/second` を削除した。`harmion node list` は `main` だけになった。main の membership には退役履歴が retired として残る。
+- 所有者署名は1Password SSH agent（`SSH_AUTH_SOCK=~/.1password/agent.sock`）で実行した。`ssh-agent` がロックされていても通常のR1コマンドが固まらないよう、agent 検出は2秒で打ち切り、R2実行時だけ遅延検出するようにした。
+- Worker の `/admin/members` は Access 有効化後、一時 Service Token では `401` になり直接再取得できなかった。Worker 側の反映は main→Worker 同期の成功（remote_high=2）まで確認し、Access 経由の画面確認は未実施。
