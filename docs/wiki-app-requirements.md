@@ -58,6 +58,7 @@ Harmion の最初の実用アプリとして、日常的に使える個人 Wiki 
 - ページ、Wikiリンク、バックリンク
 - ページ・見出しの取り込みと、取り込み元からの編集
 - `!` 付きフェンスの自動スニペット化（preset から言語・kind を決定）と、ホストページから開いて編集（Neovim）
+- コードスニペットの syntax highlight（`language` に応じる。未知の言語はプレーンテキスト）
 - Interpreter の解釈の埋め込みと呼び出し結果の表示
 - Wiki 自身の Interpreter 提供（`wiki/backlinks` / `wiki/outline` / `wiki/transclude` を Must）
 - 全件解釈（Interpreter 契約の変更、ストリーミング）
@@ -254,6 +255,7 @@ Harmion の最初の実用アプリとして、日常的に使える個人 Wiki 
   - kinds が空の場合は `<preset>||<id>`。ID は32バイトの Content ID（16進64文字）。
   - 正規形のフェンスは本文を持たない。レンダラが snippet をインライン展開する。次回開いたときも同じ形で、Neovim で開いて編集できる。
   - preset と kinds がホストに残るため、シンタックスハイライトとアプリの所属が分かる。
+- **コードスニペットの syntax highlight は Must**。`language` に応じた埋め込みコードの強調を表示し、未知の言語はプレーンテキストにフォールバックする。本文が読めなくなることはない。
 - 変換後、エディタは正規形を表示し、文書はインラインでレンダリングする。1回の undo で戻せる（Should）。undo で戻した場合、作成済みの snippet は孤児として扱い、削除を提案する。
 - 変換は可視で、取り消し・インラインへの戻しができる。`!` を外した場合は変換しない。
 - snippet は kind `wiki` + フェンスの kinds。`wiki/type=snippet`、属性は `format`（preset）、`language`（ハイライト言語）、`name`、`filename`、`title`。
@@ -437,6 +439,7 @@ Harmion の最初の実用アプリとして、日常的に使える個人 Wiki 
 | FR-51 | WM 連携の off / 非対応環境 | Must | off でも RPC のフォーカス・オープンは動く |
 | FR-52 | レイアウトプリセットの保存・復元 | Should | 横並び / GUI のみ / エディタのみ |
 | FR-54 | wiki 固有構文の semantic tokens（必要に応じて） | Could | canonical fence / provider / kind が強調される |
+| FR-55 | コードスニペットの syntax highlight | Must | `language` に応じて強調され、未知の言語でも本文が読める |
 
 ## 7. 非機能要件
 
@@ -522,7 +525,7 @@ Harmion の最初の実用アプリとして、日常的に使える個人 Wiki 
   - references: バックリンク（`gr`）
   - completion: `[[` のタイトル・別名、`![` の provider 名、`!` フェンスの preset、`|` の kind
   - hover: ページの抜粋、snippet の format / language / kinds、provider の schema
-  - syntax highlight: treesitter で Markdown と埋め込みコードを強調する。wiki 固有の `preset|kinds||id`、provider 名、kind、リンク ID は、必要に応じて LSP semantic tokens で補う（Should / Could）
+  - syntax highlight: コードスニペットは Must。treesitter で Markdown と埋め込みコードを強調し、未知の言語はプレーンテキストにフォールバックする。wiki 固有の `preset|kinds||id`、provider 名、kind、リンク ID は、必要に応じて LSP semantic tokens で補う（Should / Could）
 - Should:
   - code actions: 未解決リンクからページ作成、選択範囲を snippet 化、埋め込み再実行、kind 追加
   - document symbols: 見出し・埋め込み
