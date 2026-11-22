@@ -100,13 +100,18 @@ impl OwnerCli {
     async fn new(client: &Client, key: Option<&str>) -> Result<Self> {
         let signer = key
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HARMION_OWNER_SSH_KEY").map(PathBuf::from))
+            .map(SshSigner::new)
+            .or_else(|| {
+                std::env::var_os("HARMION_OWNER_SSH_KEY")
+                    .map(PathBuf::from)
+                    .map(SshSigner::new)
+            })
+            .or_else(harmion_client::ssh_agent_signer)
             .or_else(|| {
                 let home = std::env::var_os("HOME")?;
                 let path = PathBuf::from(home).join(".ssh").join("id_ed25519.pub");
-                path.is_file().then_some(path)
-            })
-            .map(SshSigner::new);
+                path.is_file().then(|| SshSigner::new(path))
+            });
         let enforce = client
             .owner_status()
             .await
@@ -127,7 +132,7 @@ impl OwnerCli {
             let signer = self
                 .signer
                 .as_ref()
-                .ok_or("owner enforcement is on; pass --owner-key or set HARMION_OWNER_SSH_KEY")?;
+                .ok_or("owner enforcement is on; pass --owner-key, set HARMION_OWNER_SSH_KEY, or load a key into ssh-agent")?;
             confirm(summary)?;
             Ok(client
                 .call_owner(operation, body, target, None, signer)
@@ -144,7 +149,7 @@ impl OwnerCli {
         let signer = self
             .signer
             .as_ref()
-            .ok_or("owner enforcement is on; pass --owner-key or set HARMION_OWNER_SSH_KEY")?;
+            .ok_or("owner enforcement is on; pass --owner-key, set HARMION_OWNER_SSH_KEY, or load a key into ssh-agent")?;
         confirm(&format!("全データを {path} へExport"))?;
         let challenge = client.owner_challenge("export", None, &[], None).await?;
         let statement = unhex_bytes(&challenge.statement, MAX_RECORD_BYTES)?;

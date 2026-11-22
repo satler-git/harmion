@@ -10,7 +10,7 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "DIR")]
     pub node: String,
     /// OpenSSH public key whose private half is held by ssh-agent, or a private
-    /// key file. Defaults to HARMION_OWNER_SSH_KEY or ~/.ssh/id_ed25519.pub.
+    /// key file. Defaults to HARMION_OWNER_SSH_KEY, an ssh-agent identity, or ~/.ssh/id_ed25519.pub.
     #[arg(long, value_name = "PATH")]
     pub owner_key: Option<String>,
     #[command(subcommand)]

@@ -244,11 +244,14 @@ UI を更新した後は `cargo build --workspace` を実行し、起動中の�
 `harmiond` を起動した状態で、管理アプリ専用の CA を一度発行する。管理アプリの秘密鍵は新しい所有者専用ディレクトリに格納される。
 
 ```sh
-target/debug/harmion-admin provision ./admin-ui > harmion-admin-root.pem
-target/debug/harmion-admin run ./node-a ./admin-ui --owner-key ~/.ssh/id_ed25519.pub
+target/debug/harmion-admin provision > harmion-admin-root.pem
+target/debug/harmion-admin run ./node-a
 ```
 
-ブラウザに `harmion-admin-root.pem` を Web サイト用 CA として登録し、端末に表示された単回リンクを開く。リンクは2分、セッションはアイドル10分・絶対30分有効。R2は起動端末での承認が必要で、`--approval=stdio`は監督下の自動化専用。再読込後は、新しいセッションを作るために管理アプリを再起動する。特定の Content を開く場合は `run` の末尾に Content ID を指定する。公開 CA は `harmion-admin root ./admin-ui` で再取得できる。OAuth の認可画面を開く場合は、[ノードの OAuth 専用 CA](#oauthを有効にする) も登録する。
+ブラウザに `harmion-admin-root.pem` を Web サイト用 CA として登録し、端末に表示された単回リンクを開く。リンクは2分、セッションはアイドル10分・絶対30分有効。R2は起動端末での承認が必要で、`--approval=stdio`は監督下の自動化専用。再読込後は、新しいセッションを作るために管理アプリを再起動する。状態 directory は既定で `~/.local/share/harmion/admin-ui`。別の場所を使う場合は
+`--ui-dir DIR` を付ける。特定の Content を開く場合は `run` の node の後ろに
+Content ID を指定する。所有者鍵は `--owner-key`、`HARMION_OWNER_SSH_KEY`、
+ssh-agent の順に自動検出する。公開 CA は `harmion-admin root` で再取得できる。OAuth の認可画面を開く場合は、[ノードの OAuth 専用 CA](#oauthを有効にする) も登録する。
 
 画面はダークテーマを標準とし、概要・コンテンツ・競合解決・Peer・アプリ・Export を分ける。コンテンツ画面で本文と属性を読み、競合解決画面で候補を比較・編集・選択する。画面の切替中も編集内容と保存の再試行要求を保持する。ノードの管理資格情報は管理アプリのプロセスが使用する。 [管理 Web アプリの契約](specification.md#64-ローカル管理-web-アプリ)
 

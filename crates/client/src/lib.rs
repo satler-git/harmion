@@ -115,6 +115,33 @@ impl SshSigner {
     }
 }
 
+/// Build a signer from the first (preferably `harmion-owner`) public key
+/// exposed by `ssh-add -L`. `ssh-keygen -Y sign -f <public key>` asks the
+/// agent for the signature, so no private key is read here.
+pub fn ssh_agent_signer() -> Option<SshSigner> {
+    let output = Command::new("ssh-add").arg("-L").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let keys = String::from_utf8(output.stdout).ok()?;
+    let mut lines = keys.lines().filter(|line| {
+        line.starts_with("ssh-")
+            || line.starts_with("ecdsa-")
+            || line.starts_with("sk-ssh-")
+            || line.starts_with("sk-ecdsa-")
+    });
+    let line = lines
+        .clone()
+        .find(|line| line.contains("harmion-owner"))
+        .or_else(|| lines.next())?;
+    let home = std::env::var_os("HOME")?;
+    let directory = PathBuf::from(home).join(".local/share/harmion");
+    fs::create_dir_all(&directory).ok()?;
+    let path = directory.join("owner-agent.pub");
+    fs::write(&path, format!("{line}\n")).ok()?;
+    Some(SshSigner::new(path))
+}
+
 impl OwnerSigner for SshSigner {
     fn sign(&self, statement: &[u8]) -> Result<Vec<u8>, Error> {
         let directory = temp_dir()?;

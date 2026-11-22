@@ -8,7 +8,11 @@ use clap::{Parser, Subcommand};
 use harmion_client::{Client, ProtectedDir, SshSigner, protocol::unhex};
 use harmion_local_web::BrowserTls;
 use serde::{Deserialize, Serialize};
-use std::{io, path::PathBuf, sync::Arc};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::net::TcpListener;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -24,14 +28,24 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Provision a browser TLS identity.
-    Provision { ui_dir: String },
+    Provision {
+        /// State directory. Defaults to ~/.local/share/harmion/admin-ui.
+        #[arg(long = "ui-dir", value_name = "DIR")]
+        ui_dir: Option<String>,
+    },
     /// Print the browser trust root as PEM.
-    Root { ui_dir: String },
+    Root {
+        /// State directory. Defaults to ~/.local/share/harmion/admin-ui.
+        #[arg(long = "ui-dir", value_name = "DIR")]
+        ui_dir: Option<String>,
+    },
     /// Serve the administration UI on loopback HTTPS.
     Run {
         node_dir: String,
-        ui_dir: String,
         content_id: Option<String>,
+        /// State directory. Defaults to ~/.local/share/harmion/admin-ui.
+        #[arg(long = "ui-dir", value_name = "DIR")]
+        ui_dir: Option<String>,
         /// R2 approval source. Terminal is the safe default.
         #[arg(long, value_enum, default_value = "terminal")]
         approval: ApprovalMode,
@@ -50,7 +64,7 @@ struct Identity {
     key: Vec<u8>,
 }
 
-fn provision(path: &str) -> Result<()> {
+fn provision(path: &Path) -> Result<()> {
     let state = ProtectedDir::create(path)?;
     let identity = BrowserTls::generate("Admin")?;
     let pem = identity.root_pem();
@@ -77,7 +91,7 @@ fn identity(state: &ProtectedDir) -> Result<BrowserTls> {
 
 async fn run(
     node: &str,
-    state: &str,
+    state: &Path,
     content: Option<&str>,
     approval: ApprovalMode,
     owner_key: Option<&str>,
@@ -107,14 +121,19 @@ async fn run(
         .await
         .map(|status| status["enforce"] == true)
         .unwrap_or(false);
-    let key = owner_key
+    let signer = owner_key
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HARMION_OWNER_SSH_KEY").map(PathBuf::from))
+        .map(SshSigner::new)
+        .or_else(|| {
+            std::env::var_os("HARMION_OWNER_SSH_KEY")
+                .map(PathBuf::from)
+                .map(SshSigner::new)
+        })
+        .or_else(harmion_client::ssh_agent_signer)
         .or_else(default_owner_key);
-    let signer = key.map(SshSigner::new);
     if owner_enforced && signer.is_none() {
         eprintln!(
-            "harmion-admin: owner enforcement is on; R2 operations need --owner-key or HARMION_OWNER_SSH_KEY"
+            "harmion-admin: owner enforcement is on; R2 operations need --owner-key, HARMION_OWNER_SSH_KEY, or an ssh-agent identity"
         );
     }
     let confirmer = Confirmer::start(approval);
@@ -136,36 +155,52 @@ async fn run(
     Ok(())
 }
 
-fn default_owner_key() -> Option<PathBuf> {
+fn default_owner_key() -> Option<SshSigner> {
     let home = std::env::var_os("HOME")?;
     let path = PathBuf::from(home).join(".ssh").join("id_ed25519.pub");
-    path.is_file().then_some(path)
+    path.is_file().then(|| SshSigner::new(path))
+}
+
+fn resolve_ui_dir(value: Option<&str>) -> Result<PathBuf> {
+    if let Some(value) = value {
+        return Ok(PathBuf::from(value));
+    }
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
+    Ok(PathBuf::from(home)
+        .join(".local/share/harmion")
+        .join("admin-ui"))
 }
 
 #[tokio::main]
 async fn main() {
     let result = match Cli::parse().command {
-        Command::Provision { ui_dir } => provision(&ui_dir),
-        Command::Root { ui_dir } => ProtectedDir::open(&ui_dir)
-            .map_err(Into::into)
+        Command::Provision { ui_dir } => {
+            resolve_ui_dir(ui_dir.as_deref()).and_then(|dir| provision(&dir))
+        }
+        Command::Root { ui_dir } => resolve_ui_dir(ui_dir.as_deref())
+            .and_then(|dir| ProtectedDir::open(&dir).map_err(Into::into))
             .and_then(|state| identity(&state))
             .map(|tls| print!("{}", tls.root_pem())),
         Command::Run {
             node_dir,
-            ui_dir,
             content_id,
+            ui_dir,
             approval,
             owner_key,
-        } => {
-            run(
-                &node_dir,
-                &ui_dir,
-                content_id.as_deref(),
-                approval,
-                owner_key.as_deref(),
-            )
-            .await
-        }
+        } => match resolve_ui_dir(ui_dir.as_deref()) {
+            Ok(ui_dir) => {
+                run(
+                    &node_dir,
+                    &ui_dir,
+                    content_id.as_deref(),
+                    approval,
+                    owner_key.as_deref(),
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        },
     };
     if let Err(error) = result {
         eprintln!("harmion-admin: {error}");
