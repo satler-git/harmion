@@ -6,6 +6,56 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Root that holds named nodes, admin state and other per-user Harmion data.
+pub fn node_root() -> std::io::Result<std::path::PathBuf> {
+    if let Some(root) = std::env::var_os("HARMION_NODE_ROOT") {
+        return Ok(std::path::PathBuf::from(root));
+    }
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"))?;
+    Ok(std::path::PathBuf::from(home).join(".local/share/harmion"))
+}
+
+/// Accept an existing directory first, then a node name under `node_root()`.
+/// A bare name such as `main` therefore works without spelling out the full
+/// `~/.local/share/harmion/main` path.
+pub fn resolve_node(spec: &str) -> std::io::Result<std::path::PathBuf> {
+    let direct = std::path::PathBuf::from(spec);
+    if direct.is_dir() {
+        return Ok(direct);
+    }
+    let named = node_root()?.join(spec);
+    if named.is_dir() {
+        return Ok(named);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("node `{spec}` not found; try `harmion node list`"),
+    ))
+}
+
+/// Node names are directories containing an initialized `node.json`.
+pub fn list_nodes() -> std::io::Result<Vec<String>> {
+    let root = node_root()?;
+    let mut names = Vec::new();
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(names),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.join("node.json").is_file()
+            && let Some(name) = path.file_name().and_then(|name| name.to_str())
+        {
+            names.push(name.to_owned());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 #[derive(Clone, Debug)]
 pub struct ProtectedDir {
     root: PathBuf,

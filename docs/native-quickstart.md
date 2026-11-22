@@ -235,6 +235,21 @@ FIDO2の`sk-ssh-ed25519@openssh.com`、PIVカード、`ssh-add -c`を使うと�
 
 同一OSユーザーの任意コード実行はこの仕組みでも防げない。仕様6.3の信頼境界は変わらない。
 
+## ノード名と既定ノード
+
+`~/.local/share/harmion` 配下の `node.json` を持つ directory は、名前で指定できる。
+既存の directory を先に探し、なければ `~/.local/share/harmion/<name>` を探す。
+
+```sh
+harmion node list                 # main などの初期化済みノード名
+harmion --node main identity      # 名前で指定
+harmion identity                  # --node 省略時は main
+harmion-admin run main            # 管理 UI も名前で指定
+```
+
+`HARMION_NODE_ROOT` を設定すると名前の探索 root を変更できる。管理 UI の状態
+directory はノードとは別で、既定は `~/.local/share/harmion/admin-ui`。
+
 ## 管理 Web アプリ
 
 フロントエンドは Svelte・TypeScript・Vite で構成する。開発時は Node.js 22.12以降または24系と npm を使い、初回に `npm ci --prefix apps/admin/ui` を実行する。Cargo が UI をビルドして管理アプリの実行ファイルに同梱する。利用時には Node.js プロセスは不要。型チェックは `npm --prefix apps/admin/ui run check` で実行できる。

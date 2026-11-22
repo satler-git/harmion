@@ -1079,6 +1079,7 @@ dependencies = [
  "clap",
  "flate2",
  "harmion-client",
+ "harmion-local",
  "serde_json",
  "tokio",
 ]
@@ -1092,6 +1093,7 @@ dependencies = [
  "clap",
  "flate2",
  "harmion-client",
+ "harmion-local",
  "harmion-local-web",
  "http-body-util",
  "hyper",

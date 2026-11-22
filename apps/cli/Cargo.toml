@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 clap.workspace = true
 harmion-client = { path = "../../crates/client" }
+harmion-local = { path = "../../crates/local" }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 base64 = "0.22.1"

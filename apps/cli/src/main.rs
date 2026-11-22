@@ -1,7 +1,7 @@
 mod cli;
 
 use clap::Parser;
-use cli::{Cli, Command as CliCommand};
+use cli::{Cli, Command as CliCommand, NodeCommand};
 use domain::{Change, ContentId, Field, UpdateId, Value};
 use harmion_client::{
     Client, OwnerSigner, ProtectedDir, SshSigner,
@@ -175,8 +175,7 @@ fn confirm(summary: &str) -> Result<()> {
     }
 }
 
-async fn execute(cli: &Cli) -> Result<serde_json::Value> {
-    let directory = &cli.node;
+async fn execute(cli: &Cli, directory: &Path) -> Result<serde_json::Value> {
     let client = Client::from_directory(directory)?;
     let owner = OwnerCli::new(&client, cli.owner_key.as_deref()).await?;
     let command = cli.command.operation();
@@ -195,6 +194,7 @@ async fn execute(cli: &Cli) -> Result<serde_json::Value> {
             ProtectedDir::open(directory)?.replace("peer.json", &bytes)?;
             Ok(registration)
         }
+        CliCommand::Node { .. } => unreachable!("node list is handled before opening a node"),
         CliCommand::Identity
         | CliCommand::Capabilities
         | CliCommand::Permissions
@@ -521,7 +521,34 @@ async fn execute(cli: &Cli) -> Result<serde_json::Value> {
 }
 #[tokio::main]
 async fn main() {
-    match execute(&Cli::parse()).await {
+    let cli = Cli::parse();
+    if matches!(
+        cli.command,
+        CliCommand::Node {
+            command: NodeCommand::List
+        }
+    ) {
+        match harmion_local::list_nodes() {
+            Ok(nodes) => {
+                for node in nodes {
+                    println!("{node}");
+                }
+            }
+            Err(error) => {
+                eprintln!("harmion: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    let directory = match harmion_local::resolve_node(cli.node.as_deref().unwrap_or("main")) {
+        Ok(directory) => directory,
+        Err(error) => {
+            eprintln!("harmion: {error}");
+            std::process::exit(1);
+        }
+    };
+    match execute(&cli, &directory).await {
         Ok(result) => println!("{result}"),
         Err(error) => {
             eprintln!("harmion: {error}");

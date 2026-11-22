@@ -90,7 +90,7 @@ fn identity(state: &ProtectedDir) -> Result<BrowserTls> {
 }
 
 async fn run(
-    node: &str,
+    node: &Path,
     state: &Path,
     content: Option<&str>,
     approval: ApprovalMode,
@@ -188,18 +188,21 @@ async fn main() {
             ui_dir,
             approval,
             owner_key,
-        } => match resolve_ui_dir(ui_dir.as_deref()) {
-            Ok(ui_dir) => {
-                run(
-                    &node_dir,
-                    &ui_dir,
-                    content_id.as_deref(),
-                    approval,
-                    owner_key.as_deref(),
-                )
-                .await
-            }
-            Err(error) => Err(error),
+        } => match harmion_local::resolve_node(&node_dir) {
+            Ok(node) => match resolve_ui_dir(ui_dir.as_deref()) {
+                Ok(ui_dir) => {
+                    run(
+                        &node,
+                        &ui_dir,
+                        content_id.as_deref(),
+                        approval,
+                        owner_key.as_deref(),
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error.into()),
         },
     };
     if let Err(error) = result {

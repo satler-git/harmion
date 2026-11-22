@@ -7,8 +7,9 @@ use clap::{Parser, Subcommand};
     after_help = "Request files require an owner-only parent directory and must not exist."
 )]
 pub(crate) struct Cli {
-    #[arg(long, value_name = "DIR")]
-    pub node: String,
+    /// Node directory, or a name under ~/.local/share/harmion. Defaults to main.
+    #[arg(long, value_name = "DIR|NAME")]
+    pub node: Option<String>,
     /// OpenSSH public key whose private half is held by ssh-agent, or a private
     /// key file. Defaults to HARMION_OWNER_SSH_KEY, an ssh-agent identity, or ~/.ssh/id_ed25519.pub.
     #[arg(long, value_name = "PATH")]
@@ -19,6 +20,11 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Manage local nodes.
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
+    },
     /// Read node identity.
     Identity,
     /// Read supported capabilities.
@@ -187,9 +193,16 @@ pub(crate) enum Command {
     },
 }
 
+#[derive(Subcommand)]
+pub(crate) enum NodeCommand {
+    /// List initialized local node names.
+    List,
+}
+
 impl Command {
     pub fn operation(&self) -> &'static str {
         match self {
+            Self::Node { .. } => "node",
             Self::Identity => "identity",
             Self::Capabilities => "capabilities",
             Self::Permissions => "permissions",
@@ -363,6 +376,13 @@ mod tests {
             parse(&["unknown"]).err().unwrap().kind(),
             clap::error::ErrorKind::InvalidSubcommand
         );
-        assert!(Cli::try_parse_from(["harmion", "identity"]).is_err());
+        let cli = Cli::try_parse_from(["harmion", "identity"]).unwrap();
+        assert!(cli.node.is_none());
+        assert!(matches!(
+            Cli::try_parse_from(["harmion", "node", "list"])
+                .unwrap()
+                .command,
+            Command::Node { .. }
+        ));
     }
 }

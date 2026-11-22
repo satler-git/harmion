@@ -543,3 +543,9 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - `/admin/*` は Access セッションに加えて bearer も必要。curl の自動化には Access Service Token が必要。
 - native 管理 UI の状態ディレクトリを `~/.local/share/harmion/admin-ui` へ移し、`provision`/`root`/`run` の `--ui-dir` を省略可能にした。R2 の所有者鍵は `--owner-key`、`HARMION_OWNER_SSH_KEY`、ssh-agent（`ssh-add -L`）の順で自動検出する。
 - ssh-agent 経由の `harmion export` が SSHSIG 検証まで成功することを確認した。1Password SSH agent はデスクトップアプリの機能で、CLI 単体では利用できない（`op-ssh-sign` も agent の代替ではない）。
+
+### R60 — native ノード名の解決
+
+- `harmion` / `harmion-admin` のノード指定で、既存 directory になければ `~/.local/share/harmion/<name>` を参照するようにした。`HARMION_NODE_ROOT` で root を変更できる。
+- `harmion node list` は `node.json` を持つ directory だけを名前で列挙する。`harmion` の `--node` 省略時は `main`。`harmion-admin run main` も動く。
+- `harmion-admin` の状態 directory は従来どおり `~/.local/share/harmion/admin-ui`。ノード名とは独立。
