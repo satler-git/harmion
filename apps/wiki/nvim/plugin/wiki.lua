@@ -42,6 +42,7 @@ local function set_metadata(buf, content)
   vim.api.nvim_buf_set_var(buf, "wiki_id", content.id)
   vim.api.nvim_buf_set_var(buf, "wiki_rev", content.rev)
   vim.api.nvim_buf_set_var(buf, "wiki_type", content.type)
+  vim.api.nvim_buf_set_var(buf, "wiki_title", content.title)
   if content.type == "snippet" and content.language then
     vim.bo[buf].filetype = content.language
   else
@@ -242,6 +243,34 @@ end, { nargs = "?" })
 vim.api.nvim_create_user_command("WikiNew", function(args)
   new_page(args.args)
 end, { nargs = "?" })
+local function current_id()
+  local id = vim.b.wiki_id
+  if not id then
+    error("wiki: current buffer is not a Wiki Content")
+  end
+  return id
+end
+
+vim.api.nvim_create_user_command("WikiTitle", function(args)
+  local updated = run({ "update_meta", current_id(), "--title", args.args })
+  vim.api.nvim_buf_set_var(0, "wiki_title", updated.title)
+  vim.notify("wiki: title = " .. updated.title, vim.log.levels.INFO)
+end, { nargs = 1 })
+
+vim.api.nvim_create_user_command("WikiTags", function(args)
+  local updated = run({ "update_meta", current_id(), "--tags", args.args })
+  vim.b.wiki_tags = table.concat(updated.tags or {}, ",")
+  vim.notify("wiki: tags = " .. (vim.b.wiki_tags ~= "" and vim.b.wiki_tags or "(none)"), vim.log.levels.INFO)
+end, { nargs = 1 })
+
+vim.api.nvim_create_user_command("WikiDelete", function(args)
+  local id = current_id()
+  if args.bang or vim.fn.confirm("Delete " .. id .. "?", "&Yes\n&No", 2) == 1 then
+    run({ "delete", id })
+    vim.cmd("bwipeout!")
+  end
+end, { bang = true })
+
 vim.api.nvim_create_user_command("WikiList", list, {})
 vim.api.nvim_create_user_command("WikiSearch", function(args)
   search(args.args)

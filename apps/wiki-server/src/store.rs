@@ -557,6 +557,36 @@ impl State {
         Ok(saved)
     }
 
+    pub fn update_meta(
+        &mut self,
+        id: &str,
+        title: Option<String>,
+        tags: Option<Vec<String>>,
+        aliases: Option<Vec<String>>,
+    ) -> RpcResult<Content> {
+        self.ensure_writable("update_meta")?;
+        let mut content = self.open(id)?;
+        if let Some(title) = title {
+            content.title = checked_title(&title)?;
+        }
+        if let Some(tags) = tags {
+            content.tags = normalized_list(tags);
+        }
+        if let Some(aliases) = aliases {
+            content.aliases = normalized_list(aliases);
+        }
+        check_size(&content)?;
+        content.rev += 1;
+        content.updated_at = now_micros();
+        content.updated_label = "たった今".to_owned();
+        let saved = content.clone();
+        self.mutate(|contents| {
+            contents.insert(id.to_owned(), content.clone());
+            Ok(())
+        })?;
+        Ok(saved)
+    }
+
     pub fn save_with_conversion(
         &mut self,
         id: &str,
@@ -1209,6 +1239,24 @@ mod tests {
         assert_eq!(leftovers, 0);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn updates_title_and_tags() {
+        let mut state = sample_state();
+        let page = state.open("p-test").unwrap();
+        let updated = state
+            .update_meta(
+                "p-test",
+                Some("Renamed".to_owned()),
+                Some(vec!["a".to_owned(), "a".to_owned(), "b".to_owned()]),
+                None,
+            )
+            .unwrap();
+        assert_eq!(updated.title, "Renamed");
+        assert_eq!(updated.tags, ["a", "b"]);
+        assert_eq!(updated.rev, page.rev + 1);
+        assert_eq!(state.open("p-test").unwrap().title, "Renamed");
     }
 
     #[test]

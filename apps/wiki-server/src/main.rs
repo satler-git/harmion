@@ -147,6 +147,18 @@ enum Command {
         #[arg(long, default_value = SOCKET_DEFAULT)]
         socket: PathBuf,
     },
+    #[command(name = "update_meta")]
+    UpdateMeta {
+        id: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        aliases: Vec<String>,
+        #[arg(long, default_value = SOCKET_DEFAULT)]
+        socket: PathBuf,
+    },
     Delete {
         id: String,
         #[arg(long, default_value = SOCKET_DEFAULT)]
@@ -241,6 +253,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "end": end,
                 "title": title,
             }),
+        ),
+        Command::UpdateMeta {
+            id,
+            title,
+            tags,
+            aliases,
+            socket,
+        } => print_call(
+            &socket,
+            "update_meta",
+            json!({ "id": id, "title": title, "tags": tags, "aliases": aliases }),
         ),
         Command::Delete { id, socket } => print_call(&socket, "delete", json!({ "id": id })),
     }
@@ -399,6 +422,25 @@ fn dispatch_result(state: &Arc<Mutex<State>>, request: &Request) -> RpcResult<Va
             let name = required_str(params, "name")?;
             let state = state.lock().expect("state lock");
             provider::call(&state, &name, params)
+        }
+        "update_meta" => {
+            let id = required_str(params, "id")?;
+            let title = optional_str(params, "title")?;
+            let tags = if params.get("tags").is_some() {
+                Some(optional_str_array(params, "tags")?)
+            } else {
+                None
+            };
+            let aliases = if params.get("aliases").is_some() {
+                Some(optional_str_array(params, "aliases")?)
+            } else {
+                None
+            };
+            let mut state = state.lock().expect("state lock");
+            Ok(
+                serde_json::to_value(state.update_meta(&id, title, tags, aliases)?)
+                    .expect("content serializes"),
+            )
         }
         "create_page" => {
             let title = required_str(params, "title")?;
