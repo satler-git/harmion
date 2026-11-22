@@ -34,7 +34,7 @@ use tokio::{
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-const DEADLINE: Duration = Duration::from_secs(15);
+const DEADLINE: Duration = Duration::from_secs(45);
 const CONTENT_TYPE: &str = "application/vnd.harmion.https-peer-v2";
 
 fn random_nonce() -> Result<Nonce, harmion_node::Error> {
