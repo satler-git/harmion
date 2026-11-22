@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1600, initial-scale=1">
+<title>Harmion Wiki — GUI + external Neovide (mockup)</title>
+<style>
+  :root {
+    --bg: #070a10;
+    --panel: #121722;
+    --panel-2: #0d121b;
+    --border: #232a36;
+    --border-soft: #1b222d;
+    --text: #d7dde8;
+    --muted: #8792a6;
+    --dim: #5d6879;
+    --accent: #6ee7d8;
+    --accent-2: #8ab4ff;
+    --gold: #e8c07a;
+    --green: #7ee787;
+    --red: #ff7b72;
+    --mono: "JetBrains Mono", "Fira Code", "Noto Sans Mono", ui-monospace, monospace;
+    --sans: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 100%; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px;
+    overflow: hidden;
+  }
+  .desktop {
+    height: 100vh;
+    padding: 14px 18px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    background:
+      radial-gradient(900px 500px at 18% -10%, rgba(110,231,216,.07), transparent 60%),
+      radial-gradient(800px 500px at 92% 0%, rgba(138,180,255,.06), transparent 55%),
+      var(--bg);
+  }
+  .wmbar {
+    flex: 0 0 32px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+    color: var(--muted);
+    font-size: 11.5px;
+  }
+  .wmbar .brand { color: var(--text); font-weight: 700; letter-spacing: .03em; }
+  .wmbar .sep { color: var(--dim); }
+  .wmbar .spacer { flex: 1; }
+  .wmbar .chip {
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: #0a0f17;
+  }
+  .wmbar .chip.live { color: var(--accent); border-color: rgba(110,231,216,.35); }
+  .workspace {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 1.58fr 1fr;
+    gap: 14px;
+  }
+  .window {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 18px 50px rgba(0,0,0,.36);
+  }
+  .window.focused {
+    border-color: rgba(110,231,216,.62);
+    box-shadow: 0 0 0 1px rgba(110,231,216,.28), 0 18px 50px rgba(0,0,0,.36);
+  }
+  .titlebar {
+    flex: 0 0 38px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 12px;
+    background: #10151f;
+    border-bottom: 1px solid var(--border);
+  }
+  .dots { display: flex; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #39404e; }
+  .dot.r { background: #5b3a3e; }
+  .dot.y { background: #5b5136; }
+  .dot.g { background: #355443; }
+  .titlebar .title { font-weight: 600; letter-spacing: .01em; }
+  .titlebar .sub { color: var(--muted); font-size: 11px; }
+  .titlebar .spacer { flex: 1; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+  .badge.accent { color: var(--accent); border-color: rgba(110,231,216,.35); background: rgba(110,231,216,.06); }
+  .badge.gold { color: var(--gold); border-color: rgba(232,192,122,.3); background: rgba(232,192,122,.06); }
+  .num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 17px;
+    height: 17px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #05201c;
+    font-size: 10.5px;
+    font-weight: 800;
+    flex: 0 0 17px;
+  }
+  .toolbar {
+    flex: 0 0 46px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--border-soft);
+    background: #0f141d;
+  }
+  .crumbs { color: var(--muted); font-size: 11.5px; }
+  .crumbs b { color: var(--text); font-weight: 600; }
+  .search {
+    flex: 1;
+    max-width: 320px;
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: #0a0f17;
+    color: var(--dim);
+    font-size: 11.5px;
+  }
+  .search .key { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
+  .sync { color: var(--green); font-size: 11px; display: flex; align-items: center; gap: 6px; }
+  .dot-ok, .dot-idle, .dot-warn {
+    width: 7px; height: 7px; border-radius: 50%; display: inline-block;
+  }
+  .dot-ok { background: var(--green); box-shadow: 0 0 8px rgba(126,231,135,.55); }
+  .dot-idle { background: var(--dim); }
+  .dot-warn { background: var(--gold); box-shadow: 0 0 8px rgba(232,192,122,.45); }
+  .gui-body {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 178px minmax(0, 1fr) 186px;
+  }
+  .sidebar {
+    border-right: 1px solid var(--border-soft);
+    background: #0e131c;
+    padding: 12px 10px;
+    overflow: hidden;
+  }
+  .side-group { margin-bottom: 16px; }
+  .side-label {
+    display: flex; align-items: center; justify-content: space-between;
+    color: var(--dim); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+    padding: 0 6px 7px;
+  }
+  .side-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 8px; border-radius: 6px;
+    color: var(--muted); font-size: 11.5px;
+  }
+  .side-item.active { background: rgba(110,231,216,.09); color: var(--text); }
+  .side-item.active::before {
+    content: ""; width: 3px; height: 14px; border-radius: 2px; background: var(--accent);
+    margin-left: -8px;
+  }
+  .side-item .ico { width: 13px; text-align: center; color: var(--dim); }
+  .side-item.active .ico { color: var(--accent); }
+  .side-count { margin-left: auto; color: var(--dim); font-family: var(--mono); font-size: 10px; }
+  .tag-row { display: flex; flex-wrap: wrap; gap: 5px; padding: 2px 6px; }
+  .tag {
+    display: inline-flex; align-items: center;
+    padding: 3px 7px; border-radius: 999px;
+    border: 1px solid var(--border); background: #0a0f17;
+    color: var(--muted); font-size: 10.5px;
+  }
+  .article {
+    min-width: 0;
+    overflow: hidden;
+    padding: 18px 24px 16px;
+  }
+  .article .kicker { color: var(--muted); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
+  h1 { margin: 7px 0 8px; font-size: 28px; line-height: 1.18; letter-spacing: .01em; }
+  .meta { display: flex; align-items: center; gap: 7px; margin-bottom: 14px; }
+  .meta .muted { color: var(--dim); font-size: 10.5px; margin-left: 4px; }
+  .article p { margin: 0 0 12px; color: #b9c2d2; line-height: 1.85; font-size: 12.7px; }
+  .embed {
+    position: relative;
+    border: 1px solid rgba(110,231,216,.42);
+    border-radius: 9px;
+    background: #0b1119;
+    box-shadow: 0 0 0 1px rgba(110,231,216,.08);
+    overflow: hidden;
+    margin: 12px 0 13px;
+  }
+  .embed::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: linear-gradient(180deg, var(--accent), rgba(110,231,216,.15));
+  }
+  .embed-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 11px 8px 13px;
+    border-bottom: 1px solid var(--border-soft);
+    background: rgba(110,231,216,.035);
+    font-size: 10.5px;
+  }
+  .fmt { color: var(--gold); font-family: var(--mono); font-weight: 600; }
+  .lang { color: var(--accent-2); font-family: var(--mono); }
+  .sep { color: var(--dim); }
+  .kinds { color: var(--dim); margin-left: 2px; }
+  .kinds b { color: var(--accent); font-weight: 600; }
+  .editing {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+    color: var(--accent); font-size: 10px;
+  }
+  .editing::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); box-shadow: 0 0 8px rgba(110,231,216,.6);
+  }
+  pre.ledger {
+    margin: 0;
+    padding: 11px 13px 10px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.75;
+    color: #c8d2e2;
+    white-space: pre;
+    overflow: hidden;
+  }
+  .ln { color: #3d4656; user-select: none; display: inline-block; width: 18px; }
+  .date { color: var(--muted); }
+  .payee { color: #eef3fb; }
+  .acct { color: var(--gold); }
+  .amt { color: var(--green); }
+  .neg { color: #ff9b93; }
+  .embed-foot {
+    display: flex; align-items: center; gap: 12px;
+    padding: 6px 11px 7px 13px;
+    border-top: 1px solid var(--border-soft);
+    color: var(--dim); font-size: 10px;
+  }
+  .embed-foot .hint { margin-left: auto; color: var(--accent); }
+  .embed .num { position: absolute; right: 9px; top: 36px; }
+  .result {
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: linear-gradient(180deg, #101722, #0d131c);
+    padding: 10px 13px 9px;
+    margin: 2px 0 12px;
+  }
+  .result-head { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10.5px; }
+  .result-head .provider { color: var(--text); font-family: var(--mono); }
+  .result-head .muted { color: var(--dim); }
+  .amount { font-family: var(--mono); font-size: 25px; letter-spacing: .01em; margin: 4px 0 2px; color: #eaf2ff; }
+  .result-foot { color: var(--dim); font-size: 10px; }
+  .result-foot .ok { color: var(--green); }
+  .backlinks { margin-top: 6px; border-top: 1px solid var(--border-soft); padding-top: 9px; }
+  .backlinks-title { color: var(--dim); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 5px; }
+  .backlinks a { display: inline-block; margin: 0 8px 5px 0; color: var(--accent-2); font-size: 11px; text-decoration: none; }
+  .rail {
+    border-left: 1px solid var(--border-soft);
+    background: #0e131c;
+    padding: 13px 12px;
+    overflow: hidden;
+  }
+  .rail-title {
+    display: flex; align-items: center; justify-content: space-between;
+    color: var(--dim); font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase;
+    margin: 0 0 6px;
+  }
+  .rail-title:not(:first-child) { margin-top: 15px; }
+  .rail-list { list-style: none; margin: 0; padding: 0; }
+  .rail-list li {
+    padding: 4px 0 4px 10px; color: var(--muted); font-size: 10.5px;
+    border-left: 1px solid var(--border);
+  }
+  .rail-list li.active { color: var(--text); border-left-color: var(--accent); }
+  .provider-row {
+    display: flex; align-items: center; gap: 7px;
+    padding: 4px 0; color: var(--muted); font-size: 10px;
+    font-family: var(--mono);
+  }
+  .provider-row .state { margin-left: auto; color: var(--dim); font-family: var(--sans); }
+  .ok-text { color: var(--green); }
+  .statusbar {
+    flex: 0 0 28px;
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 12px;
+    border-top: 1px solid var(--border);
+    background: #0b1018;
+    color: var(--dim); font-size: 10px;
+  }
+  .statusbar .spacer { flex: 1; }
+  .statusbar .saved { color: var(--green); }
+  .nvim .titlebar { background: #0b1018; }
+  .nvim .titlebar .title { font-family: var(--mono); font-size: 12px; }
+  .tabs {
+    flex: 0 0 31px;
+    display: flex; align-items: stretch;
+    border-bottom: 1px solid var(--border-soft);
+    background: #0a0f16;
+    padding-left: 6px;
+    font-size: 10.5px;
+  }
+  .tab {
+    display: flex; align-items: center; gap: 7px;
+    padding: 0 11px; color: var(--dim);
+    border-right: 1px solid var(--border-soft);
+  }
+  .tab.active { color: var(--text); background: #0d131c; box-shadow: inset 0 2px 0 var(--accent); }
+  .tab .dot-ok { width: 6px; height: 6px; }
+  .nvim-body {
+    flex: 1; min-height: 0;
+    display: grid; grid-template-columns: 42px 1fr;
+    background: #0a0e15;
+    overflow: hidden;
+  }
+  .gutter {
+    border-right: 1px solid #131a24;
+    padding: 12px 8px 0 0;
+    text-align: right;
+    font-family: var(--mono); font-size: 11px; line-height: 1.9;
+    color: #384152;
+    user-select: none;
+  }
+  .gutter .cur { color: var(--accent); }
+  pre.code {
+    margin: 0; padding: 11px 14px 0 12px;
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.9;
+    color: #c8d2e2; white-space: pre; overflow: hidden;
+  }
+  .cursor {
+    display: inline-block; width: 7px; height: 15px; margin-left: -7px;
+    background: rgba(110,231,216,.55); vertical-align: -2px;
+    animation: none;
+  }
+  .sourcebar {
+    flex: 0 0 46px;
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 12px;
+    border-top: 1px solid var(--border-soft);
+    background: #0b1018;
+    color: var(--dim);
+    font-family: var(--mono);
+    overflow: hidden;
+  }
+  .sourcebar .source-meta { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .sourcebar .label { color: var(--dim); font-family: var(--sans); font-size: 9.5px; }
+  .sourcebar .fence { color: var(--gold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
+  .nvim .statusline {
+    flex: 0 0 27px;
+    display: flex; align-items: center; gap: 9px;
+    padding: 0 10px;
+    background: #101722;
+    border-top: 1px solid #1a2230;
+    color: #93a0b5; font-size: 10px;
+    white-space: nowrap; overflow: hidden;
+    font-family: var(--mono);
+  }
+  .nvim .statusline .mode {
+    background: var(--accent); color: #05201c; font-weight: 800;
+    padding: 1px 7px; border-radius: 3px; font-family: var(--sans); font-size: 9.5px;
+  }
+  .nvim .statusline .right { margin-left: auto; display: flex; gap: 9px; }
+  .nvim .statusline .skk { color: var(--gold); }
+  .legend {
+    flex: 0 0 24px;
+    display: flex; align-items: center; gap: 22px;
+    color: var(--dim); font-size: 10px;
+    padding: 0 4px;
+  }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .item .num { width: 15px; height: 15px; flex-basis: 15px; font-size: 9.5px; }
+  .legend .tail { margin-left: auto; color: #3e4757; }
+  .focus-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--accent); border: 1px solid rgba(110,231,216,.35);
+    background: rgba(110,231,216,.07);
+    padding: 3px 8px; border-radius: 999px; font-size: 10px;
+  }
+</style>
+</head>
+<body>
+<div class="desktop">
+  <div class="wmbar">
+    <span class="brand">niri</span>
+    <span class="sep">/</span>
+    <span>workspace 2 · column 2</span>
+    <span class="sep">/</span>
+    <span>group: wiki (GUI + Neovide)</span>
+    <span class="sep">/</span>
+    <span>GUI ⇄ Neovide: <b style="color:var(--text)">Mod+Tab</b></span>
+    <span class="sep">/</span>
+    <span>move group: Mod+Shift+H/L</span>
+    <span class="spacer"></span>
+    <span class="chip live">focus: Neovide</span>
+    <span class="chip">14:32</span>
+  </div>
+
+  <div class="workspace">
+
+    <!-- GUI -->
+    <section class="window gui">
+      <div class="titlebar">
+        <div class="dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+        <span class="title">Harmion Wiki</span>
+        <span class="sub">家計の記録</span>
+        <span class="spacer"></span>
+        <span class="num">1</span>
+        <span class="badge">GUI: ページを組成</span>
+        <span class="badge accent">focus: Neovide</span>
+      </div>
+
+      <div class="toolbar">
+        <div class="crumbs">家計 <span style="color:var(--dim)">/</span> <b>家計の記録</b></div>
+        <div class="search"><span>⌕</span><span>検索</span><span class="key">Ctrl+K</span></div>
+        <div class="sync"><span class="dot-ok"></span>同期済み 14:32</div>
+      </div>
+
+      <div class="gui-body">
+        <aside class="sidebar">
+          <div class="side-group">
+            <div class="side-label"><span>ページ</span><span>12</span></div>
+            <div class="side-item active"><span class="ico">▤</span>家計の記録</div>
+            <div class="side-item"><span class="ico">▤</span>2026年の目標</div>
+            <div class="side-item"><span class="ico">▤</span>レシート処理</div>
+            <div class="side-item"><span class="ico">▤</span>固定費の見直し</div>
+          </div>
+          <div class="side-group">
+            <div class="side-label"><span>スニペット</span><span>8</span></div>
+            <div class="side-item"><span class="ico">⌘</span>買い物ジャーナル</div>
+            <div class="side-item"><span class="ico">⌘</span>予算クエリ</div>
+            <div class="side-item"><span class="ico">⌘</span>月次サマリ</div>
+          </div>
+          <div class="side-group">
+            <div class="side-label"><span>タグ</span></div>
+            <div class="tag-row">
+              <span class="tag">家計 12</span>
+              <span class="tag">ledger 8</span>
+              <span class="tag">調査</span>
+            </div>
+          </div>
+        </aside>
+
+        <main class="article">
+          <div class="kicker">ノート / 家計</div>
+          <h1>家計の記録</h1>
+          <div class="meta">
+            <span class="tag">家計</span>
+            <span class="tag">ledger</span>
+            <span class="tag">毎月</span>
+            <span class="muted">更新 14:31 · 3 バックリンク</span>
+          </div>
+
+          <p>毎月の支出は hledger のジャーナルを埋め込んで管理している。埋め込まれたジャーナルは、このページから直接編集できる。</p>
+
+          <div class="embed">
+            <div class="embed-head">
+              <span class="fmt">hledger</span><span class="sep">/</span><span class="lang">ledger</span>
+              <span class="kinds">kinds: <b>wiki</b>, ledger, free</span>
+              <span class="editing">Neovide で編集中</span>
+            </div>
+            <pre class="ledger"><span class="ln">1</span><span class="date">2026-11-16</span> <span class="payee">* 買い物</span>
+<span class="ln">2</span>    <span class="acct">支出:食費</span>   <span class="amt">1,200 JPY</span>
+<span class="ln">3</span>    <span class="acct">資産:現金</span>  <span class="neg">-1,200 JPY</span></pre>
+            <div class="embed-foot">
+              <span>snippet 3f2a9c1e…</span>
+              <span>最終更新 14:31</span>
+              <span class="hint">クリックで Neovide にフォーカス</span>
+            </div>
+            <span class="num">2</span>
+          </div>
+
+          <p>残高は <span style="font-family:var(--mono);color:var(--accent-2)">ledger/balance</span> の解釈を埋め込んで表示している。ジャーナルを直すと、次の更新で再計算される。</p>
+
+          <div class="result">
+            <div class="result-head">
+              <span class="dot-ok"></span>
+              <span class="provider">ledger/balance</span>
+              <span class="muted">· 14:32:05</span>
+            </div>
+            <div class="amount">¥12,400</div>
+            <div class="result-foot">2026-11-16 時点 · <span class="ok">provider 接続中</span></div>
+          </div>
+
+          <div class="backlinks">
+            <div class="backlinks-title">このページを参照</div>
+            <a href="#">2026年の目標</a>
+            <a href="#">レシート処理</a>
+            <a href="#">固定費の見直し</a>
+          </div>
+        </main>
+
+        <aside class="rail">
+          <div class="rail-title"><span>目次</span><span>3</span></div>
+          <ul class="rail-list">
+            <li class="active">今月の支出</li>
+            <li>埋め込みジャーナル</li>
+            <li>残高</li>
+          </ul>
+
+          <div class="rail-title"><span>バックリンク</span><span>3</span></div>
+          <ul class="rail-list">
+            <li>2026年の目標</li>
+            <li>レシート処理</li>
+            <li>固定費の見直し</li>
+          </ul>
+
+          <div class="rail-title"><span>Interpreter</span></div>
+          <div class="provider-row"><span class="dot-ok"></span>ledger/balance<span class="state ok-text">接続中</span></div>
+          <div class="provider-row"><span class="dot-ok"></span>wiki/backlinks<span class="state ok-text">接続中</span></div>
+          <div class="provider-row"><span class="dot-ok"></span>wiki/outline<span class="state ok-text">接続中</span></div>
+          <div class="provider-row"><span class="dot-ok"></span>wiki/transclude<span class="state ok-text">接続中</span></div>
+
+          <div class="rail-title"><span>競合</span></div>
+          <div class="ok-text" style="font-size:10.5px">なし</div>
+        </aside>
+      </div>
+
+      <div class="statusbar">
+        <span class="saved">保存済み</span>
+        <span>·</span>
+        <span>同期済み</span>
+        <span>·</span>
+        <span>競合なし</span>
+        <span class="spacer"></span>
+        <span>4 providers</span>
+        <span>·</span>
+        <span>家計の記録</span>
+        <span class="num" style="width:14px;height:14px;flex-basis:14px;font-size:9px">4</span>
+      </div>
+    </section>
+
+    <!-- Neovide -->
+    <section class="window nvim focused">
+      <div class="titlebar">
+        <div class="dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+        <span class="title">Neovide</span>
+        <span class="sub">snippet 3f2a9c1e…</span>
+        <span class="spacer"></span>
+        <span class="focus-pill">● FOCUS</span>
+        <span class="badge gold">from 家計の記録</span>
+      </div>
+
+      <div class="tabs">
+        <div class="tab"><span class="dot-idle"></span>家計の記録</div>
+        <div class="tab active"><span class="dot-ok"></span>snippet 3f2a9c1e…</div>
+      </div>
+
+      <div class="nvim-body">
+        <div class="gutter">
+          <div>1</div>
+          <div class="cur">2</div>
+          <div>3</div>
+          <div>4</div>
+          <div>5</div>
+          <div>6</div>
+          <div>7</div>
+          <div>8</div>
+          <div>9</div>
+          <div>10</div>
+          <div>11</div>
+          <div>12</div>
+        </div>
+        <pre class="code"><span class="date">2026-11-16</span> <span class="payee">* 買い物</span>
+    <span class="acct">支出:食費</span>   <span class="amt">1,200 JPY</span><span class="cursor"></span>
+    <span class="acct">資産:現金</span>  <span class="neg">-1,200 JPY</span>
+
+<span class="date">2026-11-17</span> <span class="payee">* 電車</span>
+    <span class="acct">支出:交通</span>    <span class="amt">420 JPY</span>
+    <span class="acct">資産:現金</span>   <span class="neg">-420 JPY</span>
+
+<span style="color:#3d4656">-- ここから下は別の月のジャーナル</span>
+<span class="date">2026-10-28</span> <span class="payee">* 書籍</span>
+    <span class="acct">支出:学び</span>   <span class="amt">2,800 JPY</span>
+    <span class="acct">資産:現金</span>  <span class="neg">-2,800 JPY</span></pre>
+      </div>
+
+      <div class="sourcebar">
+        <span class="num" style="width:15px;height:15px;flex-basis:15px;font-size:9px">3</span>
+        <span class="source-meta">
+          <span class="label">ホストの正規形</span>
+          <span class="fence">!```hledger|ledger,free||3f2a9c1e…</span>
+        </span>
+      </div>
+
+      <div class="statusline">
+        <span class="mode">NORMAL</span>
+        <span>ledger</span>
+        <span style="color:var(--green)">saved 14:32:05</span>
+        <span style="color:var(--green)">no conflicts</span>
+        <span class="right">
+          <span class="skk">SKK かな</span>
+          <span>3,17</span>
+          <span>Ln 2, Col 9</span>
+        </span>
+      </div>
+    </section>
+  </div>
+
+  <div class="legend">
+    <span class="item"><span class="num">1</span>GUI がページを組成し、埋め込みをインライン表示</span>
+    <span class="item"><span class="num">2</span>埋め込みをクリックすると同じ Content が Neovide に開く</span>
+    <span class="item"><span class="num">3</span>正規形フェンス <span style="font-family:var(--mono);color:var(--gold)">preset|kinds||id</span></span>
+    <span class="item"><span class="num">4</span>保存・競合・provider の状態を両方に表示</span>
+    <span class="tail">mockup · not a screenshot of the running app</span>
+  </div>
+</div>
+</body>
+</html>

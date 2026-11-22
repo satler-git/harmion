@@ -18,6 +18,7 @@ Rustで初期実装を進めています。Content・SQLite保存・App HTTPS AP
 - [内部表現と同期の初期設計](docs/internal-design.md)
 - [ArchitectureとRustパッケージ構成](docs/architecture.md)
 - [取得・編集・Subscribe・OAuthの契約](docs/app-api.md)
+- [Wikiアプリの要件定義（草案）](docs/wiki-app-requirements.md)
 - [設計の実行可能な意味モデル](design_checks/model_check.py)
 - [2ノード同期までの実装・レビュー記録](docs/implementation-progress.md)
 - [更新レコードの保存・転送形式v1](contracts/record-v1.md)
