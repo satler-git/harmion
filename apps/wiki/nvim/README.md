@@ -21,6 +21,7 @@ if it fails, the plugin keeps editing and saving through JSON-RPC.
 | Command | Action |
 |---|---|
 | `:WikiOpen [id-or-title]` | Open a page/snippet as `wiki://<id>` |
+| `:WikiNew [title]` | Create a page and open it |
 | `:WikiSave` | `:write` through the server |
 | `:WikiList` | Quickfix list of pages and snippets |
 | `:WikiSearch <query>` | Quickfix search |
@@ -38,6 +39,7 @@ diagnostics, definition, references, completion and hover for
 nvim --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/m0.lua'
 # auto-convert test (server on target/wiki-auto.sock):
 nvim --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/auto_convert.lua'
+nvim --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/new_page.lua'
 ```
 
 The test opens `p-home`, edits it, saves it, then opens a ledger snippet and

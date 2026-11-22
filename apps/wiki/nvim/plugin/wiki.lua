@@ -128,6 +128,12 @@ local function open(id_or_title)
   vim.notify(("wiki: opened %s"):format(content.title), vim.log.levels.INFO)
 end
 
+local function new_page(title)
+  title = (title and title ~= "") and title or "無題のページ"
+  local content = run({ "create_page", title }, "# " .. title .. "\n\n")
+  open(content.id)
+end
+
 local function list()
   local data = run({ "list" })
   local items = {}
@@ -190,6 +196,9 @@ vim.api.nvim_create_user_command("WikiOpen", function(args)
   open(args.args)
 end, { nargs = "?" })
 
+vim.api.nvim_create_user_command("WikiNew", function(args)
+  new_page(args.args)
+end, { nargs = "?" })
 vim.api.nvim_create_user_command("WikiList", list, {})
 vim.api.nvim_create_user_command("WikiSearch", function(args)
   search(args.args)
