@@ -16,6 +16,7 @@ mod transclude;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -301,7 +302,20 @@ fn serve(
     }
     .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     let status = state.status();
-    let _ = fs::remove_file(path);
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            fs::remove_file(path)?;
+        }
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("refusing to remove non-socket path {}", path.display()),
+            )
+            .into());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     let listener = UnixListener::bind(path)?;
     // The local IPC endpoint carries the same data as the store; keep it
     // owner-only even when the process umask is permissive.
@@ -344,9 +358,24 @@ struct Request {
 }
 
 fn handle_client(mut stream: UnixStream, state: Arc<Mutex<State>>) -> std::io::Result<()> {
-    let reader = BufReader::new(stream.try_clone()?);
-    for line in reader.lines() {
-        let line = line?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        if line.len() > 2 * 1024 * 1024 {
+            let response = json!({
+                "id": null,
+                "error": { "code": 413, "message": "request line exceeds 2 MiB" }
+            });
+            let mut bytes = serde_json::to_vec(&response).expect("response serializes");
+            bytes.push(b'\n');
+            stream.write_all(&bytes)?;
+            stream.flush()?;
+            break;
+        }
         if line.trim().is_empty() {
             continue;
         }
