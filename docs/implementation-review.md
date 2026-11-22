@@ -526,3 +526,11 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - membership log は 16,384 件、request receipt は合計 64 MiB で上限化した。receipt の前倒し回収から処理中の request は除外し、契約を docs に明記した。自動同期は DB エラー時に daemon を停止せず指数 backoff する。
 - 検証: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`npm run check`、`design_checks/linux_service.py`、`design_checks/worker_do/prod_check.py`（413/ready 503/401/403）、`design_checks/worker_daemon.py`（実daemonのprovision・push/pull・再起動・409・ready 200）、snapshot→restore の実機確認が成功した。
 - 既知の上限: membership 16,384 証明書、receipt 64 MiB、管理 UI CA 365日、Cloudflare の Access/WAF と rate limit は運用側で設定する。Cloudflare は native 正本のミラーであり、単独 DR と Worker→native scheduled push は対象外。
+
+### R58 — 実デプロイとオフサイトバックアップの復元演習
+
+- native: `harmiond`/`harmion`/`harmion-admin` を `~/.local/bin`、`harmion@main.service` を `~/.config/systemd/user` に配置し、`systemctl --user enable --now harmion@main.service` と `loginctl enable-linger` を実施した。service は active/enabled、node identity と `owner-status` は enforce=true・audit_valid=true。
+- Cloudflare: `https://hub.satler.dev` に `harmion-hub` を配備し、native founder の承認、`provision-manifest`、`POST /provision` を実行した。`/state` 200、`/ready` 200、`/admin/overview` bearer 200、`/provision` は `ALLOW_PROVISION=0` と BOOTSTRAP_TOKEN 削除により 401。native から record を 1 件 push し、Worker の `remote_high=1`・`acknowledged_through=1` を確認した。
+- `SYNC_INTERVAL_MS=0` のため同期は native 起点。Peer v2 の deadline を 45 秒へ広げ、Durable Object の初回 cold start で timeout にならないようにした。
+- backup: 日次 timer を enabled にし、GPG AES-256 の snapshot を Workers KV (`main/20261122T040821Z.tar.gpg`) へアップロードした。KV から取得→GPG 復号→tar 展開→`harmiond restore`→新 Node ID で起動→`identity` まで復元演習を実施し、成功した。OAuth access token は script が refresh_token で更新する。
+- 既知の運用制約: Cloudflare Access/WAF と admin rate limit は未適用。管理 UI の OAuth CA は未設定。Cloudflare は native 正本のミラーで、Worker→native scheduled push は行わない。
