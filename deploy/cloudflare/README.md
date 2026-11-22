@@ -19,6 +19,10 @@ npm ci --prefix apps/admin/ui
 nix develop --command bash deploy/cloudflare/build.sh
 ```
 
+`wrangler deploy` intentionally does not run the build: the build needs the
+Nix dev shell and the wasm target. Re-run the command above after changing Rust
+or the admin UI, then deploy.
+
 Outputs `src/pkg/` (wasm + bindings) and `public/` (the Svelte admin UI).
 
 ## Configure
@@ -29,10 +33,11 @@ Run the remaining commands from `deploy/cloudflare` (or pass
 1. Write the actual `CLUSTER`, `NODE_ID`, `EPOCH` and `ORIGIN` into
    `wrangler.toml`. `ORIGIN` must be the canonical `https://` origin that the
    node's membership entry and registration code use; there must be no redirect
-   to it. The checked in values are placeholders and are rejected by `/ready`.
-   Do not rely on `--var` for identity values: unless every deploy repeats all
-   of them, the next deploy silently restores the placeholders and points the
-   Worker at a different Durable Object.
+   to it. This repository's `wrangler.toml` contains the public identity for the
+   `hub.satler.dev` deployment; replace all four values together for another
+   deployment. `/ready` returns 503 for placeholders or malformed values. Do not
+   rely on `--var` for identity values: unless every deploy repeats all of them,
+   the next deploy silently restores the file's values.
 2. `CLUSTER` is the **native founder's** cluster ID. `NODE_ID`, `EPOCH` and
    `SEED` are fresh 32-byte hex values for this Worker. Never reuse a seed from
    another node.

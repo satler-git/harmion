@@ -6,9 +6,6 @@ workers_dev = false
 # The custom domain must match ORIGIN exactly (no redirect).
 routes = [{ pattern = "hub.satler.dev", custom_domain = true }]
 
-[build]
-command = "bash build.sh"
-
 [assets]
 directory = "./public"
 run_worker_first = [
