@@ -37,7 +37,7 @@ Last updated: 2026-11-23
 - Dev-only `--node DIR` snapshot using `harmion-client::Client::from_directory`
   (admin secret). `save` is body-only and refuses if the node body changed since
   the snapshot; create/convert/delete still return 501.
-- 33 + 2 tests pass (unit + integration)
+- 34 + 2 tests pass (unit + integration)
 
 ### `apps/wiki-lsp`
 
@@ -51,10 +51,11 @@ Last updated: 2026-11-23
 ### `apps/wiki/nvim`
 
 - `:WikiOpen`, `:WikiNew`, `:WikiSave`, `:WikiList`, `:WikiSearch`,
-  `:WikiWorkspace`, `:WikiLspStart`
-- `wiki://<id>` buffers, `BufWriteCmd`, LSP auto-start
-- Headless test opens p-home, saves rev 1 → 2, opens a ledger snippet with
-  `filetype=ledger`
+  `:WikiWorkspace`, `:WikiTitle`, `:WikiTags`, `:WikiDelete`, `:WikiLspStart`
+- `wiki://<id>` buffers, `BufWriteCmd`, 1.5s debounced autosave,
+  swap-file recovery, LSP auto-start
+- Headless tests cover open/save, auto-convert, new page, autosave, metadata
+  and delete
 
 ## GUI
 
@@ -68,10 +69,11 @@ Last updated: 2026-11-23
 
 ## Platform gaps / honest limits
 
-- **App API writes are not wired yet.** The dev `--node` adapter reads a
-  snapshot; mutations return 501. The main blocker is OAuth refresh: access
-  tokens live ~10 minutes, and `harmion-client` has no refresh helper. The
-  integrated connect flow also needs a redirect/listener and credential store.
+- **App API writes are partial.** The dev `--node` adapter can save the body
+  after a fresh GET and refuses if the body changed since the snapshot, but
+  create/convert/delete return 501. Production OAuth is blocked on refresh:
+  access tokens live ~10 minutes, and `harmion-client` has no refresh helper;
+  the integrated connect flow also needs a redirect/listener and credential store.
 - **No app-visible full-text Search**; local substring search is used.
 - **No app-level kind/delete conflict resolution**; those are owner/admin only.
 - **Interpreter v1 caps** (64 contents / 2 MiB / 128 KiB input) do not satisfy
@@ -81,11 +83,19 @@ Last updated: 2026-11-23
   partial failure.
 - Git commit signing may be skipped when the GPG passphrase is unavailable.
 
+## Remaining app gaps
+
+- Cache/subscription follow-up, offline snapshot and permission-loss handling (FR-19, FR-23).
+- Tag list/filter pages and workspace filters (FR-22, FR-34).
+- GUI rendering of transclusions and interpreter results (FR-12, FR-18).
+- Conflict candidates/manual merge UI (FR-25) and deletion confirmation (FR-26).
+- Import, block references, snapshots and layout presets (FR-29, FR-31, FR-35, FR-52).
+- 10k-page FTS5 performance and Japanese 2-character search (FR-21).
+- Provider uniqueness/replacement and registration approval (FR-43, FR-44).
+
 ## Next
 
-1. Finish automatic fence conversion on save.
-2. Wire App API writes with an OAuth token store/refresh path.
-3. Add the Wiki provider loop (`wiki/backlinks`, `wiki/outline`,
-   `wiki/transclude`) and streaming contract.
-4. Add real-node integration tests (connect, query, save, conflict, 410/409).
-5. Add document examples (code, reading note, diary) on the frozen shell.
+1. Wire the full OAuth connect/refresh path and real-node save/conflict tests.
+2. Add subscription catch-up and the offline cache.
+3. Add the streaming interpreter contract and provider registration.
+4. Fill the app gaps above, starting with transclusion rendering and conflicts.
