@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Smoke-test the deployable Worker module and its read-only auth in workerd."""
+import http.client
 import os
 from pathlib import Path
 import sys
 import tempfile
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -40,6 +42,15 @@ def main():
                 runtime.start()
                 with opener.open(runtime.url + "/", timeout=5) as response:
                     require(response.status == 200, "UI index")
+                with opener.open(runtime.url + "/state", timeout=5) as response:
+                    require(response.status == 200, "state liveness")
+                try:
+                    opener.open(runtime.url + "/ready", timeout=2)
+                except urllib.error.HTTPError as error:
+                    require(error.code == 503, f"unprovisioned ready expected 503, got {error.code}")
+                    error.close()
+                else:
+                    raise AssertionError("unprovisioned Worker reported ready")
                 request = urllib.request.Request(
                     runtime.url + "/admin/overview", data=b"{}", method="POST"
                 )
@@ -63,6 +74,39 @@ def main():
                     error.close()
                 else:
                     raise AssertionError("provision accepted a wrong bootstrap token")
+                request = urllib.request.Request(
+                    runtime.url + "/provision",
+                    data=b"{}",
+                    method="POST",
+                    headers={"x-harmion-bootstrap": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"},
+                )
+                try:
+                    opener.open(request, timeout=2)
+                except urllib.error.HTTPError as error:
+                    require(
+                        error.code == 403,
+                        f"provision without ALLOW_PROVISION expected 403, got {error.code}",
+                    )
+                    error.close()
+                else:
+                    raise AssertionError("provision ignored ALLOW_PROVISION")
+                # The edge must reject a declared oversized body before the
+                # Worker buffers it. No body is sent; the status alone proves
+                # Content-Length is checked first.
+                parsed = urlsplit(runtime.url)
+                connection = http.client.HTTPConnection(
+                    parsed.hostname, parsed.port, timeout=2
+                )
+                connection.putrequest("POST", "/peer/v2/challenge")
+                connection.putheader("Content-Length", str(9 * 1024 * 1024))
+                connection.endheaders()
+                response = connection.getresponse()
+                response.read()
+                require(
+                    response.status == 413,
+                    f"oversized body expected 413, got {response.status}",
+                )
+                connection.close()
                 print("PASS: deployable Worker loads, serves the UI and rejects unauthenticated calls", flush=True)
             except BaseException:
                 try:

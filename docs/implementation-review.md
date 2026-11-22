@@ -515,3 +515,14 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - 同スクリプトで、2ノードの相互退役から新しい回復ノードを所有者が明示確認して復旧する経路も成功。ローカルな回復trustを転送しただけでは相手が信用しないことを確認。
 - 同スクリプトの別シナリオで、C→Bの退役証明を知らずにAがCを退役させてもBを自動復活させず、保留・停止から明示的な確定で退役できることを確認。
 - Rustでは全78テストが通過。署名改変・別cluster・鍵置換・自己署名循環・受信順序・退役cutの固定・再承認・保留対象の自己解除拒否・証明ページの正常prefixのrollback・独立cursor・重複・再open・署名破損・ローカル鍵をクラスタ権限にしないことを含む。
+
+### R57 — 配備前レビューで見つかった認可・Worker・バックアップの修正
+
+- `owner::authorize` は enforcement 無効時でも administrator credential の認証を必須にした。任意の bearer で owner 操作が通る経路を塞ぎ、回帰テストを追加した。
+- Worker は経路別 body 上限（challenge 8 KiB、exchange 4 MiB+16 KiB、provision 1 MiB）、Content-Length 事前拒否、`/provision` の body 読み込み前 token 検査、`ALLOW_PROVISION` ゲート、DO ハンドラの直列化、alarm の host 設定を追加した。`/ready` は設定・provision・identity fingerprint（CLUSTER|NODE_ID|EPOCH|SEED|ORIGIN）を検査し、`/state` は liveness のみとした。DO 名は `node:<NODE_ID>` とし、NODE_ID 変更時の rotation を可能にした。
+- native の管理 UI は `/capabilities` を認証前に 404 にして Worker との誤判定を解消し、Access Cookie 用に `credentials: same-origin` へ変更した。
+- `harmiond reset-peer-v2` は `https_state.high_water` と rate bucket を消去して時計巻き戻しから復旧できるようにした。`harmiond snapshot` はオンライン DB snapshot、snapshot marker、live dir の restore 拒否、`harmiond restore` の backup 不変を実装した。
+- オフサイトバックアップとして GPG AES-256 + Workers KV の script と daily user timer を追加した。node directory は1引数で受け取り、一時ディレクトリ以外を削除しない。
+- membership log は 16,384 件、request receipt は合計 64 MiB で上限化した。receipt の前倒し回収から処理中の request は除外し、契約を docs に明記した。自動同期は DB エラー時に daemon を停止せず指数 backoff する。
+- 検証: `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`npm run check`、`design_checks/linux_service.py`、`design_checks/worker_do/prod_check.py`（413/ready 503/401/403）、`design_checks/worker_daemon.py`（実daemonのprovision・push/pull・再起動・409・ready 200）、snapshot→restore の実機確認が成功した。
+- 既知の上限: membership 16,384 証明書、receipt 64 MiB、管理 UI CA 365日、Cloudflare の Access/WAF と rate limit は運用側で設定する。Cloudflare は native 正本のミラーであり、単独 DR と Worker→native scheduled push は対象外。

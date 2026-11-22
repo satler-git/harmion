@@ -29,9 +29,33 @@ use harmion_protocol::{
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{collections::BTreeSet, path::Path, time::Duration};
 
+/// Replay receipts retain the exact request body for 30 days. Cap their total
+/// bytes so a high-frequency writer cannot grow the database without bound.
+const MAX_REQUEST_RECEIPT_BYTES: i64 = 64 * 1024 * 1024;
+
 fn db(e: rusqlite::Error) -> Error {
     Error::Storage(e.to_string())
 }
+
+/// Consistent online SQLite snapshot for the node backup path.
+///
+/// `VACUUM INTO` reads under SQLite locking and writes a standalone database;
+/// the daemon may keep running. The destination must not exist.
+pub fn snapshot_database(source: &Path, destination: &Path) -> Result<(), Error> {
+    let connection = Connection::open(source).map_err(db)?;
+    let escaped = destination.to_string_lossy().replace('\'', "''");
+    connection
+        .execute_batch(&format!("VACUUM INTO '{escaped}'"))
+        .map_err(db)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| Error::Storage(error.to_string()))?;
+    }
+    Ok(())
+}
+
 fn fixed(bytes: Vec<u8>) -> Result<[u8; 32], Error> {
     bytes.try_into().map_err(|_| Error::CorruptLog)
 }
@@ -2020,6 +2044,43 @@ impl Transaction for SqlTransaction<'_> {
                 ],
             )
             .map_err(db)?;
+        let total: i64 = self
+            .sql
+            .query_row(
+                "SELECT COALESCE(SUM(length(request)),0) FROM request_results",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        if total > MAX_REQUEST_RECEIPT_BYTES {
+            let mut excess = total - MAX_REQUEST_RECEIPT_BYTES;
+            let mut victims = Vec::new();
+            {
+                let mut statement = self
+                    .sql
+                    .prepare(
+                        "SELECT rowid,length(request) FROM request_results
+                         WHERE created_at > 0 AND NOT (app_id=?1 AND request_id=?2)
+                         ORDER BY created_at,rowid",
+                    )
+                    .map_err(db)?;
+                let mut rows = statement.query(params![app.0, request.0]).map_err(db)?;
+                while excess > 0 {
+                    let Some(row) = rows.next().map_err(db)? else {
+                        break;
+                    };
+                    let rowid: i64 = row.get(0).map_err(db)?;
+                    let length: i64 = row.get(1).map_err(db)?;
+                    victims.push(rowid);
+                    excess -= length;
+                }
+            }
+            for rowid in victims {
+                self.sql
+                    .execute("DELETE FROM request_results WHERE rowid=?1", [rowid])
+                    .map_err(db)?;
+            }
+        }
         Ok(())
     }
     fn gc_tokens(&mut self, cutoff: i64) -> Result<u64, Error> {

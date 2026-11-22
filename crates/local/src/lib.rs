@@ -145,4 +145,18 @@ impl ProtectedDir {
             .map_err(|_| io::Error::other("node is already running or cannot be locked"))?;
         Ok(file)
     }
+    /// Lock an existing daemon.lock without creating it. Returns None for a
+    /// static backup/snapshot that never had a live daemon lock.
+    pub fn try_lock_existing(&self) -> io::Result<Option<File>> {
+        let path = self.file_path("daemon.lock")?;
+        let file = match options().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        check(&file.metadata()?, false)?;
+        file.try_lock()
+            .map_err(|_| io::Error::other("node is already running or cannot be locked"))?;
+        Ok(Some(file))
+    }
 }

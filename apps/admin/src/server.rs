@@ -220,6 +220,11 @@ async fn dispatch(state: &State, request: Request<Incoming>) -> Result<Response<
     if header(&request, "content-type") != Some("application/json") {
         return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
+    // The Worker owns this route; answering 401 here would make the UI mistake
+    // a native server for a Worker and skip the launch-link exchange.
+    if path == "/capabilities" {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let session = if path != "/session" {
         Some(state.authorize(&request)?)
     } else {

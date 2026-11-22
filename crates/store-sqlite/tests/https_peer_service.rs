@@ -355,6 +355,28 @@ fn clock_reversal_fails_closed_and_leaves_live_challenges_usable() {
 }
 
 #[test]
+fn generation_reset_clears_clock_high_water() {
+    let path =
+        std::env::temp_dir().join(format!("harmion-https-peer-reset-{}", std::process::id()));
+    let mut t = Test::at(Some(path));
+    let inner = hpq(3, PeerCommand::MembershipStatus);
+    t.challenge(&inner, [4; 32], 5_000_000);
+    assert!(matches!(
+        t.db.challenge_transaction(|tx| tx.clock(1_000_000, &mut entropy())),
+        Err(Error::ClockReversal)
+    ));
+    t.db.challenge_transaction(|tx| tx.reset_generation(&mut || Ok([91; 32])))
+        .unwrap();
+    // The recovery command runs in a new process; reopen to reset the runtime
+    // monotonic clamp while keeping the durable state under test.
+    t.reopen();
+    let clock =
+        t.db.challenge_transaction(|tx| tx.clock(1_000_000, &mut entropy()))
+            .unwrap();
+    assert_eq!(clock.now, 1_000_000);
+}
+
+#[test]
 fn expired_challenges_are_unavailable_and_never_dispatch() {
     let mut t = Test::new();
     let inner = hpq(3, PeerCommand::MembershipStatus);

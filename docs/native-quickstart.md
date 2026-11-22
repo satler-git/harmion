@@ -66,6 +66,25 @@ manifestの生成と投入はhost専用のbootstrap操作であり、通常のAp
 
 所有者が任意で導入するsystemdユーザーサービスと、release build・更新・停止したノードのバックアップ・新しいNode IDでの復元手順は [Linuxの日常運用](linux-service.md) を参照する。ビルドやテストだけでホストへサービスを登録・起動する処理はない。ログアウト後の常駐やlingerは別途所有者が判断する。
 
+### snapshot と時計巻き戻しの復旧
+
+稼働中でも一貫したバックアップを作れる。
+
+```sh
+harmiond snapshot ./node-a /backup/node-a-$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+snapshot はノードの秘密鍵を含む。暗号化して別ホストへ置き、復元は
+`harmiond restore SNAPSHOT NEW_DIR` で**新しい Node ID** として行う。
+詳細は[Linuxの日常運用](linux-service.md#暗号化したオフサイトバックアップ)を参照する。
+
+NTPの後方修正やVM snapshot復元で壁時計が戻り、署名HTTPS Peer v2が503を返し続ける場合は、
+daemon停止中にreplay clockをリセットする。保存データとmembershipは変更しない。
+
+```sh
+harmiond reset-peer-v2 ./node-a
+```
+
 ## OAuthを有効にする
 
 ノードを停止した状態で、所有者が専用CAとサーバー証明書を発行する。初期状態ではOAuthの待受けを無効にしている。

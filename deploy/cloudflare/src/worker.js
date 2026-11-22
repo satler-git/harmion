@@ -11,6 +11,20 @@ rust.initSync({ module: wasmModule });
 
 const PEER = "application/vnd.harmion.https-peer-v2";
 const JSON_TYPE = "application/json";
+// Reject oversized requests before buffering a body into the isolate. The Rust
+// frame decoder has the same limits, but reaching it requires the bytes to be
+// allocated first; an unauthenticated peer path must stay bounded at the edge.
+// crates/protocol/src/peer.rs: MAX_PEER_BYTES = 4 MiB page + 8 KiB envelope.
+const MAX_PEER_BYTES = 4 * 1024 * 1024 + 8 * 1024;
+const MAX_FRAME_BYTES = MAX_PEER_BYTES + 8 * 1024;
+const BODY_LIMITS = new Map([
+  ["/peer/v2/challenge", 8 * 1024],
+  ["/peer/v2/exchange", MAX_FRAME_BYTES],
+  ["/provision", 1024 * 1024],
+  ["/internal/sync", 4 * 1024],
+  ["/internal/alarm", 0],
+]);
+const ADMIN_BODY_LIMIT = 64 * 1024;
 const ADMIN_PATHS = [
   "/capabilities",
   "/overview",
@@ -20,9 +34,95 @@ const ADMIN_PATHS = [
   "/registration-code",
 ];
 
+function bodyLimit(path) {
+  if (BODY_LIMITS.has(path)) return BODY_LIMITS.get(path);
+  if (path.startsWith("/admin/") || ADMIN_PATHS.includes(path)) {
+    return ADMIN_BODY_LIMIT;
+  }
+  return -1;
+}
+
+async function readBoundedBody(request, limit) {
+  const declared = request.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (!Number.isSafeInteger(length) || length < 0 || length > limit) {
+      return null;
+    }
+  }
+  if (limit === 0 || request.body === null) return new Uint8Array(0);
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
+function constantTimeEqual(left, right) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+const REQUIRED_ENV = ["CLUSTER", "NODE_ID", "EPOCH", "SEED", "ORIGIN", "ADMIN_TOKEN"];
+const HEX_ENV = ["CLUSTER", "NODE_ID", "EPOCH", "SEED"];
+
+function configurationProblem(env) {
+  const missing = REQUIRED_ENV.filter((name) => {
+    const value = env[name];
+    return typeof value !== "string" || value.length === 0 || value.startsWith("REPLACE_");
+  });
+  const invalid = HEX_ENV.filter((name) => !/^[0-9a-f]{64}$/.test(env[name] ?? ""));
+  if (typeof env.ADMIN_TOKEN !== "string" || env.ADMIN_TOKEN.length < 32) {
+    invalid.push("ADMIN_TOKEN");
+  }
+  try {
+    const origin = new URL(env.ORIGIN);
+    if (origin.protocol !== "https:" || origin.pathname !== "/" || origin.search || origin.hash) {
+      invalid.push("ORIGIN");
+    }
+  } catch {
+    invalid.push("ORIGIN");
+  }
+  return missing.length || invalid.length ? { missing, invalid } : null;
+}
+
+async function identityFingerprint(env) {
+  const material = [env.CLUSTER, env.NODE_ID, env.EPOCH, env.SEED, env.ORIGIN].join("|");
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(material),
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
 export default {
   async fetch(request, env) {
-    return env.NODE.get(env.NODE.idFromName("main")).fetch(request);
+    // A changed NODE_ID intentionally gets a fresh Durable Object instead of
+    // failing forever with IdentityMismatch on the previous node's storage.
+    return env.NODE.get(env.NODE.idFromName(`node:${env.NODE_ID ?? "unconfigured"}`)).fetch(
+      request,
+    );
   },
 };
 
@@ -31,6 +131,10 @@ export class Node {
     this.state = state;
     this.storage = state.storage;
     this.env = env;
+    // The Rust bridge reaches back into the active DO through
+    // globalThis.__harmionDo. Serialize handlers so an awaiting request cannot
+    // overwrite that context while another handler resumes after an await.
+    this.tail = Promise.resolve();
     this.state.blockConcurrencyWhile(async () => {
       const interval = Number(this.env.SYNC_INTERVAL_MS ?? "0");
       if (interval > 0 && (await this.state.storage.getAlarm()) === null) {
@@ -41,13 +145,64 @@ export class Node {
 
   async fetch(request) {
     const url = new URL(request.url);
+    // Liveness must not sit behind a long sync round.
     if (request.method === "GET" && url.pathname === "/state") {
       return Response.json({ ok: true });
+    }
+    if (request.method === "GET" && url.pathname === "/ready") {
+      const problem = configurationProblem(this.env);
+      if (problem) return Response.json({ ok: false, ...problem }, { status: 503 });
+      const state = await this.storage.get("provisioned_state");
+      if (!state || typeof state !== "object") {
+        return Response.json({ ok: false, provisioned: false }, { status: 503 });
+      }
+      const current = await identityFingerprint(this.env);
+      if (state.identity !== current) {
+        return Response.json(
+          { ok: false, provisioned: true, identity_mismatch: true },
+          { status: 503 },
+        );
+      }
+      return Response.json({ ok: true, provisioned: true });
     }
     if (request.method !== "POST") {
       return new Response("method not allowed", { status: 405 });
     }
-    const body = new Uint8Array(await request.arrayBuffer());
+    const limit = bodyLimit(url.pathname);
+    if (limit < 0) return new Response("not found", { status: 404 });
+    // Do not buffer provision bodies from clients that cannot present the
+    // bootstrap token; /provision is reachable without Cloudflare Access.
+    if (url.pathname === "/provision") {
+      const bootstrap = request.headers.get("x-harmion-bootstrap") ?? "";
+      if (typeof this.env.BOOTSTRAP_TOKEN !== "string"
+        || this.env.BOOTSTRAP_TOKEN.length < 32
+        || !constantTimeEqual(bootstrap, this.env.BOOTSTRAP_TOKEN)) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+    }
+    // Read a bounded body before taking the serialization slot: a slow client
+    // must not hold up every other operation on this Durable Object.
+    const body = await readBoundedBody(request, limit);
+    if (body === null) {
+      return new Response(JSON.stringify({ error: "payload_too_large" }), {
+        status: 413,
+        headers: { "content-type": JSON_TYPE },
+      });
+    }
+    return this.runExclusive(() => this.handle(request, url, body));
+  }
+
+  runExclusive(task) {
+    const run = this.tail.then(task, task);
+    this.tail = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
+  }
+
+  async handle(request, url, body) {
+    const previous = globalThis.__harmionDo;
     globalThis.__harmionDo = this;
     try {
       if (url.pathname === "/provision") return await this.provision(request, body);
@@ -59,18 +214,16 @@ export class Node {
       if (url.pathname.startsWith("/admin/")) {
         return await this.admin(request, url.pathname.slice("/admin/".length));
       }
-      if (ADMIN_PATHS.includes(url.pathname)) {
-        return await this.admin(request, url.pathname.slice(1));
-      }
-      return new Response("not found", { status: 404 });
+      return await this.admin(request, url.pathname.slice(1));
     } finally {
-      globalThis.__harmionDo = undefined;
+      globalThis.__harmionDo = previous;
     }
   }
 
   authorized(request) {
     const authorization = request.headers.get("authorization") ?? "";
-    return Boolean(this.env.ADMIN_TOKEN) && authorization === `Bearer ${this.env.ADMIN_TOKEN}`;
+    return Boolean(this.env.ADMIN_TOKEN)
+      && constantTimeEqual(authorization, `Bearer ${this.env.ADMIN_TOKEN}`);
   }
 
   async peer(request, url, body) {
@@ -138,15 +291,21 @@ export class Node {
   }
 
   async alarm() {
-    try {
-      await this.scheduledSync();
-    } catch (error) {
-      console.error("scheduled sync failed", error);
-    }
-    const interval = Number(this.env.SYNC_INTERVAL_MS ?? "0");
-    if (interval > 0) {
-      await this.state.storage.setAlarm(Date.now() + interval);
-    }
+    return this.runExclusive(async () => {
+      const previous = globalThis.__harmionDo;
+      globalThis.__harmionDo = this;
+      try {
+        await this.scheduledSync();
+      } catch (error) {
+        console.error("scheduled sync failed", error);
+      } finally {
+        globalThis.__harmionDo = previous;
+      }
+      const interval = Number(this.env.SYNC_INTERVAL_MS ?? "0");
+      if (interval > 0) {
+        await this.state.storage.setAlarm(Date.now() + interval);
+      }
+    });
   }
 
   async scheduledSync() {
@@ -188,16 +347,27 @@ export class Node {
   }
 
   async provision(request, body) {
-    if ((await this.storage.get("provisioned")) && this.env.ALLOW_REPROVISION !== "1") {
-      return Response.json({ error: "already_provisioned" }, { status: 409 });
-    }
+    // Authenticate before revealing provisioning state, and require an explicit
+    // per-deployment opt-in so a stale token cannot provision a new replica.
     const bootstrap = request.headers.get("x-harmion-bootstrap") ?? "";
-    if (!this.env.BOOTSTRAP_TOKEN || bootstrap !== this.env.BOOTSTRAP_TOKEN) {
+    if (typeof this.env.BOOTSTRAP_TOKEN !== "string"
+      || this.env.BOOTSTRAP_TOKEN.length < 32
+      || !constantTimeEqual(bootstrap, this.env.BOOTSTRAP_TOKEN)) {
       return Response.json({ error: "unauthorized" }, { status: 401 });
+    }
+    if (this.env.ALLOW_PROVISION !== "1") {
+      return Response.json({ error: "provisioning_disabled" }, { status: 403 });
+    }
+    if ((await this.storage.get("provisioned_state")) && this.env.ALLOW_REPROVISION !== "1") {
+      return Response.json({ error: "already_provisioned" }, { status: 409 });
     }
     const manifest = new TextDecoder().decode(body);
     rust.provision(this.env.CLUSTER, this.env.NODE_ID, this.env.EPOCH, this.env.SEED, manifest);
-    await this.storage.put("provisioned", true);
+    // One write makes the provisioned marker and its identity atomic.
+    await this.storage.put("provisioned_state", {
+      identity: await identityFingerprint(this.env),
+      provisioned_at: Date.now(),
+    });
     await this.storage.sync();
     return Response.json({ configured: true });
   }

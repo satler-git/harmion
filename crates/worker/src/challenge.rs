@@ -324,9 +324,10 @@ impl ChallengeTransaction for WorkerState<'_> {
                 self.kv.delete(&key).map_err(host)?;
             }
         }
-        let high_water = self.read_state()?.map_or(0, |(_, high_water)| high_water);
         let generation = random()?;
-        self.write_state(generation, high_water)?;
+        // Clear the clock high-water as part of the explicit recovery, matching
+        // the native store. Keeping it would leave ClockReversal in place.
+        self.write_state(generation, 0)?;
         Ok(generation)
     }
 }

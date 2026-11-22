@@ -18,6 +18,11 @@ pub(crate) enum Command {
     },
     /// Restore a backup into a new node directory.
     Restore { backup_dir: String, new_dir: String },
+    /// Reset the signed-HTTPS replay clock after a wall-clock reversal.
+    /// The daemon must be stopped; live challenges are invalidated.
+    ResetPeerV2 { dir: String },
+    /// Write a consistent snapshot of a running node to a new directory.
+    Snapshot { dir: String, out: String },
     /// Provision the OAuth browser TLS identity and print its trust root.
     OauthProvision {
         dir: String,
@@ -157,6 +162,20 @@ mod tests {
                 Cli::try_parse_from(["harmiond", "run", "node"].into_iter().chain(args)).is_err()
             );
         }
+    }
+
+    #[test]
+    fn recovery_and_snapshot_subcommands_take_paths() {
+        let cli = Cli::try_parse_from(["harmiond", "reset-peer-v2", "node"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::ResetPeerV2 { ref dir } if dir == "node"
+        ));
+        let cli = Cli::try_parse_from(["harmiond", "snapshot", "node", "out"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Snapshot { ref dir, ref out } if dir == "node" && out == "out"
+        ));
     }
 
     #[test]

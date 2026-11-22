@@ -94,9 +94,113 @@ credential、編集トークン、秘密鍵を unit の引数・環境変数・�
 Android が電池・ネットワークの都合で停止していても正常な運用であり、停止・退役を意味しない。
 
 ユーザーサービスは通常ユーザーマネージャーの寿命に従い、ログアウト後は停止する場合がある。
-`enable` だけで24時間常駐を保証しない。ログアウト後やログイン前にも動かす linger は、
-消費電力・ホストポリシーを確認して所有者が別途判断する設定であり、この手順では変更しない。
+このPCを常時稼働の複製にする場合は、所有者が端末の消費電力・ホストポリシーを確認した上で
+linger を有効にする。
+
+```sh
+loginctl enable-linger "$USER"
+loginctl show-user "$USER" -p Linger   # Linger=yes を確認
+systemctl --user is-enabled harmion@main.service
+```
+
+linger を有効にしない場合、ログアウト後にサービスが停止することを正常な挙動として扱う。
 Linux/Android 端末が常時稼働することを複製の成立条件にしない。
+
+## 暗号化したオフサイトバックアップ
+
+同じディスクへのコピーはディスク障害で本体と同時に失われるため、バックアップは
+別ホスト・別クラウドへ暗号化して置く。`harmiond snapshot` は SQLite の
+`VACUUM INTO` を使い、daemon を止めずに一貫した DB と鍵・設定の snapshot を作る。
+
+```sh
+umask 077
+install -d -m 700 "$HOME/.local/share/harmion-snapshots"
+"$HOME/.local/bin/harmiond" snapshot "$HOME/.local/share/harmion/main" \
+  "$HOME/.local/share/harmion-snapshots/main-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+snapshot の出力先は**まだ存在しないディレクトリ**にする。`harmiond snapshot` は
+既存ディレクトリへは書き込まない。
+
+snapshot は**ノードの秘密鍵を含む**。平文のまま共有・クラウド公開しない。
+このリポジトリの [harmion-backup.sh](../deploy/backup/harmion-backup.sh) は
+node directory を1引数で受け取り、snapshot を `tar` し、GPG の AES-256 で暗号化して
+Cloudflare Workers KV へ送る。作業用の一時ディレクトリは `mktemp` で作り、終了時に
+自分が作ったものだけを削除する。
+
+1. 初回だけ、オフラインで保管する 32 バイト以上の passphrase ファイルを作る。
+2. Workers KV namespace を1つ作り、その ID を環境ファイルへ書く。
+3. `harmion-backup` と systemd user timer を導入し、1回手動実行して復号できることを確認する。
+
+```sh
+# passphrase は所有者だけが読める場所に作り、同じ内容をオフライン媒体へも保存する。
+install -d -m 700 "$HOME/.config/harmion"
+head -c 32 /dev/urandom | base64 > "$HOME/.config/harmion/backup.key"
+chmod 600 "$HOME/.config/harmion/backup.key"
+
+# wrangler はユーザープロファイルへ入れ、通常の HOME で一度だけ OAuth ログインする。
+nix profile install nixpkgs#wrangler
+wrangler login
+wrangler kv namespace create harmion-backups
+# 表示された id を HARMION_BACKUP_KV に入れる（例）
+cat > "$HOME/.config/harmion/backup.env" <<EOF
+HARMION_BACKUP_KEY=$HOME/.config/harmion/backup.key
+HARMION_BACKUP_KV=<namespace-id>
+WRANGLER=$HOME/.nix-profile/bin/wrangler
+EOF
+chmod 600 "$HOME/.config/harmion/backup.env"
+
+install -m 700 deploy/backup/harmion-backup.sh "$HOME/.local/bin/harmion-backup"
+install -m 600 deploy/systemd/harmion-backup@.service \
+  deploy/systemd/harmion-backup@.timer "$HOME/.config/systemd/user/"
+systemctl --user daemon-reload
+systemctl --user start harmion-backup@main.service
+systemctl --user enable --now harmion-backup@main.timer
+```
+
+`harmion-backup@main.service` は snapshot を作るだけで daemon を停止しない。
+timer は日次で動く。復元は **新しい Node ID** で行うため、次のように別 directory へ
+展開して `restore` する。同じ Node ID のまま上書きしない。
+
+```sh
+umask 077
+# 1. KV から最新の archive を取り出し、GPG で復号する
+KEY="main/$(wrangler kv key list --namespace-id "$HARMION_BACKUP_KV" --remote \
+  | jq -r '.[].name' | sort | tail -1)"
+wrangler kv key get "$KEY" --namespace-id "$HARMION_BACKUP_KV" --remote \
+  > "$HOME/.local/share/harmion-backup.tar.gpg"
+gpg --batch --yes --decrypt --passphrase-file "$HOME/.config/harmion/backup.key" \
+  --output "$HOME/.local/share/harmion-backup.tar" \
+  "$HOME/.local/share/harmion-backup.tar.gpg"
+
+# 2. 未作成の owner-only directory へ展開し、restore する
+install -d -m 700 "$HOME/.local/share/harmion-restore"
+tar -C "$HOME/.local/share/harmion-restore" -xf "$HOME/.local/share/harmion-backup.tar"
+"$HOME/.local/bin/harmiond" restore "$HOME/.local/share/harmion-restore" \
+  "$HOME/.local/share/harmion/restored"
+
+# 3. 別 terminal で復元先を起動し、identity・sync-status を確認する
+"$HOME/.local/bin/harmiond" run "$HOME/.local/share/harmion/restored" \
+  --peer-transport https --sync-seconds 0
+# 4. 確認後に平文 tar と展開コピーを削除する
+rm -rf "$HOME/.local/share/harmion-restore" "$HOME/.local/share/harmion-backup.tar"
+```
+
+復元演習は四半期に1回以上行い、復元先で `identity`・`sync-status` が読めることを確認する。
+GPG passphrase を失うとバックアップは復号できない。passphrase とノード鍵を同じ場所へ
+置かず、少なくとも1つはオフライン媒体へ保管する。
+
+## Peer v2 の時計巻き戻しからの復旧
+
+NTP の後方修正や VM snapshot の復元で壁時計が戻ると、署名 HTTPS Peer v2 は
+`ClockReversal` で 503 を返し続ける。daemon を停止した状態で、所有者が次を実行する。
+live challenge は破棄されるが、保存済みデータと membership は変更しない。
+
+```sh
+systemctl --user stop harmion@main.service
+"$HOME/.local/bin/harmiond" reset-peer-v2 "$HOME/.local/share/harmion/main"
+systemctl --user start harmion@main.service
+```
 
 ## 更新・バックアップ・失敗時の対応
 
@@ -133,6 +237,17 @@ systemctl --user start harmion@main.service
 詳細と有効なノードがない場合の制限は[復元契約](native-quickstart.md#古いノードバックアップからの復元)を参照。
 復元先は新しい instance を使うか、unit の絶対パスを明示的に変更する。古いノードを同時に起動しない。
 Export は可読なデータ搬出であり、この秘密情報を含む運用バックアップと同じではない。
+
+## 既知の上限
+
+- membership log は 16,384 証明書で上限化している。到達すると新しい admission・退役・回復承認が
+  `InvalidRequest` で失敗する。承認する peer は自分が管理する端末だけに限り、通常運用で
+  この上限に近づけない。上限到達時はノードの復元（新しい Node ID）以外に圧縮手段がない。
+- request receipt は合計 64 MiB を超えると古いものから前倒し回収する。同一 request_id の
+  再送が元の結果を返せる保証は、receipt が残っている間だけである。高頻度・大容量の保存を
+  常時行う用途には向かない。
+- snapshot は同一 Node ID・鍵を含むため、`harmiond run <snapshot>` は拒否される。
+  snapshot からの復帰は必ず `restore` で新しい Node ID を作る。
 
 ## この artifact の検証範囲
 

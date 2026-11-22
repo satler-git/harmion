@@ -26,8 +26,8 @@ export const session = $state({
 export const workerAdmin = $state({ capabilities: null as Capabilities | null });
 const MARKER = (window as unknown as { __HARMION_ADMIN_MODE__?: string }).__HARMION_ADMIN_MODE__;
 // A Worker requires a bearer (401) even for capabilities; the native admin
-// server answers 404. This distinguishes the two modes without an
-// unauthenticated endpoint or an injected HTML marker.
+// server explicitly answers 404 for that Worker-only path. This distinguishes
+// the two modes without an unauthenticated endpoint or an HTML marker.
 export async function detectMode(): Promise<'native' | 'worker'> {
   if (MARKER === 'worker') return 'worker';
   try {
@@ -47,7 +47,7 @@ export async function api<T>(path: string, body: unknown): Promise<T> {
     response = await fetch(path, {
       method: 'POST',
       headers,
-      credentials: 'omit',
+      credentials: 'same-origin',
       body: JSON.stringify(body),
     });
   } catch {

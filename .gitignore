@@ -9,3 +9,8 @@ __pycache__/
 
 /apps/admin/ui/node_modules/
 /apps/admin/ui/dist/
+/.nix-cache/
+/.wrangler-home/
+
+/.deploy-secrets/
+/.wrangler/

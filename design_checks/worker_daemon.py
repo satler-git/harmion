@@ -26,8 +26,8 @@ from two_process_sync import Node, DAEMON, CLI  # noqa: E402
 WORKER_DO = HERE / "worker_do"
 CONFIG = WORKER_DO / "daemon-config.capnp"
 FORWARD = REPO / "target/debug/examples/tls_forward"
-ADMIN = "local-test-admin-token"
-BOOTSTRAP = "local-test-bootstrap-token"
+ADMIN = "0123456789abcdef" * 4
+BOOTSTRAP = "fedcba9876543210" * 4
 
 
 def _module(name, path):
@@ -72,6 +72,7 @@ const config :Workerd.Config = (
         (name = "ORIGIN", text = "{origin}"),
         (name = "ADMIN_TOKEN", text = "{ADMIN}"),
         (name = "BOOTSTRAP_TOKEN", text = "{BOOTSTRAP}"),
+        (name = "ALLOW_PROVISION", text = "1"),
         (name = "SYNC_INTERVAL_MS", text = "0")
       ],
       durableObjectNamespaces = [
@@ -81,7 +82,7 @@ const config :Workerd.Config = (
     )),
     (name = "assets", assets = (
       path = "../../deploy/cloudflare/public",
-      config = "{{\\"run_worker_first\\":[\\"/state\\",\\"/peer/*\\",\\"/admin/*\\",\\"/provision\\",\\"/capabilities\\",\\"/overview\\",\\"/members\\",\\"/peers\\",\\"/provision-status\\",\\"/registration-code\\",\\"/internal/*\\"],\\"not_found_handling\\":\\"404-page\\"}}",
+      config = "{{\\"run_worker_first\\":[\\"/state\\",\\"/ready\\",\\"/peer/*\\",\\"/admin/*\\",\\"/provision\\",\\"/capabilities\\",\\"/overview\\",\\"/members\\",\\"/peers\\",\\"/provision-status\\",\\"/registration-code\\",\\"/internal/*\\"],\\"not_found_handling\\":\\"404-page\\"}}",
       userWorker = (name = "hub")
     )),
     (name = "storage", disk = (writable = true)),
@@ -124,6 +125,16 @@ def request(url, data, headers):
         req.add_header(name, value)
     try:
         with opener.open(req, timeout=60) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, error.read()
+
+
+def get_request(url):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with opener.open(req, timeout=10) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as error:
         return error.code, error.read()
@@ -204,12 +215,16 @@ def main():
                 manifest = json.loads(manifest_path.read_text())
                 require(manifest["own"]["node"] == worker_node, "manifest own")
 
+                status, body = get_request(runtime.url + "/ready")
+                require(status == 503, f"unprovisioned ready was not 503: {status}")
                 status, body = request(
                     runtime.url + "/provision",
                     manifest_path.read_bytes(),
                     {"x-harmion-bootstrap": BOOTSTRAP},
                 )
                 require(status == 200, f"provision failed: {status} {body!r}")
+                status, body = get_request(runtime.url + "/ready")
+                require(status == 200, f"provisioned ready was not 200: {status} {body!r}")
 
                 first = a.write("create", body="first record from daemon A")
                 first_content = first["content_id"]

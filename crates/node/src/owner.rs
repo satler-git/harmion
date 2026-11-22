@@ -242,13 +242,16 @@ pub fn authorize(
     actor: &str,
     now: i64,
 ) -> Result<(), Error> {
-    let policy = tx.owner_policy()?;
-    if !policy.enforce {
-        return Ok(());
-    }
+    // Even when owner enforcement is off, an R2 operation must be made with an
+    // administrator credential. Otherwise any 32-byte bearer could revoke an
+    // owner or disable enforcement before the first owner is enrolled.
     let principal = access::authenticate(tx, credential, now)?;
     if !principal.app.grants.is_administrator() {
         return Err(Error::Forbidden);
+    }
+    let policy = tx.owner_policy()?;
+    if !policy.enforce {
+        return Ok(());
     }
     let challenge_id = challenge_id.ok_or(Error::OwnerAssertionRequired)?;
     let signature = signature.ok_or(Error::OwnerAssertionRequired)?;

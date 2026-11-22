@@ -47,8 +47,12 @@
               rust
               # ring / libsqlite3-sys ("bundled") need a C toolchain in build scripts.
               pkgs.stdenv.cc
+              # deploy/cloudflare/build.sh post-processes the wasm bridge.
+              pkgs.wasm-bindgen-cli
               # apps/admin/build.rs shells out to npm to build the Svelte UI.
               pkgs.nodejs
+              # Cloudflare Workers/DO の OAuth ログインと deploy。
+              pkgs.wrangler
               # design_checks/*.py
               pkgs.python3
               # Inspecting node DBs during operation/recovery.

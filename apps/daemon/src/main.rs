@@ -10,6 +10,7 @@ use harmion_net_native::{
 };
 use harmion_node::{
     application::{self, Host},
+    https_peer::ChallengeStore,
     storage::{Identity, Store},
 };
 use harmion_protocol::{ConnectionInfo, LogEpoch, PeerBinding, PeerRegistration, hex, unhex};
@@ -145,7 +146,9 @@ fn verify_database_files(directory: &ProtectedDir) -> Result<()> {
 
 fn restore(backup: &str, destination: &str) -> Result<()> {
     let backup = ProtectedDir::open(backup)?;
-    let _lock = backup.lock()?;
+    // Lock an existing daemon.lock so a live node directory is rejected, but do
+    // not create a lock in a static snapshot (which may be offsite/read-only).
+    let _lock = backup.try_lock_existing()?;
     let config: Config = serde_json::from_slice(&backup.read("node.json", 4096)?)?;
     verify_database_files(&backup)?;
     initialize(
@@ -153,6 +156,68 @@ fn restore(backup: &str, destination: &str) -> Result<()> {
         Some(&config.cluster_id),
         Some((&backup, config.identity()?)),
     )
+}
+
+fn reset_peer_v2(path: &str) -> Result<()> {
+    let directory = ProtectedDir::open(path)?;
+    let _lock = directory.lock()?;
+    let config: Config = serde_json::from_slice(&directory.read("node.json", 4096)?)?;
+    let identity = config.identity()?;
+    verify_database_files(&directory)?;
+    let mut store = SqliteStore::open(directory.path().join("node.db"), identity)?;
+    let mut host = SystemHost;
+    let mut random = || host.random_bytes();
+    let generation = store.challenge_transaction(|tx| tx.reset_generation(&mut random))?;
+    println!(
+        "{}",
+        serde_json::json!({"reset":true,"generation":hex(&generation)})
+    );
+    Ok(())
+}
+
+fn snapshot(path: &str, destination: &str) -> Result<()> {
+    let directory = ProtectedDir::open(path)?;
+    let config: Config = serde_json::from_slice(&directory.read("node.json", 4096)?)?;
+    config.identity()?;
+    // A manual daemon run may leave -wal/-shm at 0644. Snapshot reads through
+    // SQLite (VACUUM INTO) and never copies sidecars, so only the main DB file
+    // needs the owner-only check here.
+    directory.verify_file("node.db")?;
+    let output = ProtectedDir::create(destination)?;
+    // Mark first: a crash mid-snapshot must leave a directory that `run`
+    // refuses instead of a runnable node with a partial database.
+    output.write_new(
+        "snapshot.json",
+        &serde_json::to_vec(&serde_json::json!({
+            "snapshot": true,
+            "node_id": config.node_id,
+        }))?,
+    )?;
+    harmion_store_sqlite::snapshot_database(
+        &directory.path().join("node.db"),
+        &output.path().join("node.db"),
+    )?;
+    for name in [
+        "node.json",
+        "admin.secret",
+        "certificate.der",
+        "private-key.der",
+        "iroh.secret",
+        "connection.json",
+        "peer.json",
+        OAUTH_IDENTITY_FILE,
+    ] {
+        match directory.read(name, 16 * 1024 * 1024) {
+            Ok(bytes) => output.write_new(name, &bytes)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    println!(
+        "{}",
+        serde_json::json!({"snapshot":true,"path":output.path().to_string_lossy()})
+    );
+    Ok(())
 }
 
 const OAUTH_IDENTITY_FILE: &str = "oauth-identity.json";
@@ -276,13 +341,31 @@ async fn automatic_sync(
     let base = Duration::from_secs(seconds);
     let mut schedule = SyncSchedule::default();
     let mut local_save = false;
+    let mut failures = 0u32;
     let mut rounds = tokio::task::JoinSet::new();
     loop {
-        let peers = store
+        let peers = match store
             .run(|s| {
                 s.transaction(|tx| Ok(tx.peers()?.into_iter().map(|peer| peer.node).collect()))
             })
-            .await?;
+            .await
+        {
+            Ok(peers) => {
+                failures = 0;
+                peers
+            }
+            Err(error) => {
+                // A transient SQLite error must not take down the HTTP
+                // services. Keep the daemon alive and retry with bounded
+                // exponential backoff instead of a hot 5-second loop.
+                failures = failures.saturating_add(1);
+                let delay =
+                    Duration::from_secs(1u64 << failures.min(6)).min(Duration::from_secs(60));
+                tracing::warn!(%error, retry_seconds = delay.as_secs(), "peer list unavailable; retrying automatic sync");
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+        };
         // Retired/contested peers may exchange signed control evidence only.
         // sync_once checks current membership before any data operation.
         for node in schedule.start_ready(peers, std::mem::take(&mut local_save), Instant::now()) {
@@ -348,6 +431,9 @@ async fn shutdown_signal() -> io::Result<()> {
 }
 async fn run(path: &str, options: RunOptions) -> Result<()> {
     let directory = ProtectedDir::open(path)?;
+    if directory.path().join("snapshot.json").is_file() {
+        return Err("snapshot directory cannot be run; restore it to a new node first".into());
+    }
     let _lock = directory.lock()?;
     let mut config: Config = serde_json::from_slice(&directory.read("node.json", 4096)?)?;
     if let Some(address) = options.app_listen {
@@ -650,6 +736,8 @@ async fn main() {
             backup_dir,
             new_dir,
         } => restore(&backup_dir, &new_dir),
+        Command::ResetPeerV2 { dir } => reset_peer_v2(&dir),
+        Command::Snapshot { dir, out } => snapshot(&dir, &out),
         Command::OauthProvision { dir, replace } => provision_oauth(&dir, replace),
         Command::OauthRoot { dir } => ProtectedDir::open(&dir)
             .map_err(Into::into)

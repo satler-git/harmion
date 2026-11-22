@@ -423,10 +423,25 @@ fn anchor_matches(certificate: Option<&Certificate>, member: &Member) -> bool {
     })
 }
 
+/// Bounds durable membership-log growth from a pinned but hostile peer.
+pub const MAX_MEMBERSHIP_CERTIFICATES: usize = 16_384;
+
 /// The peer table is a routing projection; certificates remain the authority.
 pub fn apply(tx: &mut dyn Transaction, records: &[Certificate]) -> Result<Membership, Error> {
+    let mut known: BTreeSet<CertificateId> = tx
+        .membership_entries()?
+        .into_iter()
+        .map(|entry| entry.record.id())
+        .collect();
     for certificate in records {
         verify(tx.identity().cluster, certificate)?;
+        let id = certificate.id();
+        if !known.contains(&id) {
+            if known.len() >= MAX_MEMBERSHIP_CERTIFICATES {
+                return Err(Error::InvalidRequest);
+            }
+            known.insert(id);
+        }
         tx.append_membership(certificate)?;
     }
     let result = state(tx)?.ok_or(Error::InvalidRequest)?;

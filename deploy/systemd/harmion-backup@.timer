@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily encrypted offsite Harmion backup (%i)
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+Unit=harmion-backup@%i.service
+
+[Install]
+WantedBy=timers.target

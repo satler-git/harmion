@@ -332,11 +332,16 @@ impl ChallengeTransaction for ChallengeState<'_> {
         self.sql
             .execute("DELETE FROM https_challenges", [])
             .map_err(db)?;
+        // A reset exists to recover from a wall-clock reversal, so the durable
+        // high-water must be cleared together with the generation. Otherwise
+        // every later request remains below high_water and stays 503.
+        self.sql.execute("DELETE FROM https_rate", []).map_err(db)?;
         let generation = random()?;
         self.sql
             .execute(
                 "INSERT INTO https_state VALUES(1,?1,0)
-                 ON CONFLICT(singleton) DO UPDATE SET generation=excluded.generation",
+                 ON CONFLICT(singleton) DO UPDATE
+                 SET generation=excluded.generation, high_water=0",
                 [generation],
             )
             .map_err(db)?;

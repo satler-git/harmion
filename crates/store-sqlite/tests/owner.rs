@@ -274,3 +274,29 @@ fn recovery_replaces_all_credentials_and_rotates_the_code() {
         .unwrap_err();
     assert!(matches!(error, Error::OwnerRecoveryInvalid));
 }
+
+#[test]
+fn disabled_enforcement_still_requires_an_administrator() {
+    let mut test = Test::new();
+    test.enroll();
+    test.store
+        .transaction(|tx| owner::set_enforce(tx, false, "test", 200))
+        .unwrap();
+
+    let body = b"{}";
+    let credential = test.admin.clone();
+    test.store
+        .transaction(move |tx| {
+            owner::authorize(tx, &credential, "export", body, None, None, "test", 200)
+        })
+        .unwrap();
+
+    let unknown = Credential::from_bytes([9; 32]);
+    let error = test
+        .store
+        .transaction(move |tx| {
+            owner::authorize(tx, &unknown, "export", body, None, None, "test", 200)
+        })
+        .unwrap_err();
+    assert!(matches!(error, Error::Unauthenticated | Error::Forbidden));
+}

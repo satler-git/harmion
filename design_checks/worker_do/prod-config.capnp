@@ -18,8 +18,8 @@ const config :Workerd.Config = (
         (name = "EPOCH", text = "0303030303030303030303030303030303030303030303030303030303030303"),
         (name = "SEED", text = "0303030303030303030303030303030303030303030303030303030303030303"),
         (name = "ORIGIN", text = "https://server.example"),
-        (name = "ADMIN_TOKEN", text = "local-test-admin-token"),
-        (name = "BOOTSTRAP_TOKEN", text = "local-test-bootstrap-token"),
+        (name = "ADMIN_TOKEN", text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        (name = "BOOTSTRAP_TOKEN", text = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"),
         (name = "SYNC_INTERVAL_MS", text = "3600000")
       ],
       durableObjectNamespaces = [
@@ -29,7 +29,7 @@ const config :Workerd.Config = (
     )),
     (name = "assets", assets = (
       path = "../../deploy/cloudflare/public",
-      config = "{\"run_worker_first\":[\"/state\",\"/peer/*\",\"/admin/*\",\"/provision\",\"/capabilities\",\"/overview\",\"/members\",\"/peers\",\"/provision-status\",\"/registration-code\",\"/internal/*\"],\"not_found_handling\":\"404-page\"}",
+      config = "{\"run_worker_first\":[\"/state\",\"/ready\",\"/peer/*\",\"/admin/*\",\"/provision\",\"/capabilities\",\"/overview\",\"/members\",\"/peers\",\"/provision-status\",\"/registration-code\",\"/internal/*\"],\"not_found_handling\":\"404-page\"}",
       userWorker = (name = "hub")
     )),
     (name = "storage", disk = (writable = true)),

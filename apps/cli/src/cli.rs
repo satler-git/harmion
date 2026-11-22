@@ -115,7 +115,10 @@ pub(crate) enum Command {
         label: String,
     },
     /// Enable or disable owner enforcement.
-    OwnerEnforce { enable: bool },
+    OwnerEnforce {
+        #[arg(action = clap::ArgAction::Set)]
+        enable: bool,
+    },
     /// Replay a persisted save request.
     Save { path: String },
     /// Create content from a body file.
@@ -267,6 +270,22 @@ mod tests {
         );
         assert!(parse(&["sync-status", "content-id"]).is_err());
         assert!(parse(&["sync-status", "--update"]).is_err());
+    }
+
+    #[test]
+    fn owner_enforce_takes_an_explicit_boolean() {
+        let cli = parse(&["owner-enforce", "true"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::OwnerEnforce { enable: true }
+        ));
+        let cli = parse(&["owner-enforce", "false"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::OwnerEnforce { enable: false }
+        ));
+        assert!(parse(&["owner-enforce"]).is_err());
+        assert!(parse(&["owner-enforce", "maybe"]).is_err());
     }
 
     #[test]
