@@ -85,16 +85,22 @@ daemon停止中にreplay clockをリセットする。保存データとmembersh
 harmiond reset-peer-v2 ./node-a
 ```
 
-## OAuthを有効にする
+## OAuth
 
-ノードを停止した状態で、所有者が専用CAとサーバー証明書を発行する。初期状態ではOAuthの待受けを無効にしている。
+新規ノードはOAuthが既定で有効になる。`init` が `oauth-identity.json` を生成し、
+`node.json` の `oauth_listen` を `127.0.0.1:0` にする。初回起動後の実ポートは
+`node.json` に保存され、再起動しても維持される。既存ノードでは次のどちらかで有効化する。
 
 ```sh
 target/debug/harmiond oauth-provision ./node-a > node-a-oauth-root.pem
 target/debug/harmiond run ./node-a --oauth-listen 127.0.0.1:0
 ```
 
-標準出力の `oauth_origin` にHTTPS originが表示される。ポートは再起動後も維持する。公開CAを再取得するには `harmiond oauth-root ./node-a` を使う。サーバーの秘密鍵を含む `oauth-identity.json` はノードディレクトリー内に保管する。
+`oauth-provision` は既にCAがあれば再生成せず、そのPEMを出力する。CAを更新する
+ときだけ `--replace` を付ける。標準出力の `oauth_origin` にHTTPS originが表示される。
+公開CAを再取得するには `harmiond oauth-root ./node-a` を使う。サーバーの秘密鍵を
+含む `oauth-identity.json` はノードディレクトリー内に保管する。OAuthを止めるには
+`run DIR --oauth-listen off` を使う。
 
 認可の前に、所有者が生成した `node-a-oauth-root.pem` を、使うブラウザのWebサイト用CAとしてインポートする。Firefoxでは設定の「プライバシーとセキュリティ」から「証明書を表示」 → 「認証局証明書」 → 「インポート」と進み、Webサイトの識別を信頼する。ブラウザがOSの証明書ストアを使う環境では、利用ユーザーの信頼ストアを使う。token endpointを呼ぶアプリにも同じPEMを設定する。App APIにはSDKの証明書固定接続を使う。
 
@@ -262,6 +268,10 @@ UI を更新した後は `cargo build --workspace` を実行し、起動中の�
 target/debug/harmion-admin provision > harmion-admin-root.pem
 target/debug/harmion-admin run ./node-a
 ```
+
+ログは stderr に tracing 形式で出る。既定は `harmion_admin=info` で、詳細は
+`RUST_LOG=harmion_admin=debug harmion-admin run ...` で確認できる。stdout は
+起動URLのJSONだけなので、ログと混ざらない。
 
 ブラウザに `harmion-admin-root.pem` を Web サイト用 CA として登録し、端末に表示された単回リンクを開く。リンクは2分、セッションはアイドル10分・絶対30分有効。R2は起動端末での承認が必要で、`--approval=stdio`は監督下の自動化専用。再読込後は、新しいセッションを作るために管理アプリを再起動する。状態 directory は既定で `~/.local/share/harmion/admin-ui`。別の場所を使う場合は
 `--ui-dir DIR` を付ける。特定の Content を開く場合は `run` の node の後ろに

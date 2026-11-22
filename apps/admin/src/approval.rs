@@ -28,6 +28,7 @@ pub enum ApprovalMode {
 }
 
 struct Request {
+    operation: String,
     summary: String,
     reply: oneshot::Sender<bool>,
 }
@@ -54,14 +55,21 @@ impl Confirmer {
         let (sender, mut receiver) = mpsc::channel::<Request>(1);
         std::thread::spawn(move || {
             while let Some(request) = receiver.blocking_recv() {
+                tracing::info!(operation = %request.operation, "owner approval prompt shown");
                 eprint!(
                     "\n[harmion-admin] 所有者の承認が必要です\n{}\n承認しますか? [y/N] ",
                     request.summary
                 );
                 let _ = std::io::stderr().flush();
                 let mut input = String::new();
-                let approved = std::io::stdin().read_line(&mut input).is_ok()
-                    && matches!(input.trim(), "y" | "Y" | "yes" | "YES");
+                let read = std::io::stdin().read_line(&mut input);
+                let approved = read.is_ok() && matches!(input.trim(), "y" | "Y" | "yes" | "YES");
+                tracing::info!(
+                    operation = %request.operation,
+                    approved,
+                    reason = if approved { "approved" } else { "owner_declined" },
+                    "owner approval decision"
+                );
                 let _ = request.reply.send(approved);
             }
         });
@@ -73,15 +81,38 @@ impl Confirmer {
     }
 
     /// Returns false on deny, timeout, a closed launcher, or a poisoned prompt.
-    pub async fn confirm(&self, summary: String) -> bool {
+    pub async fn confirm(&self, operation: &str, summary: String) -> bool {
         if self.poisoned.load(Ordering::Relaxed) {
+            tracing::warn!(
+                operation,
+                reason = "approval_channel_poisoned",
+                "owner approval denied"
+            );
             return false;
         }
         let Some(sender) = &self.sender else {
+            tracing::warn!(
+                operation,
+                reason = "approval_channel_unavailable",
+                "owner approval denied"
+            );
             return false;
         };
         let (reply, response) = oneshot::channel();
-        if sender.send(Request { summary, reply }).await.is_err() {
+        if sender
+            .send(Request {
+                operation: operation.to_owned(),
+                summary,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                operation,
+                reason = "approval_channel_closed",
+                "owner approval denied"
+            );
             return false;
         }
         match tokio::time::timeout(APPROVAL_TTL, response).await {
@@ -89,6 +120,12 @@ impl Confirmer {
             _ => {
                 // A timed-out stdin read may still consume the next line. Deny
                 // all later approvals instead of guessing which request it belongs to.
+                tracing::warn!(
+                    operation,
+                    reason = "approval_timeout",
+                    timeout_secs = APPROVAL_TTL.as_secs(),
+                    "owner approval timed out; denying later approvals"
+                );
                 self.poisoned.store(true, Ordering::Relaxed);
                 false
             }
@@ -116,7 +153,7 @@ mod tests {
     #[tokio::test]
     async fn deny_mode_never_approves() {
         let confirmer = Confirmer::start(ApprovalMode::Deny);
-        assert!(!confirmer.confirm("test summary".into()).await);
+        assert!(!confirmer.confirm("/test", "test summary".into()).await);
         assert!(confirmer.unavailable().is_some());
     }
 }

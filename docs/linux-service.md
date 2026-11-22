@@ -50,11 +50,11 @@ install -m 600 deploy/systemd/harmion@.service \
 ```
 
 既存クラスタへ追加する場合は `init` に `--cluster CLUSTER_ID` を指定する。
-参加承認と `join`、iroh relay/discovery、OAuth の明示的な設定は
+参加承認と `join`、iroh relay/discovery、OAuth の詳細は
 [native の手順](native-quickstart.md#起動と参加)に従う。unit は保存済み設定を使う。
 初期設定は n0 公開リレー・探索を使う開発用構成であり、本番の到達性保証ではない。
-OAuth と管理 UI の CA は別途所有者が確認・設定する。このサービスは CA の登録や
-管理 UI の自動起動をしない。
+OAuth は既定で有効だが、OAuth と管理 UI の CA は別途所有者がブラウザへ登録する。
+このサービスは CA の登録や管理 UI の自動起動をしない。
 
 内容を確認した後、**所有者が任意で**ユーザーサービスを登録・起動する。
 
@@ -213,6 +213,15 @@ systemctl --user stop harmion@main.service
 "$HOME/.local/bin/harmiond" reset-peer-v2 "$HOME/.local/share/harmion/main"
 systemctl --user start harmion@main.service
 ```
+
+## OAuth と管理 UI の証明書
+
+- OAuth: `https://127.0.0.1:8788`（`main`）。CA は `~/harmion-oauth-root.pem`。
+  再取得は `harmiond oauth-root ~/.local/share/harmion/main`。
+- 管理 UI: `~/harmion-admin-root.pem`。OAuth の CA とは別物。
+- ブラウザには両方（使うものだけ）を Web サイト用 CA として登録する。
+- 新規ノードは OAuth が既定で有効。`oauth-provision` は既存 CA を返すので、
+  CA を更新するときだけ `--replace` を付ける。
 
 ## 更新・バックアップ・失敗時の対応
 

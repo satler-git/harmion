@@ -10,6 +10,8 @@ clap.workspace = true
 harmion-client = { path = "../../crates/client" }
 harmion-local = { path = "../../crates/local" }
 harmion-local-web = { path = "../../crates/local-web" }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 bytes = "1"
 base64 = "0.22.1"
 http-body-util = "0.1"

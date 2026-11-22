@@ -102,7 +102,7 @@ fn initialize(
         node_id: hex(&SystemHost.random_bytes()?),
         log_epoch: hex(&SystemHost.random_bytes()?),
         app_listen: "127.0.0.1:0".parse()?,
-        oauth_listen: None,
+        oauth_listen: Some("127.0.0.1:0".parse()?),
         peer_listen: "127.0.0.1:0".parse()?,
         sync_seconds: 30,
         use_iroh: true,
@@ -111,6 +111,7 @@ fn initialize(
         founder,
     };
     let tls = TlsIdentity::generate()?;
+    let oauth_tls = BrowserTls::generate(&format!("OAuth {}", &config.node_id[..4]))?;
     let directory = ProtectedDir::create(path)?;
     let _lock = directory.lock()?;
     directory.write_new("node.db", &[])?;
@@ -123,6 +124,14 @@ fn initialize(
     directory.write_new("private-key.der", tls.private_key_der())?;
     directory.write_new("admin.secret", credential.expose_bytes())?;
     directory.write_new("iroh.secret", &SystemHost.random_bytes()?)?;
+    directory.write_new(
+        OAUTH_IDENTITY_FILE,
+        &serde_json::to_vec(&OAuthIdentity {
+            root_der: oauth_tls.root_der,
+            leaf_der: oauth_tls.leaf_der,
+            private_key_der: oauth_tls.private_key_der,
+        })?,
+    )?;
     // Last file is the initialization marker. Partial initialization never opens as a valid node.
     directory.write_new("node.json", &serde_json::to_vec(&config)?)?;
     println!(
@@ -234,6 +243,22 @@ fn provision_oauth(path: &str, replace: bool) -> Result<()> {
     let _lock = directory.lock()?;
     let config: Config = serde_json::from_slice(&directory.read("node.json", 4096)?)?;
     let identity = config.identity()?;
+    if !replace {
+        match directory.read(OAUTH_IDENTITY_FILE, 65_536) {
+            Ok(bytes) => {
+                let identity: OAuthIdentity = serde_json::from_slice(&bytes)?;
+                let tls = BrowserTls {
+                    root_der: identity.root_der,
+                    leaf_der: identity.leaf_der,
+                    private_key_der: identity.private_key_der,
+                };
+                print!("{}", tls.root_pem());
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     let tls = BrowserTls::generate(&format!("OAuth {}", hex(&identity.node.0[..4])))?;
     let pem = tls.root_pem();
     let bytes = serde_json::to_vec(&OAuthIdentity {

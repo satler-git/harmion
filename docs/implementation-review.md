@@ -549,3 +549,11 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - `harmion` / `harmion-admin` のノード指定で、既存 directory になければ `~/.local/share/harmion/<name>` を参照するようにした。`HARMION_NODE_ROOT` で root を変更できる。
 - `harmion node list` は `node.json` を持つ directory だけを名前で列挙する。`harmion` の `--node` 省略時は `main`。`harmion-admin run main` も動く。
 - `harmion-admin` の状態 directory は従来どおり `~/.local/share/harmion/admin-ui`。ノード名とは独立。
+
+### R61 — OAuth 既定有効化と管理 UI の tracing
+
+- 新規ノードは `init` 時に OAuth の TLS identity を生成し、`oauth_listen` を `127.0.0.1:0` で有効化する。初回起動後の実ポートは `node.json` に保存する。
+- `oauth-provision` は既存 CA を再生成せず PEM を返す。更新は `--replace`。`oauth-root` で再取得できる。`--oauth-listen off` で停止できる。
+- デプロイ済みの `main` は `https://127.0.0.1:8788`、CA は `~/harmion-oauth-root.pem`。管理 UI の CA `~/harmion-admin-root.pem` とは別。
+- `harmion-admin` に `tracing` + `tracing-subscriber` を追加し、stderr / `RUST_LOG`（既定 `harmion_admin=info`）で出力する。stdout は起動URLのJSONのみ。起動、所有者強制/署名鍵、launch link発行、セッション確立・終了、接続上限、認証/Origin拒否、ボディ上限、R2承認の承認/拒否/タイムアウト、transfer上限を記録する。トークン、launch URL、署名、秘密鍵、本文、承認summaryはログに出さない。
+- `design_checks/oauth_process.py` と `admin_process.py` が成功。`harmion-admin` の tracing 有効化後も stdout のJSON契約を確認した。

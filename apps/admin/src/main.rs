@@ -99,6 +99,14 @@ async fn run(
     if let Some(content) = content {
         unhex::<32>(content)?;
     }
+    tracing::info!(
+        node_dir = %node.display(),
+        ui_dir = %state.display(),
+        approval_mode = ?approval,
+        owner_key_provided = owner_key.is_some(),
+        content_requested = content.is_some(),
+        "admin server starting"
+    );
     let state = ProtectedDir::open(state)?;
     let _lock = state.lock()?;
     let config = identity(&state)?.server_config()?;
@@ -110,17 +118,24 @@ async fn run(
         || permissions["manage_apps"] != true
         || permissions["manage_nodes"] != true
     {
+        tracing::warn!(
+            reason = "insufficient_node_permissions",
+            required = "read:all,write:all,manage_apps,manage_nodes",
+            "node owner permissions required"
+        );
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "node owner permissions required",
         )
         .into());
     }
-    let owner_enforced = client
-        .owner_status()
-        .await
-        .map(|status| status["enforce"] == true)
-        .unwrap_or(false);
+    let owner_enforced = match client.owner_status().await {
+        Ok(status) => status["enforce"] == true,
+        Err(error) => {
+            tracing::warn!(%error, "owner status unavailable; assuming enforcement off");
+            false
+        }
+    };
     let signer = owner_key
         .map(PathBuf::from)
         .map(SshSigner::new)
@@ -131,14 +146,25 @@ async fn run(
         })
         .or_else(harmion_client::ssh_agent_signer)
         .or_else(default_owner_key);
+    tracing::info!(
+        owner_enforced,
+        signer_configured = signer.is_some(),
+        "owner enforcement configured"
+    );
     if owner_enforced && signer.is_none() {
-        eprintln!(
-            "harmion-admin: owner enforcement is on; R2 operations need --owner-key, HARMION_OWNER_SSH_KEY, or an ssh-agent identity"
+        tracing::warn!(
+            owner_enforced = true,
+            hint = "use --owner-key, HARMION_OWNER_SSH_KEY, or ssh-agent",
+            "owner enforcement is on but no owner signer is configured"
         );
     }
     let confirmer = Confirmer::start(approval);
     if let Some(reason) = confirmer.unavailable() {
-        eprintln!("harmion-admin: {reason}");
+        tracing::warn!(
+            approval_mode = ?approval,
+            reason,
+            "R2 approval channel unavailable"
+        );
     }
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let (server, link) = server::State::new(
@@ -150,7 +176,14 @@ async fn run(
         confirmer,
         owner_enforced,
     )?;
+    tracing::info!(
+        bootstrap_ttl_secs = 120,
+        session_ttl_secs = 30 * 60,
+        session_idle_secs = 10 * 60,
+        "one-time launch link issued"
+    );
     println!("{}", serde_json::json!({"url":link}));
+    tracing::debug!("launch URL written to stdout");
     server::run(listener, Arc::new(server), config).await?;
     Ok(())
 }
@@ -174,6 +207,14 @@ fn resolve_ui_dir(value: Option<&str>) -> Result<PathBuf> {
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "harmion_admin=info".into()),
+        )
+        .with_writer(io::stderr)
+        .with_ansi(false)
+        .init();
     let result = match Cli::parse().command {
         Command::Provision { ui_dir } => {
             resolve_ui_dir(ui_dir.as_deref()).and_then(|dir| provision(&dir))
@@ -206,7 +247,7 @@ async fn main() {
         },
     };
     if let Err(error) = result {
-        eprintln!("harmion-admin: {error}");
+        tracing::error!(%error, "harmion-admin failed");
         std::process::exit(1);
     }
 }

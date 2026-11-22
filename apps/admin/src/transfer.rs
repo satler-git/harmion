@@ -29,6 +29,11 @@ pub fn encode_peer(registration: &serde_json::Value) -> Result<String, StatusCod
 
 pub fn decode_peer(input: &str) -> Result<PeerRegistration, StatusCode> {
     if input.len() > MAX_RECORD_BYTES {
+        tracing::warn!(
+            limit_bytes = MAX_RECORD_BYTES,
+            input_bytes = input.len(),
+            "transfer input too large"
+        );
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     if let Some(encoded) = input.trim().strip_prefix(&format!("{PEER_PREFIX}z:")) {
@@ -41,6 +46,11 @@ pub fn decode_peer(input: &str) -> Result<PeerRegistration, StatusCode> {
             .read_to_end(&mut bytes)
             .map_err(|_| StatusCode::BAD_REQUEST)?;
         if bytes.len() > MAX_RECORD_BYTES {
+            tracing::warn!(
+                limit_bytes = MAX_RECORD_BYTES,
+                expanded_bytes = bytes.len(),
+                "transfer expansion too large"
+            );
             return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
         return serde_json::from_slice(&bytes).map_err(|_| StatusCode::BAD_REQUEST);
@@ -50,6 +60,11 @@ pub fn decode_peer(input: &str) -> Result<PeerRegistration, StatusCode> {
 
 pub fn decode<T: for<'a> Deserialize<'a>>(prefix: &str, input: &str) -> Result<T, StatusCode> {
     if input.len() > MAX_RECORD_BYTES {
+        tracing::warn!(
+            limit_bytes = MAX_RECORD_BYTES,
+            input_bytes = input.len(),
+            "transfer input too large"
+        );
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     let encoded = input
@@ -90,6 +105,12 @@ impl Confirmations {
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         tickets.retain(|_, value| value.expires > Instant::now());
         if tickets.len() >= 32 {
+            tracing::warn!(
+                limit = 32,
+                pending = tickets.len(),
+                status = 429,
+                "peer confirmation limit reached"
+            );
             return Err(StatusCode::TOO_MANY_REQUESTS);
         }
         let key = harmion_client::random_id().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -107,13 +128,25 @@ impl Confirmations {
         Ok(harmion_client::protocol::hex(&key))
     }
     pub fn take(&self, input: &str) -> Result<PendingPeer, StatusCode> {
-        let key = unhex(input).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let key = unhex(input).map_err(|_| {
+            tracing::warn!(
+                reason = "invalid_ticket",
+                "peer confirmation ticket rejected"
+            );
+            StatusCode::BAD_REQUEST
+        })?;
         self.0
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .remove(&key)
             .filter(|value| value.expires > Instant::now())
-            .ok_or(StatusCode::GONE)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    reason = "unknown_or_expired_ticket",
+                    "peer confirmation ticket rejected"
+                );
+                StatusCode::GONE
+            })
     }
     pub fn summary(&self, input: &str) -> Option<String> {
         let key = unhex(input).ok()?;

@@ -1103,6 +1103,8 @@ dependencies = [
  "subtle",
  "tokio",
  "tokio-rustls",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

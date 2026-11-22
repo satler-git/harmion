@@ -150,6 +150,14 @@ pub(crate) async fn run(
     state: Arc<State>,
     config: ServerConfig,
 ) -> io::Result<()> {
+    tracing::info!(
+        origin = %state.origin,
+        bootstrap_ttl_secs = BOOTSTRAP_TTL.as_secs(),
+        session_ttl_secs = SESSION_TTL.as_secs(),
+        session_idle_secs = SESSION_IDLE.as_secs(),
+        max_connections = 16,
+        "admin UI listening"
+    );
     let acceptor = TlsAcceptor::from(Arc::new(config));
     let slots = Arc::new(Semaphore::new(16));
     let mut connections = JoinSet::new();
@@ -157,37 +165,74 @@ pub(crate) async fn run(
     tokio::pin!(shutdown);
     loop {
         let socket = tokio::select! {
-            result = &mut shutdown => { connections.shutdown().await; return result; },
+            result = &mut shutdown => {
+                tracing::info!(connections = connections.len(), "shutdown requested");
+                connections.shutdown().await;
+                return result;
+            },
             Some(_) = connections.join_next(), if !connections.is_empty() => continue,
             incoming = listener.accept() => incoming?.0,
         };
         let Ok(permit) = slots.clone().try_acquire_owned() else {
+            tracing::warn!(limit = 16, "connection limit reached; dropping connection");
             continue;
         };
         let (acceptor, state) = (acceptor.clone(), state.clone());
         connections.spawn(async move {
             let _permit = permit;
             let _ = timeout(Duration::from_secs(150), async move {
-                if let Ok(stream) = acceptor.accept(socket).await {
-                    let _ = hyper::server::conn::http1::Builder::new()
-                        .max_headers(24)
-                        .max_buf_size(16 * 1024)
-                        .serve_connection(
-                            TokioIo::new(stream),
-                            service_fn(move |request| {
-                                let state = state.clone();
-                                async move {
-                                    Ok::<_, Infallible>(match dispatch(&state, request).await {
-                                        Ok(response) => response,
-                                        Err(status) => json(
-                                            status,
-                                            serde_json::json!({"error":status.as_u16()}),
-                                        ),
-                                    })
-                                }
-                            }),
-                        )
-                        .await;
+                let stream = match acceptor.accept(socket).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        tracing::debug!(%error, "TLS handshake failed");
+                        return;
+                    }
+                };
+                if let Err(error) = hyper::server::conn::http1::Builder::new()
+                    .max_headers(24)
+                    .max_buf_size(16 * 1024)
+                    .serve_connection(
+                        TokioIo::new(stream),
+                        service_fn(move |request| {
+                            let state = state.clone();
+                            async move {
+                                let method = request.method().clone();
+                                let route = request.uri().path().to_owned();
+                                Ok::<_, Infallible>(match dispatch(&state, request).await {
+                                    Ok(response) => {
+                                        tracing::debug!(
+                                            %method,
+                                            %route,
+                                            status = response.status().as_u16(),
+                                            "admin request completed"
+                                        );
+                                        response
+                                    }
+                                    Err(status) => {
+                                        if status.is_server_error() {
+                                            tracing::warn!(
+                                                %method,
+                                                %route,
+                                                status = status.as_u16(),
+                                                "admin request failed"
+                                            );
+                                        } else {
+                                            tracing::debug!(
+                                                %method,
+                                                %route,
+                                                status = status.as_u16(),
+                                                "admin request rejected"
+                                            );
+                                        }
+                                        json(status, serde_json::json!({"error":status.as_u16()}))
+                                    }
+                                })
+                            }
+                        }),
+                    )
+                    .await
+                {
+                    tracing::debug!(%error, "HTTP connection error");
                 }
             })
             .await;
@@ -204,6 +249,7 @@ fn header<'a>(request: &'a Request<Incoming>, name: &str) -> Option<&'a str> {
 
 async fn dispatch(state: &State, request: Request<Incoming>) -> Result<Response<Body>, StatusCode> {
     if header(&request, "host") != Some(state.host.as_str()) {
+        tracing::warn!(reason = "host_mismatch", status = 400, "request rejected");
         return Err(StatusCode::BAD_REQUEST);
     }
     let path = request.uri().path().to_owned();
@@ -215,9 +261,15 @@ async fn dispatch(state: &State, request: Request<Incoming>) -> Result<Response<
         return Err(StatusCode::NOT_FOUND);
     }
     if header(&request, "origin") != Some(state.origin.as_str()) {
+        tracing::warn!(reason = "origin_mismatch", status = 403, "request rejected");
         return Err(StatusCode::FORBIDDEN);
     }
     if header(&request, "content-type") != Some("application/json") {
+        tracing::debug!(
+            reason = "unsupported_content_type",
+            status = 415,
+            "request rejected"
+        );
         return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
     // The Worker owns this route; answering 401 here would make the UI mistake
@@ -226,19 +278,61 @@ async fn dispatch(state: &State, request: Request<Incoming>) -> Result<Response<
         return Err(StatusCode::NOT_FOUND);
     }
     let session = if path != "/session" {
-        Some(state.authorize(&request)?)
+        match state.authorize(&request) {
+            Ok(session) => Some(session),
+            Err(status) => {
+                tracing::warn!(
+                    route = %path,
+                    reason = "authentication_failed",
+                    status = status.as_u16(),
+                    "authentication failed"
+                );
+                return Err(status);
+            }
+        }
     } else {
         None
     };
     let body = Limited::new(request.into_body(), MAX_APP_RESPONSE_BYTES)
         .collect()
         .await
-        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?
+        .map_err(|_| {
+            tracing::warn!(
+                limit_bytes = MAX_APP_RESPONSE_BYTES,
+                status = 413,
+                "request body too large"
+            );
+            StatusCode::PAYLOAD_TOO_LARGE
+        })?
         .to_bytes();
     if path == "/session" {
-        let launch: String = serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
-        let launch = unhex(&launch).map_err(|_| StatusCode::BAD_REQUEST)?;
-        let session = state.establish(launch)?;
+        let launch: String = serde_json::from_slice(&body).map_err(|_| {
+            tracing::warn!(
+                reason = "invalid_session_exchange",
+                status = 400,
+                "session establishment failed"
+            );
+            StatusCode::BAD_REQUEST
+        })?;
+        let launch = unhex(&launch).map_err(|_| {
+            tracing::warn!(
+                reason = "invalid_session_exchange",
+                status = 400,
+                "session establishment failed"
+            );
+            StatusCode::BAD_REQUEST
+        })?;
+        let session = state.establish(launch).inspect_err(|status| {
+            tracing::warn!(
+                reason = "launch_token_rejected",
+                status = status.as_u16(),
+                "session establishment failed"
+            );
+        })?;
+        tracing::info!(
+            session_ttl_secs = SESSION_TTL.as_secs(),
+            "admin session established"
+        );
         return Ok(json(
             StatusCode::OK,
             serde_json::json!({"session":hex(&session),"expires_in":SESSION_TTL.as_secs()}),
@@ -250,11 +344,13 @@ async fn dispatch(state: &State, request: Request<Incoming>) -> Result<Response<
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .session = None;
+        tracing::info!("admin session ended");
         return Ok(json(StatusCode::OK, serde_json::json!({})));
     }
     if let Some(summary) = api::approval_summary(&path, &body, &state.confirmations)
-        && !state.confirmer.confirm(summary).await
+        && !state.confirmer.confirm(&path, summary).await
     {
+        tracing::warn!(route = %path, reason = "owner_approval_denied", "R2 request denied");
         return Err(StatusCode::FORBIDDEN);
     }
     let (enforce, signer) = state.enforcement();

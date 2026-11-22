@@ -51,7 +51,15 @@ impl<'a> Caller<'a> {
         target: Option<[u8; 32]>,
     ) -> Result<Value, Error> {
         if self.enforce && harmion_client::protocol::owner::requires_assertion(operation) {
-            let signer = self.signer.ok_or(Error::Http(403))?;
+            let Some(signer) = self.signer else {
+                tracing::warn!(
+                    operation,
+                    reason = "owner_signer_unavailable",
+                    status = 403,
+                    "owner assertion required but no signer configured"
+                );
+                return Err(Error::Http(403));
+            };
             self.client
                 .call_owner(operation, body, target, Some(self.session), signer)
                 .await
@@ -62,7 +70,15 @@ impl<'a> Caller<'a> {
 
     async fn export(&self, path: &str) -> Result<Value, Error> {
         if self.enforce {
-            let signer = self.signer.ok_or(Error::Http(403))?;
+            let Some(signer) = self.signer else {
+                tracing::warn!(
+                    operation = "export",
+                    reason = "owner_signer_unavailable",
+                    status = 403,
+                    "owner assertion required but no signer configured"
+                );
+                return Err(Error::Http(403));
+            };
             let challenge = self
                 .client
                 .owner_challenge("export", None, &[], Some(self.session))
