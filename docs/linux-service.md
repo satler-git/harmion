@@ -138,10 +138,9 @@ install -d -m 700 "$HOME/.config/harmion"
 head -c 32 /dev/urandom | base64 > "$HOME/.config/harmion/backup.key"
 chmod 600 "$HOME/.config/harmion/backup.key"
 
-# wrangler はユーザープロファイルへ入れ、通常の HOME で一度だけ OAuth ログインする。
-nix profile install nixpkgs#wrangler
-wrangler login
-wrangler kv namespace create harmion-backups
+# wrangler は nix profile へ入れず、必要なときだけ nix shell で使う。
+nix shell nixpkgs#wrangler -c wrangler login
+nix shell nixpkgs#wrangler -c wrangler kv namespace create harmion-backups
 # 表示された namespace id と account id を控える。
 
 # OAuth access token は1時間で切れる。script が refresh_token で更新するため、
