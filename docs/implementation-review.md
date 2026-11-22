@@ -534,3 +534,12 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - `SYNC_INTERVAL_MS=0` のため同期は native 起点。Peer v2 の deadline を 45 秒へ広げ、Durable Object の初回 cold start で timeout にならないようにした。
 - backup: 日次 timer を enabled にし、GPG AES-256 の snapshot を Workers KV (`main/20261122T040821Z.tar.gpg`) へアップロードした。KV から取得→GPG 復号→tar 展開→`harmiond restore`→新 Node ID で起動→`identity` まで復元演習を実施し、成功した。OAuth access token は script が refresh_token で更新する。
 - 既知の運用制約: Cloudflare Access/WAF と admin rate limit は未適用。管理 UI の OAuth CA は未設定。Cloudflare は native 正本のミラーで、Worker→native scheduled push は行わない。
+
+### R59 — Cloudflare Access と管理 UI の既定パス
+
+- `hub.satler.dev` に Cloudflare Access を適用した。One-time PIN IdP、`mitsclatw24@mbr.nifty.com` の allow ポリシー、8時間セッション。
+- `/peer`、`/state`、`/ready`、`/provision`、`/internal` は bypass。native の Peer v2 同期と監視は Access Cookie を持たないため。
+- 実測: `/state` 200、`/ready` 200、`/peer/v2/challenge` 400（bypass 後に Worker の検証へ到達）、`/` と `/admin/overview` は 302 で Access ログインへ。native の Worker 同期は成功。
+- `/admin/*` は Access セッションに加えて bearer も必要。curl の自動化には Access Service Token が必要。
+- native 管理 UI の状態ディレクトリを `~/.local/share/harmion/admin-ui` へ移し、`provision`/`root`/`run` の `--ui-dir` を省略可能にした。R2 の所有者鍵は `--owner-key`、`HARMION_OWNER_SSH_KEY`、ssh-agent（`ssh-add -L`）の順で自動検出する。
+- ssh-agent 経由の `harmion export` が SSHSIG 検証まで成功することを確認した。1Password SSH agent はデスクトップアプリの機能で、CLI 単体では利用できない（`op-ssh-sign` も agent の代替ではない）。

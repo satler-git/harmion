@@ -86,13 +86,32 @@ Initial deployment uses the app-layer boundary explicitly:
 - `/state` is an unauthenticated liveness probe; `/ready` reports missing or
   placeholder configuration and whether the node has been provisioned.
 
-Cloudflare Access is optional defense in depth, not the app authentication. If
-it is enabled, keep `/state`, `/ready`, `/peer/*`, `/provision` and `/internal/*`
-outside the Access application (or give monitoring a Service Token) and leave
-the bearer checks in place. Otherwise the bearer curl examples below receive an
-Access redirect instead of JSON. The admin UI uses `credentials: 'same-origin'`,
-so Access cookies work when `/`, `/assets/*` and `/admin/*` are behind Access.
-No Access policy is applied by this repository.
+Cloudflare Access is enabled for `hub.satler.dev` as defense in depth:
+
+- `hub.satler.dev` (`/`, `/assets/*`, `/admin/*`, `/capabilities`) uses a
+  One-time PIN identity provider and allows `mitsclatw24@mbr.nifty.com`
+  (session 8h).
+- Bypass applications cover `/peer`, `/state`, `/ready`, `/provision` and
+  `/internal`. Native sync and monitoring cannot hold Access cookies; the
+  app-layer bearer/protocol checks remain.
+- `/admin/*` now returns a 302 to the Access login unless the browser has an
+  Access session. Scripted admin calls need an Access service token or the
+  browser cookie; the bearer token alone no longer reaches the Worker at the
+  edge.
+- Access verifies the user at the edge; the Worker does not verify
+  `Cf-Access-Jwt-Assertion` itself.
+
+Verify the split with:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' https://hub.satler.dev/state  # 200
+curl -s -o /dev/null -w '%{http_code}\n' https://hub.satler.dev/ready  # 200
+curl -s -o /dev/null -w '%{http_code}\n' https://hub.satler.dev/       # 302
+```
+
+Access setup and DNS changes require an API token with **Access: Apps and
+Policies: Edit** and **Zone: DNS: Edit**. The wrangler OAuth token cannot make
+those changes.
 
 ## Provisioning
 
