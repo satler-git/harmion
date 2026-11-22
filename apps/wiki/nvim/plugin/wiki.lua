@@ -118,7 +118,8 @@ local function open(id_or_title)
   local content = run({ "open", id })
   local buf = vim.api.nvim_create_buf(true, false)
   vim.bo[buf].buftype = "acwrite"
-  vim.bo[buf].swapfile = false
+  -- Keep a swap file so a crash during a 1.5s autosave window is recoverable.
+  vim.bo[buf].swapfile = true
   vim.api.nvim_buf_set_name(buf, "wiki://" .. content.id)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, body_to_lines(content.body))
   set_metadata(buf, content)
