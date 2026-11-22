@@ -161,6 +161,7 @@ kindは所属の有無とその更新関係を扱う。初期に検討したカ�
 
 - Filterはall、または指定したkindsのいずれかを含む条件。Query相当の条件式は提供しない。
 - 許可はContent全体に対するもの。ledgerとwiki両方のkindを持つContentは、ledger権限でwiki用属性も読める。
+- kindの所属変更はContent全体の変更としてWrite権限で行う。書き手が自分の書けるContentへ別のkindを追加すると、そのkindをRead対象とするアプリにも内容が見える。これはContent全体への許可という原則の帰結であり、意図した仕様である。Write権限は、そのContentのkindsを通じた公開範囲も変更し得るものとして扱う。別アプリへ公開させたくないContentには、そのアプリが読めるkindを書き手が追加できないよう、Write権限を分ける。
 - 作成は作成後、変更は変更前後、削除は削除前がWriteのFilter内にあることを原則とする。
 - ReadなしのWriteでも作成は可能。既存Contentの更新には、別途渡された編集元情報が必要となる。編集元情報を持つことはRead権限の代わりにはならず、保存時のWrite検査も省略しない。情報の受け渡し形式は未決定。
 - kind競合があっても、各kindの後勝ちで選んだ通常値からkindsを構成し、そのkindsでFilterを評価する。「すべての未解決候補がFilterを満たす」という以前の案は採用しない。

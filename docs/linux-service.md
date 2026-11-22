@@ -110,7 +110,9 @@ Linux/Android 端末が常時稼働することを複製の成立条件にしな
 
 同じディスクへのコピーはディスク障害で本体と同時に失われるため、バックアップは
 別ホスト・別クラウドへ暗号化して置く。`harmiond snapshot` は SQLite の
-`VACUUM INTO` を使い、daemon を止めずに一貫した DB と鍵・設定の snapshot を作る。
+`VACUUM INTO` を使い、daemon を止めずに一貫した DB snapshot を作る。DB 以外の
+`node.json`・鍵・設定は snapshot の後にコピーするため、DB と同時点であることは
+保証しない（鍵・設定の変更と重なった場合は世代がずれ得る）。
 
 ```sh
 umask 077
@@ -143,22 +145,19 @@ nix shell nixpkgs#wrangler -c wrangler login
 nix shell nixpkgs#wrangler -c wrangler kv namespace create harmion-backups
 # 表示された namespace id と account id を控える。
 
-# OAuth access token は1時間で切れる。script が refresh_token で更新するため、
-# wrangler の設定から初期 JSON を作る（以後は script が更新する）。
-OAUTH=$HOME/.config/.wrangler/config/default.toml
-ACCESS=$(sed -n 's/^oauth_token = "\(.*\)"/\1/p' "$OAUTH")
-REFRESH=$(sed -n 's/^refresh_token = "\(.*\)"/\1/p' "$OAUTH")
-EXPIRES=$(date -d "$(sed -n 's/^expiration_time = "\(.*\)"/\1/p' "$OAUTH")" +%s)
-jq -n --arg a "$ACCESS" --arg r "$REFRESH" --argjson e "$EXPIRES" \
-  '{access_token:$a,refresh_token:$r,expires_at:$e}' \
-  > "$HOME/.config/harmion/cf-oauth.json"
-chmod 600 "$HOME/.config/harmion/cf-oauth.json"
+# 推奨: KV 書き込み専用の Cloudflare API token を作り、0600 のファイルへ保存する。
+# Dashboard → My Profile → API Tokens → Create Custom Token
+#   Permissions: Account / Workers KV Storage / Edit
+#   Account Resources: 対象アカウント
+# token の値は argv や shell 履歴へ出さない（エディタで直接書く）。
+install -m 600 /dev/null "$HOME/.config/harmion/cloudflare-kv-token"
+# 例: editor "$HOME/.config/harmion/cloudflare-kv-token"
 
 cat > "$HOME/.config/harmion/backup.env" <<EOF
 HARMION_BACKUP_KEY=$HOME/.config/harmion/backup.key
 HARMION_BACKUP_KV=<namespace-id>
 CLOUDFLARE_ACCOUNT_ID=<account-id>
-HARMION_CF_OAUTH=$HOME/.config/harmion/cf-oauth.json
+HARMION_CF_TOKEN=$HOME/.config/harmion/cloudflare-kv-token
 EOF
 chmod 600 "$HOME/.config/harmion/backup.env"
 
@@ -170,13 +169,73 @@ systemctl --user start harmion-backup@main.service
 systemctl --user enable --now harmion-backup@main.timer
 ```
 
+`HARMION_CF_TOKEN` の代わりに `HARMION_CF_OAUTH`（access/refresh token の JSON）も
+使えるが、wrangler と同じ refresh token を共有すると OAuth のローテーション／再利用検知で
+家族ごと失効する。OAuth 経路を使う場合は wrangler と設定を共有しない。
+### 1Password CLI から KV token を読む
+
+PC 起動中で 1Password が unlock されている間だけ読む場合は、KV token を 1Password の
+API Credential item に保存し、`backup.env` に `op://` 参照を書く。`op` が使えないときは
+`HARMION_CF_TOKEN` ファイルへフォールバックする。
+
+- 1Password アプリ: Settings → Developer → **Integrate with 1Password CLI** を ON
+- `op` を PATH に置く（このリポジトリの dev shell か nix profile）
+- item の field を `op://Vault/Item/field` の形で指定する
+
+```sh
+cat >> "$HOME/.config/harmion/backup.env" <<'EOF'
+HARMION_CF_TOKEN_OP_REF=op://Private/Cloudflare-KV/credential
+EOF
+chmod 600 "$HOME/.config/harmion/backup.env"
+```
+参照は item ID からも取得できる。下の出力は field の label と reference だけで、
+secret の値は表示しない。
+
+```sh
+op item get xs5zpbkk5v3pgnu65rxmei7jfq --format json \
+  | jq -r '.fields[] | select(.reference) | [.label, .reference] | @tsv'
+```
+
+デスクトップアプリの item で field のメニューから **Copy Secret Reference** を選んでもよい。
+設定後、値は表示せずに成功だけ確認する。
+
+```sh
+op read "$HARMION_CF_TOKEN_OP_REF" >/dev/null && echo OK
+```
+
+日次の timer は画面ロック中に走ることがあり、`op` の**デスクトップアプリ連携は
+systemd の oneshot からは使えない**（接続が reset するか、unlock 待ちで止まる）。
+無人実行では、item だけを read できる service account を作り、その token を 0600
+ファイルへ置いて `HARMION_OP_SERVICE_ACCOUNT_TOKEN=/path/to/token` を設定する。
+service account token は、0600 の `backup.env` に **環境変数として直接**置いてもよい
+（`op` がそのまま読む。unit へ `Environment=` で直書きすると `systemctl cat`/`show` に
+出るため、`EnvironmentFile` に置く）。
+
+```sh
+cat >> "$HOME/.config/harmion/backup.env" <<'EOF'
+OP_SERVICE_ACCOUNT_TOKEN=ops_...
+EOF
+chmod 600 "$HOME/.config/harmion/backup.env"
+```
+
+ファイルパスを渡す `HARMION_OP_SERVICE_ACCOUNT_TOKEN=/path/to/token` でも同じように動く。
+どちらも使えない場合は `HARMION_CF_TOKEN` ファイルが最後のフォールバックになる。
+
+`HARMION_CF_TOKEN` の代わりに `HARMION_CF_OAUTH`（access/refresh token の JSON）も
+使えるが、wrangler と同じ refresh token を共有すると OAuth のローテーション／再利用検知で
+家族ごと失効する。OAuth 経路を使う場合は wrangler と設定を共有しない。
 `harmion-backup@main.service` は snapshot を作るだけで daemon を停止しない。
-timer は日次で動く。復元は **新しい Node ID** で行うため、次のように別 directory へ
+timer は日次で動く。アップロード後、同じ node の古い世代を `HARMION_BACKUP_KEEP`
+（既定 14）だけ残して削除する。暗号化後の archive が Workers KV の値上限
+（25 MiB）を超える場合は、アップロードせず失敗する。`curl` には接続・全体の
+timeout と再試行を設定し、unit にも `TimeoutStartSec` を設定している。
+復元は **新しい Node ID** で行うため、次のように別 directory へ
 展開して `restore` する。同じ Node ID のまま上書きしない。
 
 ```sh
 umask 077
-# 1. KV から最新の archive を取り出し、GPG で復号する
+# 1. KV から最新の archive を取り出し、GPG で復号する。
+#    オブジェクトの prefix は node directory 名（main なら main/）。
 KEY="main/$(wrangler kv key list --namespace-id "$HARMION_BACKUP_KV" --remote \
   | jq -r '.[].name' | sort | tail -1)"
 wrangler kv key get "$KEY" --namespace-id "$HARMION_BACKUP_KV" --remote \
@@ -191,12 +250,20 @@ tar -C "$HOME/.local/share/harmion-restore" -xf "$HOME/.local/share/harmion-back
 "$HOME/.local/bin/harmiond" restore "$HOME/.local/share/harmion-restore" \
   "$HOME/.local/share/harmion/restored"
 
-# 3. 別 terminal で復元先を起動し、identity・sync-status を確認する
+# 3. 所有者の credential は復元されない。daemon を止めたまま再登録する。
+#    R2 は owner-status が enforce=true のまま失敗する（fail closed）。
+"$HOME/.local/bin/harmiond" owner-enroll "$HOME/.local/share/harmion/restored" \
+  --ssh-key "$HOME/.ssh/id_ed25519.pub"
+
+# 4. 別 terminal で復元先を起動し、identity・owner-status・sync-status を確認する
 "$HOME/.local/bin/harmiond" run "$HOME/.local/share/harmion/restored" \
   --peer-transport https --sync-seconds 0
-# 4. 確認後に平文 tar と展開コピーを削除する
+# 5. 確認後に平文 tar と展開コピーを削除する
 rm -rf "$HOME/.local/share/harmion-restore" "$HOME/.local/share/harmion-backup.tar"
 ```
+
+復元演習の合否には `identity` だけでなく、`owner-status` の `enforce=true` と
+`audit_valid=true`、再登録した鍵での `owner-enroll`/`join` 成功を含める。
 
 復元演習は四半期に1回以上行い、復元先で `identity`・`sync-status` が読めることを確認する。
 GPG passphrase を失うとバックアップは復号できない。passphrase とノード鍵を同じ場所へ

@@ -301,10 +301,14 @@ target/debug/harmion --node ./node-a merge-plan CONTENT_ID TOKEN LEFT_VERSION RI
 
 ```sh
 target/debug/harmiond restore ./offline-backup ./restored-node
+# Owner credentials and policy do not cross the restore boundary. Re-enroll the
+# owner SSH key while the restored daemon is stopped; R2 stays fail-closed until
+# then (owner-status reports enforce=true with no credential).
+target/debug/harmiond owner-enroll ./restored-node --ssh-key ~/.ssh/id_ed25519.pub
 target/debug/harmiond run ./restored-node
 ```
 
-復元先は未作成のディレクトリを指定する。入力はノードディレクトリのバックアップ。復元するデータは、更新IDを維持した本文・属性・kind・競合・削除を含む受理済み履歴。資格情報、アプリ登録、同期カーソルと参加状態は新しいノードのものを使う。OAuthが必要なら新しいノードで設定する。
+復元先は未作成のディレクトリを指定する。入力はノードディレクトリのバックアップ。復元するデータは、更新IDを維持した本文・属性・kind・競合・削除を含む受理済み履歴。所有者のcredential・policy・監査チェーン、資格情報、アプリ登録、同期カーソルと参加状態は新しいノードのものを使う。復元直後は `owner_policy.enforce=true`・credential なしで起動するため、grant変更・参加・退役・Export・owner管理はすべて失敗する。`owner-enroll` で所有者鍵を登録してから再開する。OAuthが必要なら新しいノードで設定する。
 
 既存クラスタへは、有効なノードで `approve`、復元先で `join` してから `sync` する。この同期でバックアップにだけあった更新とクラスタ側にだけあった更新も突き合わせる。有効なノードが残っていない場合でもローカルのContentは復元できる。元クラスタへの再参加には有効な承認元が必要。
 

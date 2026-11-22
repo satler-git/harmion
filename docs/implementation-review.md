@@ -572,3 +572,25 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - `~/.ssh/config` の `IdentityAgent ~/.1password/agent.sock` を `ssh -G` で解決し、`ssh-add -L` と `ssh-keygen -Y sign` の両方に `SSH_AUTH_SOCK` として渡すようにした。`HARMION_SSH_AUTH_SOCK` で明示上書きもできる。
 - 既定の `SSH_AUTH_SOCK` がロックされた gpg-agent を向いていても、IdentityAgent が有効なら R2 署名が通る。`harmion export` を `SSH_AUTH_SOCK` 上書きなしで実行し、1Password 経由で成功することを確認した。
 - agent の列挙は2秒で打ち切り、R1 コマンドでは agent を触らない。R2 実行時だけ遅延検出する。
+
+### R64 — 独立セキュリティレビューで見つかった復元・バックアップ・承認表示の修正
+
+確認日: 2026-11-22。基準は `f8496b6`。コード読解による独立レビュー（認可、プロトコル/暗号、ネットワーク境界、保存/デプロイ、管理UI）で見つかった指摘のうち、コードで直せるものを修正した。
+
+- 復元の所有者境界: `restore_backup` は Content 履歴だけをコピーし、owner credential・policy・監査・membership を引き継がない。復元先を `owner_policy.enforce=true`・credential なしで起動し、R2 を fail closed にした。所有者は daemon 停止中の `harmiond owner-enroll` で鍵を再登録してから再開する。[復元](../crates/store-sqlite/src/lib.rs)・[owner](../crates/node/src/owner.rs)・[手順](linux-service.md#暗号化したオフサイトバックアップ)・[クイックスタート](native-quickstart.md#古いノードバックアップからの復元)
+- バックアップ: 保持世代の削除（`HARMION_BACKUP_KEEP`、既定14）、暗号化後サイズの 25 MiB 検査、`curl` の接続/全体 timeout と再試行、`TimeoutStartSec`、node 名 prefix、`mktemp` 直後の trap、credential の mode 検査を追加した。Cloudflare の bearer/refresh token は argv ではなく stdin/`--config -` で渡す。KV 専用 API token を 1Password CLI（`HARMION_CF_TOKEN_OP_REF`）または 0600 ファイル（`HARMION_CF_TOKEN`）から取得し、OAuth refresh token を wrangler と共有するとローテーション／再利用検知で家族ごと失効する問題を回避する。`op` は 30 秒で打ち切り、失敗時は token ファイルへフォールバックする。デスクトップアプリ連携は systemd oneshot からは接続できず（reset／unlock 待ち）、無人実行は item だけ読める service account token（`HARMION_OP_SERVICE_ACCOUNT_TOKEN`）か 0600 の `HARMION_CF_TOKEN` ファイルを使う。DB は `VACUUM INTO` で一貫するが、鍵・設定は後続コピーであり同時点ではないことを文書化した。[script](../deploy/backup/harmion-backup.sh)・[unit](../deploy/systemd/harmion-backup@.service)・[手順](linux-service.md#暗号化したオフサイトバックアップ)
+- Worker 配信 UI: Workers Assets は `_headers` を無視するため、Worker が `/`・`/index.html` の document を Assets binding から取得して返し、CSP・`frame-ancestors 'none'`・`nosniff`・`Referrer-Policy`・`Permissions-Policy` を付与する。ネイティブ管理サーバーと同じ CSP に揃えた。[worker](../deploy/cloudflare/src/worker.js)・[config](../deploy/cloudflare/wrangler.toml)
+- 端末承認の表示: `connect-approve` は接続IDだけでなく、app 名・redirect・web_origin・既存 client・要求 grant を端末プロンプトに出す。`connect-start` はプロセス内で 60 回/分に制限した。`/export` の出力先など自由文字列は端末プロンプトで1行に潰す。[admin API](../apps/admin/src/api.rs)・[server](../apps/admin/src/server.rs)・[connect](../crates/net-native/src/connect.rs)
+- Interpreter 承認: 承認済み Provider の manifest（schema・default_query）が変わったら `pending` に戻し、再承認を要求する。Superseded から pending へ戻すときも DB の status を更新する。[registry](../crates/node/src/interpreter/registry.rs)
+- 統合接続ヘルパー: 二重 `let encoded` による JavaScript SyntaxError を修正し、fragment の secret 消去と `postMessage` が動くようにした。Provider ticket は WebSocket upgrade 検証後に消費する。[oauth browser](../crates/net-native/src/oauth_browser.rs)
+- JSON: `serde_json::from_value` が予約キーを数値へ再分類する経路を塞ぐため、Provider 登録・call・接続 offer は予約マーカーを含む JSON を拒否する strict decode を使う。[json](../crates/protocol/src/json.rs)・[interpreter](../crates/protocol/src/interpreter.rs)
+- Worker outbound: challenge の `ChallengeError` は署名検証が成功した場合だけ Capacity 判定に使う。[outbound](../crates/worker/src/outbound.rs)
+- kind の追加で別アプリの Read 対象へ公開され得る挙動は、Content 全体への許可という仕様どおり意図したものと確認し、[仕様](specification.md#62-権限)へ明記した。実装は変更しない。
+- 既知の残り: 既存 OAuth client への接続要求は name/redirect の一致だけで束縛され、認証された client 証明を要求しない（承認画面の情報量で緩和）。`decode_app_json` の入れ子走査は深さ×サイズ、owner statement の `target`/`session` は authorize 時に照合しない、`VACUUM INTO` は文字列補間、起動時の search projection 検査は未実装。ヘルパーページのブラウザ実行試験は未追加。
+- 検証: `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --offline -- -D warnings`、`cargo test --workspace --offline`、`design_checks/restore_process.py`（復元後の R2 fail closed、owner-enroll、join を含む）、`connect_process.py`、`admin_process.py`、`two_process_sync.py` が成功した。復元後の R2 fail closed は `durability.rs` の回帰テストでも確認する。
+
+### R65 — オフサイトバックアップの実運用復旧（1Password service account）
+
+- 2026-11-22、失効した OAuth refresh token に代えて、1Password の service account token（item `xs5zpbkk5v3pgnu65rxmei7jfq` の `credential` を read-only で参照）を使う構成にした。`op read` はデスクトップアプリを経由せず、画面ロック中でも systemd oneshot から動く。
+- 実 `harmion-backup@main.service` を実行し、`main/20261122T110504Z.tar.gpg`（17,870 bytes）の KV アップロードと、既存3件＋新規1件の保持を確認した。timer は enabled、次回 00:31。
+- desktop app 連携は graphical session 依存で、oneshot からは `connection reset` または unlock 待ちになるため使わない。`HARMION_OP_SERVICE_ACCOUNT_TOKEN`（0600 ファイル）または `backup.env` の `OP_SERVICE_ACCOUNT_TOKEN` を使う。
