@@ -335,3 +335,353 @@ mod tests {
         );
     }
 }
+
+/// A `[[target|label]]` or `![[target|label]]` link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WikiLink {
+    pub target: String,
+    pub label: Option<String>,
+    pub embed: bool,
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// An `![provider(args)]` interpreter call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterpreterCall {
+    pub provider: String,
+    pub args: String,
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineItem {
+    pub level: u8,
+    pub title: String,
+    pub line: usize,
+}
+
+/// Links outside fenced code and inline code. Canonical fences contain no
+/// links, and ordinary code fences are literal text, so both are skipped.
+pub fn parse_links(doc: &str) -> Vec<WikiLink> {
+    let mut links = Vec::new();
+    let mut in_fence = None::<usize>;
+    let mut offset = 0usize;
+
+    for (line_index, line) in doc.split_inclusive('\n').enumerate() {
+        let line_no = line_index + 1;
+        if let Some(fence_len) = in_fence {
+            if is_closing_fence(line, fence_len) {
+                in_fence = None;
+            }
+            offset += line.len();
+            continue;
+        }
+        if let Some((fence_len, _)) = prefixed_fence(line).or_else(|| plain_fence(line)) {
+            in_fence = Some(fence_len);
+            offset += line.len();
+            continue;
+        }
+
+        let bytes = line.as_bytes();
+        let mut i = 0usize;
+        let mut code = false;
+        while i < bytes.len() {
+            if bytes[i] == b'`' {
+                code = !code;
+                i += 1;
+                continue;
+            }
+            if code {
+                i += 1;
+                continue;
+            }
+            let (embed, open_len) = if bytes[i..].starts_with(b"![[") {
+                (true, 3)
+            } else if bytes[i..].starts_with(b"[[") {
+                (false, 2)
+            } else {
+                i += 1;
+                continue;
+            };
+            let content_start = i + open_len;
+            let Some(close_rel) = line[content_start..].find("]]") else {
+                break;
+            };
+            let content_end = content_start + close_rel;
+            let content = &line[content_start..content_end];
+            let (target, label) = match content.split_once('|') {
+                Some((target, label)) => (target.trim(), Some(label.trim().to_owned())),
+                None => (content.trim(), None),
+            };
+            if !target.is_empty() {
+                links.push(WikiLink {
+                    target: target.to_owned(),
+                    label,
+                    embed,
+                    line: line_no,
+                    start: offset + i,
+                    end: offset + content_end + 2,
+                });
+            }
+            i = content_end + 2;
+        }
+        offset += line.len();
+    }
+    links
+}
+
+/// Interpreter calls outside fenced and inline code.
+pub fn parse_interpreter_calls(doc: &str) -> Vec<InterpreterCall> {
+    let mut calls = Vec::new();
+    let mut in_fence = None::<usize>;
+    let mut offset = 0usize;
+
+    for (line_index, line) in doc.split_inclusive('\n').enumerate() {
+        let line_no = line_index + 1;
+        if let Some(fence_len) = in_fence {
+            if is_closing_fence(line, fence_len) {
+                in_fence = None;
+            }
+            offset += line.len();
+            continue;
+        }
+        if let Some((fence_len, _)) = prefixed_fence(line).or_else(|| plain_fence(line)) {
+            in_fence = Some(fence_len);
+            offset += line.len();
+            continue;
+        }
+
+        let bytes = line.as_bytes();
+        let mut i = 0usize;
+        let mut code = false;
+        while i + 2 < bytes.len() {
+            if bytes[i] == b'`' {
+                code = !code;
+                i += 1;
+                continue;
+            }
+            if code || !bytes[i..].starts_with(b"![") || bytes.get(i + 2) == Some(&b'[') {
+                i += 1;
+                continue;
+            }
+            let Some(open_rel) = line[i + 2..].find('(') else {
+                i += 1;
+                continue;
+            };
+            let open = i + 2 + open_rel;
+            let Some(close_rel) = line[open + 1..].find(")]") else {
+                i += 1;
+                continue;
+            };
+            let close = open + 1 + close_rel;
+            let provider = line[i + 2..open].trim();
+            if !provider.is_empty()
+                && provider
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '.'))
+            {
+                calls.push(InterpreterCall {
+                    provider: provider.to_owned(),
+                    args: line[open + 1..close].trim().to_owned(),
+                    line: line_no,
+                    start: offset + i,
+                    end: offset + close + 2,
+                });
+            }
+            i = close + 2;
+        }
+        offset += line.len();
+    }
+    calls
+}
+
+/// Markdown headings outside code fences.
+pub fn outline(doc: &str) -> Vec<OutlineItem> {
+    let mut items = Vec::new();
+    let mut in_fence = None::<usize>;
+
+    for (line_index, line) in doc.split_inclusive('\n').enumerate() {
+        if let Some(fence_len) = in_fence {
+            if is_closing_fence(line, fence_len) {
+                in_fence = None;
+            }
+            continue;
+        }
+        if let Some((fence_len, _)) = prefixed_fence(line).or_else(|| plain_fence(line)) {
+            in_fence = Some(fence_len);
+            continue;
+        }
+        let trimmed = line.trim_start();
+        let level = trimmed.bytes().take_while(|b| *b == b'#').count();
+        if !(1..=6).contains(&level) {
+            continue;
+        }
+        let title = trimmed[level..].trim().trim_end_matches('#').trim();
+        if !title.is_empty() {
+            items.push(OutlineItem {
+                level: level as u8,
+                title: title.to_owned(),
+                line: line_index + 1,
+            });
+        }
+    }
+    items
+}
+
+/// A suggestion reached through a page that links to the current page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TwoHopLink {
+    pub via: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LinkIndex {
+    pub outgoing: std::collections::BTreeMap<String, Vec<String>>,
+    pub incoming: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl LinkIndex {
+    pub fn from_documents<I>(documents: I) -> Self
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        let mut index = Self::default();
+        for (id, body) in documents {
+            let mut seen = std::collections::BTreeSet::new();
+            for link in parse_links(&body) {
+                if !seen.insert(link.target.clone()) {
+                    continue;
+                }
+                index
+                    .outgoing
+                    .entry(id.clone())
+                    .or_default()
+                    .push(link.target.clone());
+                index
+                    .incoming
+                    .entry(link.target)
+                    .or_default()
+                    .push(id.clone());
+            }
+        }
+        index
+    }
+
+    pub fn backlinks(&self, id: &str) -> &[String] {
+        self.incoming.get(id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn outgoing_links(&self, id: &str) -> &[String] {
+        self.outgoing.get(id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Pages reachable from a backlink, excluding the page itself and its
+    /// direct neighbours. This is the "what should I read next" projection.
+    pub fn two_hop(&self, id: &str) -> Vec<TwoHopLink> {
+        let direct: std::collections::BTreeSet<&str> = self
+            .outgoing_links(id)
+            .iter()
+            .chain(self.backlinks(id).iter())
+            .map(String::as_str)
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for via in self.backlinks(id) {
+            for target in self.outgoing_links(via) {
+                if target == id || direct.contains(target.as_str()) {
+                    continue;
+                }
+                if seen.insert(target.clone()) {
+                    out.push(TwoHopLink {
+                        via: via.clone(),
+                        target: target.clone(),
+                    });
+                }
+            }
+        }
+        out
+    }
+}
+
+fn plain_fence(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    let backticks = trimmed.bytes().take_while(|b| *b == b'`').count();
+    if backticks < 3 {
+        return None;
+    }
+    Some((backticks, trimmed[backticks..].trim()))
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn parses_plain_and_embedded_links() {
+        let doc = "see [[p-home|家計]] and ![[journal]] and [[2026年の目標]]";
+        let links = parse_links(doc);
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].target, "p-home");
+        assert_eq!(links[0].label.as_deref(), Some("家計"));
+        assert!(links[1].embed);
+        assert_eq!(links[2].target, "2026年の目標");
+    }
+
+    #[test]
+    fn skips_links_in_code() {
+        let doc = "before [[a]]\n```rust\n[[not a link]]\n```\nafter [[b]]\n!```ledger\n[[also not]]\n```\n";
+        let links = parse_links(doc);
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| link.target.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+    }
+
+    #[test]
+    fn skips_inline_code_and_interpreter_calls() {
+        let doc = "`[[inline]]` [[real]] ![ledger/balance(query(before: 2026-11-16))]";
+        let links = parse_links(doc);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "real");
+        let calls = parse_interpreter_calls(doc);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "ledger/balance");
+        assert_eq!(calls[0].args, "query(before: 2026-11-16)");
+    }
+
+    #[test]
+    fn extracts_outline() {
+        let doc = "# 家計\n\n## 今月\n\n```rust\n# not heading\n```\n### 残高\n";
+        let items = outline(doc);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].title, "家計");
+        assert_eq!(items[1].level, 2);
+        assert_eq!(items[1].title, "今月");
+        assert_eq!(items[2].level, 3);
+        assert_eq!(items[2].title, "残高");
+    }
+
+    #[test]
+    fn indexes_backlinks_and_two_hop() {
+        let index = LinkIndex::from_documents([
+            ("a".to_owned(), "[[b]] [[c]]".to_owned()),
+            ("b".to_owned(), "[[c]] [[d]]".to_owned()),
+            ("c".to_owned(), "[[a]]".to_owned()),
+        ]);
+        assert_eq!(index.backlinks("c"), ["a", "b"]);
+        let hops = index.two_hop("c");
+        assert!(hops.iter().any(|hop| hop.via == "b" && hop.target == "d"));
+        assert!(
+            hops.iter()
+                .all(|hop| hop.target != "c" && hop.target != "a" && hop.target != "b")
+        );
+    }
+}

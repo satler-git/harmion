@@ -1711,6 +1711,7 @@ name = "harmion-wiki-server"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "harmion-wiki-core",
  "serde",
  "serde_json",
 ]

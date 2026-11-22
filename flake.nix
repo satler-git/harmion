@@ -61,6 +61,8 @@
               pkgs.pkg-config
               pkgs.fontconfig
               pkgs.freetype
+              pkgs.noto-fonts-cjk-sans
+              pkgs.jetbrains-mono
               pkgs.wayland
               pkgs.libxkbcommon
               pkgs.vulkan-loader
@@ -80,6 +82,16 @@
             ];
             shellHook = ''
               echo "harmion dev shell: $(rustc --version), node $(node --version), $(python3 --version)"
+              # wgpu and AntiWebUI load Vulkan/EGL at runtime. NixOS puts the
+              # drivers in /run/opengl-driver, outside the default loader
+              # search path of a dev shell.
+              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader pkgs.libglvnd pkgs.mesa ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              export XDG_DATA_DIRS="/run/opengl-driver/share''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+              if [ -f /run/opengl-driver/share/glvnd/egl_vendor.d/50_mesa.json ]; then
+                export __EGL_VENDOR_LIBRARY_FILENAMES="/run/opengl-driver/share/glvnd/egl_vendor.d/50_mesa.json''${__EGL_VENDOR_LIBRARY_FILENAMES:+:$__EGL_VENDOR_LIBRARY_FILENAMES}"
+              fi
+              export WIKI_SANS_FONT="${pkgs.noto-fonts-cjk-sans}/share/fonts/opentype/noto-cjk/NotoSansCJK-VF.otf.ttc"
+              export WIKI_MONO_FONT="${pkgs.jetbrains-mono}/share/fonts/opentype/JetBrainsMono-Regular.otf"
             '';
           };
         }
