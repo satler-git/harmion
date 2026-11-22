@@ -299,3 +299,49 @@ vim.api.nvim_create_user_command("WikiLspStart", lsp_start, {})
 vim.api.nvim_create_user_command("WikiSave", function()
   vim.cmd("write")
 end, {})
+
+-- Quickfix entries and LSP locations use `wiki://<id>`. Without this handler
+-- Neovim would try to open a real file with that name.
+vim.api.nvim_create_autocmd("BufReadCmd", {
+  pattern = "wiki://*",
+  callback = function(args)
+    local uri = vim.api.nvim_buf_get_name(args.buf)
+    local id = uri:match("^wiki://(.+)$")
+    if not id then
+      return
+    end
+    local ok, content = pcall(run, { "open", id })
+    if not ok then
+      vim.notify("wiki: cannot open " .. uri .. ": " .. tostring(content), vim.log.levels.ERROR)
+      vim.bo[args.buf].buftype = "nofile"
+      return
+    end
+    vim.bo[args.buf].buftype = "acwrite"
+    vim.bo[args.buf].swapfile = true
+    vim.api.nvim_buf_set_lines(args.buf, 0, -1, false, body_to_lines(content.body))
+    set_metadata(args.buf, content)
+    vim.bo[args.buf].modified = false
+    vim.api.nvim_create_autocmd("BufWriteCmd", {
+      buffer = args.buf,
+      callback = function()
+        local body = lines_to_body(args.buf)
+        local argv = { "save", content.id, "--rev", tostring(vim.b[args.buf].wiki_rev) }
+        if vim.b[args.buf].wiki_type == "page" then
+          table.insert(argv, "--auto-convert")
+        end
+        local saved_ok, response = pcall(run, argv, body)
+        if not saved_ok then
+          vim.notify("wiki: save failed: " .. tostring(response), vim.log.levels.ERROR)
+          return
+        end
+        local saved = response.page or response
+        vim.api.nvim_buf_set_var(args.buf, "wiki_rev", saved.rev)
+        if saved.body and saved.body ~= body then
+          vim.api.nvim_buf_set_lines(args.buf, 0, -1, false, body_to_lines(saved.body))
+        end
+        vim.bo[args.buf].modified = false
+      end,
+    })
+    lsp_start()
+  end,
+})
