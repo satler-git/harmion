@@ -1,4 +1,18 @@
-use std::collections::BTreeSet;
+//! Wiki local-first JSON-RPC server.
+//!
+//! One JSON object per newline over a Unix socket. The M0 methods (`list`,
+//! `open`, `workspace`, `search`, `save`) keep their request/response shapes;
+//! M1/M3 adds persistence and the `status`, `create_page`, `create_snippet`,
+//! `convert_fence`, `delete`, `transclude`, `export` and `conflicts` methods.
+
+mod backend;
+mod error;
+mod export;
+mod model;
+mod slug;
+mod store;
+mod transclude;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -7,19 +21,19 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use clap::{Parser, Subcommand};
-use harmion_wiki_core::{LinkIndex, outline, parse_links, scan_embedded_blocks};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
+use error::{
+    RpcError, RpcResult, optional_bool, optional_str, optional_str_array, optional_u64,
+    required_str, required_u64,
+};
+use store::{FenceSelection, State};
+
 const SOCKET_DEFAULT: &str = "/tmp/harmion-wiki-m0.sock";
-const JOURNAL_ID: &str = "3f2a9c1e00000000000000000000000000000000000000000000000000000001";
-const BUDGET_ID: &str = "3f2a9c1e00000000000000000000000000000000000000000000000000000002";
-const MONTHLY_ID: &str = "3f2a9c1e00000000000000000000000000000000000000000000000000000003";
-const CREDIT_ID: &str = "3f2a9c1e00000000000000000000000000000000000000000000000000000004";
-const POWER_ID: &str = "3f2a9c1e00000000000000000000000000000000000000000000000000000005";
 
 #[derive(Debug, Parser)]
-#[command(name = "wiki-server", about = "Wiki local JSON-RPC server")]
+#[command(name = "wiki-server", about = "Wiki local-first JSON-RPC server")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -27,9 +41,18 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Serve the Unix-socket JSON-RPC endpoint.
     Serve {
         #[arg(long, default_value = SOCKET_DEFAULT)]
         socket: PathBuf,
+        /// Persist all Contents to this JSON file (atomic, mode 0600).
+        /// Omit for an in-memory server seeded with fixtures.
+        #[arg(long, conflicts_with = "node")]
+        data: Option<PathBuf>,
+        /// Dev-only: load a read snapshot of `kind=wiki` Contents from a real
+        /// node directory (requires connection.json + admin.secret).
+        #[arg(long, conflicts_with = "data")]
+        node: Option<PathBuf>,
     },
     List {
         #[arg(long, default_value = SOCKET_DEFAULT)]
@@ -57,468 +80,79 @@ enum Command {
         #[arg(long, default_value = SOCKET_DEFAULT)]
         socket: PathBuf,
     },
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Content {
-    id: String,
-    #[serde(rename = "type")]
-    content_type: String,
-    title: String,
-    body: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    language: Option<String>,
-    kinds: Vec<String>,
-    rev: u64,
-    created: String,
-    updated_at: i64,
-    updated_label: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Summary {
-    id: String,
-    #[serde(rename = "type")]
-    content_type: String,
-    title: String,
-    format: Option<String>,
-    language: Option<String>,
-    kinds: Vec<String>,
-    rev: u64,
-    updated_label: String,
-    excerpt: String,
-}
-
-impl From<&Content> for Summary {
-    fn from(content: &Content) -> Self {
-        Self {
-            id: content.id.clone(),
-            content_type: content.content_type.clone(),
-            title: content.title.clone(),
-            format: content.format.clone(),
-            language: content.language.clone(),
-            kinds: content.kinds.clone(),
-            rev: content.rev,
-            updated_label: content.updated_label.clone(),
-            excerpt: excerpt(&content.body),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OutlineView {
-    level: u8,
-    title: String,
-    line: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct TwoHopView {
-    via: Summary,
-    target: Summary,
-    reason: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct LinksView {
-    outgoing: Vec<Summary>,
-    backlinks: Vec<Summary>,
-    two_hop: Vec<TwoHopView>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PageInfo {
-    created: String,
-    updated: String,
-    word_count: usize,
-    tags: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Workspace {
-    page: Content,
-    before: Vec<String>,
-    after: Vec<String>,
-    snippet: Option<Content>,
-    outline: Vec<OutlineView>,
-    links: LinksView,
-    related: Vec<Summary>,
-    recent: Vec<Summary>,
-    info: PageInfo,
-}
-
-#[derive(Debug)]
-struct State {
-    contents: std::collections::BTreeMap<String, Content>,
-}
-
-impl State {
-    fn fixtures() -> Self {
-        let mut contents = std::collections::BTreeMap::new();
-        let mut add = |content: Content| {
-            contents.insert(content.id.clone(), content);
-        };
-
-        add(Content {
-            id: "p-home".to_owned(),
-            content_type: "page".to_owned(),
-            title: "家計の記録".to_owned(),
-            body: format!(
-                "# 家計の記録\n\n毎月の支出を hledger のジャーナルで管理している。\n\n## 買い物ジャーナル\n\n!```hledger|ledger,free||{JOURNAL_ID}\n```\n\n## 今月の残高\n\n固定費の見直しは月1回、日曜日にまとめて行う。\n\n## 固定費の見直し\n\n関連: [[p-goals|2026年の目標]] [[p-receipts|レシート処理]] [[p-fixed|固定費の見直し]]\n"
-            ),
-            format: None,
-            language: None,
-            kinds: vec!["wiki".to_owned(), "ledger".to_owned()],
-            rev: 1,
-            created: "2026-10-02".to_owned(),
-            updated_at: 202611221431,
-            updated_label: "14:31".to_owned(),
-        });
-        add(Content {
-            id: "p-goals".to_owned(),
-            content_type: "page".to_owned(),
-            title: "2026年の目標".to_owned(),
-            body: "# 2026年の目標\n\n家計の記録を毎週見直す。\n\n## 固定費\n\n- [[p-home|家計の記録]]\n- [[p-fixed|固定費の見直し]]\n- [[p-review|月次レビュー]]\n- [[p-reading|読書ノート]]\n- [[p-savings|貯金の目標]]\n".to_owned(),
-            format: None,
-            language: None,
-            kinds: vec!["wiki".to_owned(), "ledger".to_owned()],
-            rev: 1,
-            created: "2026-10-03".to_owned(),
-            updated_at: 202611211800,
-            updated_label: "昨日".to_owned(),
-        });
-        add(Content {
-            id: "p-receipts".to_owned(),
-            content_type: "page".to_owned(),
-            title: "レシート処理".to_owned(),
-            body: "# レシート処理\n\nレシートは週末にまとめて処理する。\n\n## 支払い方法\n\n- [[p-home|家計の記録]]\n- [[p-fixed|固定費の見直し]]\n- [[p-credit|クレジットカード]]\n- [[p-emoney|電子マネー]]\n- [[p-returns|返品・交換]]\n".to_owned(),
-            format: None,
-            language: None,
-            kinds: vec!["wiki".to_owned(), "ledger".to_owned()],
-            rev: 1,
-            created: "2026-10-05".to_owned(),
-            updated_at: 202611201200,
-            updated_label: "11/20".to_owned(),
-        });
-        add(Content {
-            id: "p-fixed".to_owned(),
-            content_type: "page".to_owned(),
-            title: "固定費の見直し".to_owned(),
-            body: "# 固定費の見直し\n\n毎月の固定費を一覧にする。\n\n## 内訳\n\n- [[p-home|家計の記録]]\n- [[p-goals|2026年の目標]]\n- [[p-electricity|電気代]]\n- [[p-gas|ガス代]]\n- [[p-rent|家賃]]\n- [[p-phone|通信費]]\n- [[p-sub|サブスク]]\n".to_owned(),
-            format: None,
-            language: None,
-            kinds: vec!["wiki".to_owned(), "ledger".to_owned()],
-            rev: 1,
-            created: "2026-10-06".to_owned(),
-            updated_at: 202611191100,
-            updated_label: "11/19".to_owned(),
-        });
-        add(Content {
-            id: "p-review".to_owned(),
-            content_type: "page".to_owned(),
-            title: "月次レビュー".to_owned(),
-            body: "# 月次レビュー\n\n1か月の支出を振り返り、翌月の予算を決める。\n\n- [[p-home|家計の記録]]\n- [[p-goals|2026年の目標]]\n".to_owned(),
-            format: None,
-            language: None,
-            kinds: vec!["wiki".to_owned(), "ledger".to_owned()],
-            rev: 1,
-            created: "2026-10-10".to_owned(),
-            updated_at: 202611201900,
-            updated_label: "11/20".to_owned(),
-        });
-        add(Content {
-            id: "p-reading".to_owned(),
-            content_type: "page".to_owned(),
-            title: "読書ノート".to_owned(),
-            body: "# 読書ノート\n\n読んだ本の要点を残す。\n\n## 最近の本\n\n- [[p-goals|2026年の目標]]\n- [[p-rust|Rustのメモ]]\n".to_owned(),
-            format: None,
-            language: None,
-            kinds: vec!["wiki".to_owned(), "note".to_owned()],
-            rev: 1,
-            created: "2026-10-12".to_owned(),
-            updated_at: 202611182000,
-            updated_label: "昨日".to_owned(),
-        });
-        add(Content {
-            id: "p-rust".to_owned(),
-            content_type: "page".to_owned(),
-            title: "Rustのメモ".to_owned(),
-            body: "# Rustのメモ\n\n所有権と借用のメモ。\n\n```rust\nfn main() {\n    let s = String::from(\"hello\");\n    println!(\"{s}\");\n}\n```\n\n- [[p-reading|読書ノート]]\n".to_owned(),
-            format: None,
-            language: None,
-            kinds: vec!["wiki".to_owned(), "code".to_owned()],
-            rev: 1,
-            created: "2026-10-15".to_owned(),
-            updated_at: 202611171500,
-            updated_label: "11/17".to_owned(),
-        });
-        for (id, title, updated_at, updated_label) in [
-            ("p-credit", "クレジットカード", 202611191500, "11/19"),
-            ("p-emoney", "電子マネー", 202611171300, "11/17"),
-            ("p-returns", "返品・交換", 202611101000, "11/10"),
-            ("p-electricity", "電気代", 202611161200, "11/16"),
-            ("p-gas", "ガス代", 202611161100, "11/16"),
-            ("p-rent", "家賃", 202610281000, "10/28"),
-            ("p-phone", "通信費", 202611051000, "11/05"),
-            ("p-sub", "サブスク", 202611141000, "11/14"),
-            ("p-savings", "貯金の目標", 202610301000, "10/30"),
-        ] {
-            let parent = if id == "p-credit" || id == "p-emoney" || id == "p-returns" {
-                "p-receipts"
-            } else if id == "p-savings" {
-                "p-goals"
-            } else {
-                "p-fixed"
-            };
-            add(Content {
-                id: id.to_owned(),
-                content_type: "page".to_owned(),
-                title: title.to_owned(),
-                body: format!(
-                    "# {title}\n\n{title}のメモ。\n\n- [[{parent}|関連ページ]]\n- [[p-home|家計の記録]]\n"
-                ),
-                format: None,
-                language: None,
-                kinds: vec!["wiki".to_owned(), "ledger".to_owned()],
-                rev: 1,
-                created: "2026-10-20".to_owned(),
-                updated_at,
-                updated_label: updated_label.to_owned(),
-            });
-        }
-        add(Content {
-            id: JOURNAL_ID.to_owned(),
-            content_type: "snippet".to_owned(),
-            title: "買い物ジャーナル".to_owned(),
-            body: "2026-11-16 * 買い物\n    支出:食費   1,200 JPY\n    資産:現金  -1,200 JPY\n\n2026-11-17 * 電車\n    支出:交通     420 JPY\n    資産:現金    -420 JPY\n".to_owned(),
-            format: Some("hledger".to_owned()),
-            language: Some("ledger".to_owned()),
-            kinds: vec!["wiki".to_owned(), "ledger".to_owned(), "free".to_owned()],
-            rev: 1,
-            created: "2026-10-02".to_owned(),
-            updated_at: 202611221431,
-            updated_label: "14:31".to_owned(),
-        });
-        for (id, title, body, kinds, updated_at, updated_label) in [
-            (
-                BUDGET_ID,
-                "予算クエリ",
-                "2026-11-01 * 予算\n    支出:食費   30,000 JPY\n",
-                vec!["wiki", "ledger"],
-                202611181000,
-                "11/18",
-            ),
-            (
-                MONTHLY_ID,
-                "月次サマリ",
-                "2026-10-31 * 集計\n    支出:合計  82,400 JPY\n",
-                vec!["wiki", "ledger"],
-                202610311000,
-                "10/31",
-            ),
-            (
-                CREDIT_ID,
-                "カード明細",
-                "2026-11-19 * カード\n    支出:通信費  4,200 JPY\n",
-                vec!["wiki", "ledger"],
-                202611191500,
-                "11/19",
-            ),
-            (
-                POWER_ID,
-                "電気代",
-                "2026-11-16 * 電気\n    支出:電気代  6,800 JPY\n",
-                vec!["wiki", "ledger"],
-                202611161200,
-                "11/16",
-            ),
-        ] {
-            add(Content {
-                id: id.to_owned(),
-                content_type: "snippet".to_owned(),
-                title: title.to_owned(),
-                body: body.to_owned(),
-                format: Some("hledger".to_owned()),
-                language: Some("ledger".to_owned()),
-                kinds: kinds.into_iter().map(str::to_owned).collect(),
-                rev: 1,
-                created: "2026-10-02".to_owned(),
-                updated_at,
-                updated_label: updated_label.to_owned(),
-            });
-        }
-        Self { contents }
-    }
-
-    fn resolve(&self, target: &str) -> Option<&Content> {
-        self.contents.get(target).or_else(|| {
-            self.contents
-                .values()
-                .find(|content| content.title == target)
-        })
-    }
-
-    fn workspace(&self, id: &str) -> Option<Workspace> {
-        let page = self.contents.get(id)?.clone();
-        let block = scan_embedded_blocks(&page.body)
-            .ok()?
-            .into_iter()
-            .find(|block| block.spec.id.is_some());
-        let (before, after, snippet) = match block {
-            Some(block) => {
-                let before = clean_lines(&page.body[..block.start]);
-                let after = clean_lines(&page.body[block.end..]);
-                let snippet = block
-                    .spec
-                    .id
-                    .as_deref()
-                    .and_then(|id| self.contents.get(id))
-                    .cloned();
-                (before, after, snippet)
-            }
-            None => (clean_lines(&page.body), Vec::new(), None),
-        };
-
-        let index = LinkIndex::from_documents(
-            self.contents
-                .iter()
-                .map(|(id, content)| (id.clone(), content.body.clone())),
-        );
-        let outgoing = parse_links(&page.body)
-            .into_iter()
-            .filter(|link| !link.embed)
-            .filter_map(|link| self.resolve(&link.target).map(Summary::from))
-            .collect::<Vec<_>>();
-        let backlinks = index
-            .backlinks(id)
-            .iter()
-            .filter_map(|id| self.contents.get(id).map(Summary::from))
-            .collect::<Vec<_>>();
-        let two_hop = index
-            .two_hop(id)
-            .into_iter()
-            .filter_map(|hop| {
-                let via = self.contents.get(&hop.via)?;
-                let target = self.contents.get(&hop.target)?;
-                Some(TwoHopView {
-                    via: Summary::from(via),
-                    target: Summary::from(target),
-                    reason: excerpt(&target.body),
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let outline = outline(&page.body)
-            .into_iter()
-            .map(|item| OutlineView {
-                level: item.level,
-                title: item.title,
-                line: item.line,
-            })
-            .collect::<Vec<_>>();
-        let page_kinds = page.kinds.iter().cloned().collect::<BTreeSet<_>>();
-        let related = self
-            .contents
-            .values()
-            .filter(|content| {
-                content.content_type == "snippet"
-                    && Some(&content.id) != snippet.as_ref().map(|snippet| &snippet.id)
-                    && content
-                        .kinds
-                        .iter()
-                        .any(|kind| kind != "wiki" && page_kinds.contains(kind))
-            })
-            .map(Summary::from)
-            .collect::<Vec<_>>();
-        let mut recent = self
-            .contents
-            .values()
-            .map(Summary::from)
-            .collect::<Vec<_>>();
-        recent.sort_by(|a, b| b.updated_label.cmp(&a.updated_label));
-        recent.truncate(8);
-
-        let tags = page
-            .kinds
-            .iter()
-            .filter(|kind| kind.as_str() != "wiki")
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
-        Some(Workspace {
-            before,
-            after,
-            snippet,
-            outline,
-            links: LinksView {
-                outgoing,
-                backlinks,
-                two_hop,
-            },
-            related,
-            recent,
-            info: PageInfo {
-                created: page.created.clone(),
-                updated: page.updated_label.clone(),
-                word_count: page.body.split_whitespace().count(),
-                tags,
-            },
-            page,
-        })
-    }
-
-    fn search(&self, query: &str) -> Vec<Summary> {
-        let query = query.to_lowercase();
-        self.contents
-            .values()
-            .filter(|content| {
-                content.title.to_lowercase().contains(&query)
-                    || content.body.to_lowercase().contains(&query)
-            })
-            .map(Summary::from)
-            .take(20)
-            .collect()
-    }
-}
-
-fn clean_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| {
-            !line.is_empty()
-                && !line.starts_with('#')
-                && !line.starts_with("!```")
-                && !line.starts_with("```")
-                && !line.starts_with("関連:")
-        })
-        .map(str::to_owned)
-        .collect()
-}
-
-fn excerpt(body: &str) -> String {
-    let line = clean_lines(body).into_iter().next().unwrap_or_default();
-    let mut chars = line.chars();
-    let excerpt = chars.by_ref().take(80).collect::<String>();
-    if chars.next().is_some() {
-        format!("{excerpt}…")
-    } else {
-        excerpt
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct Request {
-    id: u64,
-    method: String,
-    #[serde(default)]
-    params: Value,
+    Status {
+        #[arg(long, default_value = SOCKET_DEFAULT)]
+        socket: PathBuf,
+    },
+    Conflicts {
+        id: String,
+        #[arg(long, default_value = SOCKET_DEFAULT)]
+        socket: PathBuf,
+    },
+    Transclude {
+        id: String,
+        #[arg(long, default_value_t = 1)]
+        depth: u32,
+        #[arg(long, default_value = SOCKET_DEFAULT)]
+        socket: PathBuf,
+    },
+    Export {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        raw: bool,
+        #[arg(long, default_value = SOCKET_DEFAULT)]
+        socket: PathBuf,
+    },
+    /// Create a page; the body is read from stdin.
+    #[command(name = "create_page")]
+    CreatePage {
+        title: String,
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        aliases: Vec<String>,
+        #[arg(long, default_value = SOCKET_DEFAULT)]
+        socket: PathBuf,
+    },
+    /// Create a snippet; the body is read from stdin.
+    #[command(name = "create_snippet")]
+    CreateSnippet {
+        title: String,
+        #[arg(long)]
+        format: Option<String>,
+        #[arg(long)]
+        language: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        kinds: Vec<String>,
+        #[arg(long, default_value = SOCKET_DEFAULT)]
+        socket: PathBuf,
+    },
+    /// Convert one loose `!` fenced block into a snippet + canonical host body.
+    #[command(name = "convert_fence")]
+    ConvertFence {
+        page_id: String,
+        #[arg(long, conflicts_with_all = ["start", "end"])]
+        fence_index: Option<u64>,
+        #[arg(long, requires = "end", conflicts_with = "fence_index")]
+        start: Option<u64>,
+        #[arg(long, requires = "start", conflicts_with = "fence_index")]
+        end: Option<u64>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, default_value = SOCKET_DEFAULT)]
+        socket: PathBuf,
+    },
+    Delete {
+        id: String,
+        #[arg(long, default_value = SOCKET_DEFAULT)]
+        socket: PathBuf,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
-        Command::Serve { socket } => serve(&socket),
+        Command::Serve { socket, data, node } => serve(&socket, data, node),
         Command::List { socket } => print_call(&socket, "list", json!({})),
         Command::Open { id, socket } => print_call(&socket, "open", json!({ "id": id })),
         Command::Workspace { id, socket } => print_call(&socket, "workspace", json!({ "id": id })),
@@ -526,15 +160,84 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print_call(&socket, "search", json!({ "query": query }))
         }
         Command::Save { id, rev, socket } => {
-            let mut body = String::new();
-            std::io::stdin().read_to_string(&mut body)?;
+            let body = read_stdin_body()?;
             print_call(
                 &socket,
                 "save",
                 json!({ "id": id, "rev": rev, "body": body }),
             )
         }
+        Command::Status { socket } => print_call(&socket, "status", json!({})),
+        Command::Conflicts { id, socket } => print_call(&socket, "conflicts", json!({ "id": id })),
+        Command::Transclude { id, depth, socket } => {
+            print_call(&socket, "transclude", json!({ "id": id, "depth": depth }))
+        }
+        Command::Export { dir, raw, socket } => print_call(
+            &socket,
+            "export",
+            json!({ "dir": dir.map(|dir| dir.display().to_string()), "raw": raw }),
+        ),
+        Command::CreatePage {
+            title,
+            tags,
+            aliases,
+            socket,
+        } => {
+            let body = read_stdin_body()?;
+            print_call(
+                &socket,
+                "create_page",
+                json!({ "title": title, "body": body, "tags": tags, "aliases": aliases }),
+            )
+        }
+        Command::CreateSnippet {
+            title,
+            format,
+            language,
+            kinds,
+            socket,
+        } => {
+            let body = read_stdin_body()?;
+            print_call(
+                &socket,
+                "create_snippet",
+                json!({
+                    "title": title,
+                    "body": body,
+                    "format": format,
+                    "language": language,
+                    "kinds": kinds,
+                }),
+            )
+        }
+        Command::ConvertFence {
+            page_id,
+            fence_index,
+            start,
+            end,
+            title,
+            socket,
+        } => print_call(
+            &socket,
+            "convert_fence",
+            json!({
+                "page_id": page_id,
+                "fence_index": fence_index,
+                "start": start,
+                "end": end,
+                "title": title,
+            }),
+        ),
+        Command::Delete { id, socket } => print_call(&socket, "delete", json!({ "id": id })),
     }
+}
+
+/// Read the whole body from stdin exactly once. Split out so `save` and the
+/// create commands cannot accidentally consume stdin twice.
+fn read_stdin_body() -> std::io::Result<String> {
+    let mut body = String::new();
+    std::io::stdin().read_to_string(&mut body)?;
+    Ok(body)
 }
 
 fn print_call(
@@ -547,11 +250,32 @@ fn print_call(
     Ok(())
 }
 
-fn serve(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn serve(
+    path: &Path,
+    data: Option<PathBuf>,
+    node: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state = match node {
+        Some(dir) => State::open_node(dir),
+        None => State::load(data),
+    }
+    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    let status = state.status();
     let _ = fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
-    eprintln!("wiki-server listening on {}", path.display());
-    let state = Arc::new(Mutex::new(State::fixtures()));
+    // The local IPC endpoint carries the same data as the store; keep it
+    // owner-only even when the process umask is permissive.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    eprintln!(
+        "wiki-server listening on {} (backend={}, persistence={})",
+        path.display(),
+        status["backend"].as_str().unwrap_or("?"),
+        status["persistence"].as_str().unwrap_or("-")
+    );
+    let state = Arc::new(Mutex::new(state));
 
     for stream in listener.incoming() {
         let stream = match stream {
@@ -569,6 +293,14 @@ fn serve(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct Request {
+    id: u64,
+    method: String,
+    #[serde(default)]
+    params: Value,
 }
 
 fn handle_client(mut stream: UnixStream, state: Arc<Mutex<State>>) -> std::io::Result<()> {
@@ -594,73 +326,141 @@ fn handle_client(mut stream: UnixStream, state: Arc<Mutex<State>>) -> std::io::R
 }
 
 fn dispatch(state: &Arc<Mutex<State>>, request: Request) -> Value {
-    let result: Result<Value, (u16, String)> = match request.method.as_str() {
+    let request_id = request.id;
+    let result = dispatch_result(state, &request);
+    match result {
+        Ok(result) => json!({ "id": request_id, "result": result }),
+        Err(error) => error.to_json(request_id),
+    }
+}
+
+fn dispatch_result(state: &Arc<Mutex<State>>, request: &Request) -> RpcResult<Value> {
+    let params = &request.params;
+    match request.method.as_str() {
         "list" => {
+            let filter = optional_str(params, "type")?;
             let state = state.lock().expect("state lock");
-            let mut items = state
-                .contents
-                .values()
-                .map(Summary::from)
-                .collect::<Vec<_>>();
-            items.sort_by(|a, b| b.updated_label.cmp(&a.updated_label));
+            let mut items = state.list();
+            if let Some(filter) = filter {
+                items.retain(|item| item.content_type == filter);
+            }
             Ok(json!({ "items": items }))
         }
         "open" => {
-            let id = request.params.get("id").and_then(Value::as_str);
-            match id.and_then(|id| state.lock().expect("state lock").contents.get(id).cloned()) {
-                Some(content) => Ok(serde_json::to_value(content).expect("content serializes")),
-                None => Err((404, "content not found".to_owned())),
-            }
+            let id = required_str(params, "id")?;
+            let state = state.lock().expect("state lock");
+            Ok(serde_json::to_value(state.open(&id)?).expect("content serializes"))
         }
         "workspace" => {
-            let id = request.params.get("id").and_then(Value::as_str);
-            match id.and_then(|id| state.lock().expect("state lock").workspace(id)) {
-                Some(workspace) => {
-                    Ok(serde_json::to_value(workspace).expect("workspace serializes"))
-                }
-                None => Err((404, "content not found".to_owned())),
-            }
+            let id = required_str(params, "id")?;
+            let state = state.lock().expect("state lock");
+            Ok(serde_json::to_value(state.workspace(&id)?).expect("workspace serializes"))
         }
         "search" => {
-            let query = request
-                .params
-                .get("query")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let query = optional_str(params, "query")?.unwrap_or_default();
             let state = state.lock().expect("state lock");
-            Ok(json!({ "items": state.search(query) }))
+            Ok(json!({ "items": state.search(&query) }))
         }
         "save" => {
-            let id = request.params.get("id").and_then(Value::as_str);
-            let rev = request.params.get("rev").and_then(Value::as_u64);
-            let body = request.params.get("body").and_then(Value::as_str);
-            match (id, rev, body) {
-                (Some(id), Some(rev), Some(body)) => {
-                    let mut state = state.lock().expect("state lock");
-                    match state.contents.get_mut(id) {
-                        Some(content) if content.rev == rev => {
-                            content.body = body.to_owned();
-                            content.rev += 1;
-                            content.updated_label = "たった今".to_owned();
-                            content.updated_at += 1;
-                            Ok(serde_json::to_value(content.clone()).expect("content serializes"))
-                        }
-                        Some(_) => Err((409, "revision mismatch".to_owned())),
-                        None => Err((404, "content not found".to_owned())),
-                    }
-                }
-                _ => Err((400, "save requires id, rev and body".to_owned())),
-            }
+            let id = required_str(params, "id")?;
+            let rev = required_u64(params, "rev")?;
+            let body = required_str(params, "body")?;
+            let mut state = state.lock().expect("state lock");
+            Ok(serde_json::to_value(state.save(&id, rev, body)?).expect("content serializes"))
         }
-        other => Err((404, format!("unknown method {other}"))),
-    };
-
-    match result {
-        Ok(result) => json!({ "id": request.id, "result": result }),
-        Err((code, message)) => json!({
-            "id": request.id,
-            "error": { "code": code, "message": message }
-        }),
+        "status" => {
+            let state = state.lock().expect("state lock");
+            Ok(state.status())
+        }
+        "create_page" => {
+            let title = required_str(params, "title")?;
+            let body = required_str(params, "body")?;
+            let tags = optional_str_array(params, "tags")?;
+            let aliases = optional_str_array(params, "aliases")?;
+            let mut state = state.lock().expect("state lock");
+            Ok(
+                serde_json::to_value(state.create_page(&title, body, tags, aliases)?)
+                    .expect("content serializes"),
+            )
+        }
+        "create_snippet" => {
+            let title = required_str(params, "title")?;
+            let body = required_str(params, "body")?;
+            let format = optional_str(params, "format")?;
+            let language = optional_str(params, "language")?;
+            let kinds = optional_str_array(params, "kinds")?;
+            let mut state = state.lock().expect("state lock");
+            Ok(
+                serde_json::to_value(state.create_snippet(&title, body, format, language, kinds)?)
+                    .expect("content serializes"),
+            )
+        }
+        "convert_fence" => {
+            let page_id = required_str(params, "page_id")?;
+            let fence_index = optional_u64(params, "fence_index")?;
+            let start = optional_u64(params, "start")?;
+            let end = optional_u64(params, "end")?;
+            let selection = match (fence_index, start, end) {
+                (Some(_), _, _) => {
+                    if start.is_some() || end.is_some() {
+                        return Err(RpcError::bad_request(
+                            "use either fence_index or start+end, not both",
+                        ));
+                    }
+                    FenceSelection::Index(
+                        usize::try_from(fence_index.unwrap())
+                            .map_err(|_| RpcError::bad_request("fence_index is out of range"))?,
+                    )
+                }
+                (None, Some(start), Some(end)) => FenceSelection::Span {
+                    start: usize::try_from(start)
+                        .map_err(|_| RpcError::bad_request("start is out of range"))?,
+                    end: usize::try_from(end)
+                        .map_err(|_| RpcError::bad_request("end is out of range"))?,
+                },
+                (None, None, None) => {
+                    return Err(RpcError::bad_request(
+                        "convert_fence requires fence_index or start+end",
+                    ));
+                }
+                (None, Some(_), None) | (None, None, Some(_)) => {
+                    return Err(RpcError::bad_request(
+                        "convert_fence span requires both start and end",
+                    ));
+                }
+            };
+            let title = optional_str(params, "title")?;
+            let mut state = state.lock().expect("state lock");
+            let report = state.convert_fence(&page_id, selection, title)?;
+            Ok(serde_json::to_value(report).expect("convert report serializes"))
+        }
+        "delete" => {
+            let id = required_str(params, "id")?;
+            let mut state = state.lock().expect("state lock");
+            let content = state.delete(&id)?;
+            Ok(json!({ "deleted": true, "id": id, "content": content }))
+        }
+        "transclude" => {
+            let id = required_str(params, "id")?;
+            let depth = optional_u64(params, "depth")?.unwrap_or(1);
+            let depth =
+                u32::try_from(depth).map_err(|_| RpcError::bad_request("depth is out of range"))?;
+            let state = state.lock().expect("state lock");
+            Ok(serde_json::to_value(state.transclude(&id, depth)?)
+                .expect("transclusion serializes"))
+        }
+        "export" => {
+            let raw = optional_bool(params, "raw")?.unwrap_or(false);
+            let dir = optional_str(params, "dir")?;
+            let state = state.lock().expect("state lock");
+            Ok(state.export(raw, dir.as_deref().map(Path::new))?)
+        }
+        "conflicts" => {
+            let id = required_str(params, "id")?;
+            let state = state.lock().expect("state lock");
+            state.conflicts(&id)
+        }
+        other => Err(RpcError::new(404, format!("unknown method {other}"))),
     }
 }
 
