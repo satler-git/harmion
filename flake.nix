@@ -53,8 +53,6 @@
               pkgs.nodejs
               # Cloudflare Workers/DO の OAuth ログインと deploy。
               pkgs.wrangler
-              # Worker alarm から native を起こす Cloudflare Tunnel。
-              pkgs.cloudflared
               # design_checks/*.py
               pkgs.python3
               # Inspecting node DBs during operation/recovery.

@@ -163,11 +163,7 @@ export class Node {
           { status: 503 },
         );
       }
-      return Response.json({
-        ok: true,
-        provisioned: true,
-        wake_configured: Boolean(this.env.WAKE_URL && this.env.WAKE_TOKEN),
-      });
+      return Response.json({ ok: true, provisioned: true });
     }
     if (request.method !== "POST") {
       return new Response("method not allowed", { status: 405 });
@@ -287,28 +283,11 @@ export class Node {
     return Response.json(result);
   }
 
-  async wakeNative() {
-    const url = this.env.WAKE_URL;
-    const token = this.env.WAKE_TOKEN;
-    if (!url || !token) return { woken: false, skipped: true };
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}` },
-      });
-      return { woken: response.ok, status: response.status };
-    } catch (error) {
-      console.error("native wake failed", error);
-      return { woken: false };
-    }
-  }
-
   async alarmNow(request) {
     if (!this.authorized(request)) {
       return Response.json({ error: "unauthorized" }, { status: 401 });
     }
-    const wake = await this.wakeNative();
-    return Response.json({ wake, ...(await this.scheduledSync()) });
+    return Response.json(await this.scheduledSync());
   }
 
   async alarm() {
@@ -316,7 +295,6 @@ export class Node {
       const previous = globalThis.__harmionDo;
       globalThis.__harmionDo = this;
       try {
-        await this.wakeNative();
         await this.scheduledSync();
       } catch (error) {
         console.error("scheduled sync failed", error);

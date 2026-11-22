@@ -24,7 +24,7 @@ def main():
         },
         "Service": {
             "Type": "simple",
-            "ExecStart": '"%h/.local/bin/harmiond" run "%h/.local/share/harmion/%i" --wake-listen 127.0.0.1:8787',
+            "ExecStart": '"%h/.local/bin/harmiond" run "%h/.local/share/harmion/%i"',
             "UMask": "0077",
             "Restart": "on-failure",
             "RestartSec": "5s",

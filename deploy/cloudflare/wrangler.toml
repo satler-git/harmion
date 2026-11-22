@@ -36,13 +36,11 @@ CLUSTER = "1be54851ccf1566918fdb101d1f0123d09d868aa95f3fa7cca3e2e1053b1d9cf"
 NODE_ID = "9a876634039946360d09792c6e22869598af857a622a14a43fcd16396bbfb1bf"
 EPOCH = "5cff3b9328a2a951cb8487d4f312f79bcadb3fde763f4dd087b237a4eecc50db"
 ORIGIN = "https://hub.satler.dev"
-# The alarm wakes native through the Cloudflare Tunnel endpoint, then runs the
-# Worker's own SignedHttps outbound round (if any such peers exist).
-SYNC_INTERVAL_MS = "300000"
-WAKE_URL = ""
+# Native initiates sync (it is not a SignedHttps v2 server yet); leaving the
+# Worker alarm at 0 avoids claiming an outbound path that cannot reach native.
+SYNC_INTERVAL_MS = "0"
 ALLOW_PROVISION = "0"
 # Secrets (wrangler secret put, never in this file):
 #   SEED            node membership signing seed (32 bytes hex)
 #   ADMIN_TOKEN     app-layer bearer for /admin/* and /internal/*
 #   BOOTSTRAP_TOKEN one-time provisioning token; remove/rotate after provisioning
-#   WAKE_TOKEN      native wake endpoint bearer (harmiond wake-token)

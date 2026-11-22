@@ -214,29 +214,6 @@ systemctl --user stop harmion@main.service
 systemctl --user start harmion@main.service
 ```
 
-## Cloudflare Worker からの wake
-
-ユニットは `--wake-listen 127.0.0.1:8787` で loopback の wake endpoint を開く。
-Cloudflare Worker の alarm は Cloudflare Tunnel 経由で `POST /wake` を送り、
-native の自動同期を即座に1回起こす。endpoint はデータを運ばず、bearer token が
-一致したとき以外は 401/403 を返す。
-
-```sh
-# daemon を停止して一度だけ token を作る（再実行は失敗する）
-systemctl --user stop harmion@main.service
-"$HOME/.local/bin/harmiond" wake-token "$HOME/.local/share/harmion/main" > wake.json
-chmod 600 wake.json
-systemctl --user start harmion@main.service
-
-# Cloudflare Tunnel の ingress 例（native.satler.dev -> http://127.0.0.1:8787）
-# Worker 側: WAKE_URL=https://native.satler.dev/wake, WAKE_TOKEN=<wake.json の値>
-```
-
-DNS と Access の作成には Cloudflare API token の
-**Zone: DNS: Edit** と **Access: Apps and Policies: Edit** が必要。
-wrangler の OAuth token だけでは作成できない。wake endpoint を公開する場合も
-`/wake` 以外を Tunnel に公開しない。
-
 ## 更新・バックアップ・失敗時の対応
 
 1. 新しい release をビルドし、検証結果を確認する。旧バイナリも別の場所に保管する。

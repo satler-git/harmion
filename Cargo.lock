@@ -1256,7 +1256,6 @@ dependencies = [
  "harmion-store-sqlite",
  "serde",
  "serde_json",
- "subtle",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
