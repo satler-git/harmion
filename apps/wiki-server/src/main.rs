@@ -77,6 +77,9 @@ enum Command {
         id: String,
         #[arg(long)]
         rev: u64,
+        /// Convert loose `!` fences into snippets and canonical host fences.
+        #[arg(long)]
+        auto_convert: bool,
         #[arg(long, default_value = SOCKET_DEFAULT)]
         socket: PathBuf,
     },
@@ -159,12 +162,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Search { query, socket } => {
             print_call(&socket, "search", json!({ "query": query }))
         }
-        Command::Save { id, rev, socket } => {
+        Command::Save {
+            id,
+            rev,
+            auto_convert,
+            socket,
+        } => {
             let body = read_stdin_body()?;
             print_call(
                 &socket,
                 "save",
-                json!({ "id": id, "rev": rev, "body": body }),
+                json!({
+                    "id": id,
+                    "rev": rev,
+                    "body": body,
+                    "auto_convert": auto_convert,
+                }),
             )
         }
         Command::Status { socket } => print_call(&socket, "status", json!({})),
@@ -365,8 +378,16 @@ fn dispatch_result(state: &Arc<Mutex<State>>, request: &Request) -> RpcResult<Va
             let id = required_str(params, "id")?;
             let rev = required_u64(params, "rev")?;
             let body = required_str(params, "body")?;
+            let auto_convert = optional_bool(params, "auto_convert")?.unwrap_or(false);
             let mut state = state.lock().expect("state lock");
-            Ok(serde_json::to_value(state.save(&id, rev, body)?).expect("content serializes"))
+            if auto_convert {
+                Ok(
+                    serde_json::to_value(state.save_with_conversion(&id, rev, body)?)
+                        .expect("save report serializes"),
+                )
+            } else {
+                Ok(serde_json::to_value(state.save(&id, rev, body)?).expect("content serializes"))
+            }
         }
         "status" => {
             let state = state.lock().expect("state lock");

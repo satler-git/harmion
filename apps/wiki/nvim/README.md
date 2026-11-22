@@ -36,6 +36,8 @@ diagnostics, definition, references, completion and hover for
 ```sh
 # with a server on target/wiki-m0.sock
 nvim --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/m0.lua'
+# auto-convert test (server on target/wiki-auto.sock):
+nvim --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/auto_convert.lua'
 ```
 
 The test opens `p-home`, edits it, saves it, then opens a ledger snippet and

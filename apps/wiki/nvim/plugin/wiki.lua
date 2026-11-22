@@ -99,14 +99,30 @@ local function open(id_or_title)
     buffer = buf,
     callback = function()
       local body = lines_to_body(buf)
-      local ok, saved = pcall(run, { "save", content.id, "--rev", tostring(vim.b[vim.api.nvim_get_current_buf()].wiki_rev) }, body)
+      local args = { "save", content.id, "--rev", tostring(vim.b[buf].wiki_rev) }
+      if vim.b[buf].wiki_type == "page" then
+        table.insert(args, "--auto-convert")
+      end
+      local ok, response = pcall(run, args, body)
       if not ok then
-        vim.notify("wiki: save failed (conflict?): " .. tostring(saved), vim.log.levels.ERROR)
+        vim.notify("wiki: save failed (conflict?): " .. tostring(response), vim.log.levels.ERROR)
         return
       end
+      local saved = response.page or response
       vim.api.nvim_buf_set_var(buf, "wiki_rev", saved.rev)
+      if saved.body and saved.body ~= body then
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, body_to_lines(saved.body))
+      end
       vim.bo[buf].modified = false
-      vim.notify(("wiki: saved %s (rev %d)"):format(saved.title, saved.rev), vim.log.levels.INFO)
+      local message = ("wiki: saved %s (rev %d)"):format(saved.title, saved.rev)
+      if response.converted and #response.converted > 0 then
+        message = message .. (", %d fences converted"):format(#response.converted)
+      end
+      if response.failed and #response.failed > 0 then
+        message = message .. (", %d fences failed"):format(#response.failed)
+        vim.notify("wiki: fence conversion: " .. table.concat(response.failed, "; "), vim.log.levels.WARN)
+      end
+      vim.notify(message, vim.log.levels.INFO)
     end,
   })
   vim.notify(("wiki: opened %s"):format(content.title), vim.log.levels.INFO)

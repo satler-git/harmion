@@ -39,6 +39,13 @@ pub enum FenceSelection {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SaveReport {
+    pub page: Content,
+    pub converted: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ConvertReport {
     pub snippet: Content,
     pub page: Content,
@@ -545,6 +552,54 @@ impl State {
             Ok(())
         })?;
         Ok(saved)
+    }
+
+    pub fn save_with_conversion(
+        &mut self,
+        id: &str,
+        rev: u64,
+        body: String,
+    ) -> RpcResult<SaveReport> {
+        let saved = self.save(id, rev, body)?;
+        if !saved.is_page() {
+            return Ok(SaveReport {
+                page: saved,
+                converted: Vec::new(),
+                failed: Vec::new(),
+            });
+        }
+
+        let mut converted = Vec::new();
+        let mut failed = Vec::new();
+        // Convert one loose fence at a time. Each conversion rewrites the host,
+        // so re-scan instead of holding stale byte spans.
+        for _ in 0..64 {
+            let page = self.open(id)?;
+            let loose = match scan_embedded_blocks(&page.body) {
+                Ok(blocks) => blocks
+                    .into_iter()
+                    .any(|block| block.spec.id.is_none() && !block.body.is_empty()),
+                Err(error) => {
+                    failed.push(format!("invalid `!` fence: {error}"));
+                    break;
+                }
+            };
+            if !loose {
+                break;
+            }
+            match self.convert_fence(id, FenceSelection::Index(0), None) {
+                Ok(report) => converted.push(report.snippet.id),
+                Err(error) => {
+                    failed.push(error.message);
+                    break;
+                }
+            }
+        }
+        Ok(SaveReport {
+            page: self.open(id)?,
+            converted,
+            failed,
+        })
     }
 
     pub fn delete(&mut self, id: &str) -> RpcResult<Content> {
@@ -1150,6 +1205,45 @@ mod tests {
         assert_eq!(leftovers, 0);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn auto_convert_saves_page_and_snippets() {
+        let mut state = sample_state();
+        let page = state.open("p-test").unwrap();
+        let report = state
+            .save_with_conversion(
+                "p-test",
+                page.rev,
+                "# Test\n\nbefore\n\n!```rust|code\nfn main() {}\n```\n\nafter\n".to_owned(),
+            )
+            .unwrap();
+        assert_eq!(report.converted.len(), 1);
+        assert!(report.failed.is_empty());
+        assert!(report.page.body.contains("!```rust|code||"));
+        let snippet = state.open(&report.converted[0]).unwrap();
+        assert_eq!(snippet.content_type, "snippet");
+        assert_eq!(snippet.body, "fn main() {}\n");
+        assert!(snippet.kinds.contains(&"code".to_owned()));
+
+        let again = state
+            .save_with_conversion("p-test", report.page.rev, report.page.body.clone())
+            .unwrap();
+        assert!(again.converted.is_empty());
+        assert!(again.failed.is_empty());
+    }
+
+    #[test]
+    fn auto_convert_keeps_failed_fence_inline() {
+        let mut state = sample_state();
+        let page = state.open("p-test").unwrap();
+        let body = "# Test\n\n!```ledger|bad kind\nx\n```\n".to_owned();
+        let report = state
+            .save_with_conversion("p-test", page.rev, body.clone())
+            .unwrap();
+        assert!(report.converted.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(state.open("p-test").unwrap().body, body);
     }
 
     #[test]
