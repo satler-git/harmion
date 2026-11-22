@@ -454,7 +454,7 @@ Harmion の最初の実用アプリとして、日常的に使える個人 Wiki 
 | provider 提供 | `wiki-server` の provider ループは attach を維持し、切断時は unavailable を返す。二重登録・同名の衝突を起こさない |
 | UI の一貫性 | external Neovim と GUI で、フォーカス・保存状態・競合・テーマが一致する。同じ Content の二重バッファを作らない |
 | WM 非依存 | niri 連携は任意。off / 非対応 WM でも、RPC のフォーカス・Content オープン・保存は動く |
-| UI デザイン | 見た目は未確定。モックアップは方向性のみ。M7 でスタイル探索を行う |
+| UI デザイン | ダーク固定。4カラム + リンク/情報の2モードインスペクタ + 下部2-hopシェルフ。docs/wiki-ui-design.html で凍結 |
 | 可用性 | provider の未起動・タイムアウト・容量超過・エラーでも、ページの閲覧と編集は継続できる。オフラインではキャッシュを stale 表示する |
 | LSP の可用性 | LSP が無い / 落ちた場合も、プラグインの RPC で編集・保存・検索を継続する。診断と補完だけを止める |
 | セキュリティ | Markdown と provider display の HTML は既定で無効、許可制でサニタイズ。外部リソースは既定で読み込まない。トークンは wiki-server だけが持ち、URL・ログへ出さない。キャッシュと下書きは 0600 のアプリ専用領域 |
@@ -473,7 +473,8 @@ Harmion の最初の実用アプリとして、日常的に使える個人 Wiki 
 - Scrapbox: フラットなページ、リンク補完、2-hop リンク、インクリメンタル検索、プロジェクトの流れ。
 - 共通して、**GUI は読む・探す・つながりを見る画面**にする。本文の編集は Neovim に分離し、GUI にエディタを埋め込まない。タイトル・タグ・プロパティなど最小限の入力だけを GUI に置く。
 - その画面で編集しないことが、この Wiki の面白さになる。編集したいときは、同じ Content を隣の Neovide で開く。
-- UI はモックアップで固めず、M0 / M1 の動く縦切りを作って改善する。
+- UI は [wiki-ui-design.html](wiki-ui-design.html) で凍結する。実装しながら余白・密度を磨くが、レイアウトと操作の方針は変えない。
+- ショートカットは Ctrl 系で表示する（`Ctrl+K` 検索、`Ctrl+E` Neovide、`Ctrl+I` 情報、`Ctrl+N` 新規、`Ctrl+P` クイックオープン、`Ctrl+W` タブを閉じる、`Ctrl+1`/`Ctrl+2` でインスペクタ切替、`Ctrl+Alt+L` で 2-hop 全表示）。
 
 ### 8.1 GUI シェル
 
@@ -488,7 +489,7 @@ Harmion の最初の実用アプリとして、日常的に使える個人 Wiki 
 - Neovide のウィンドウは WM のルールで配置し、GUI の選択に合わせてフォーカスを移す。テーマを揃える。
 - GUI と Neovide は1つのウィンドウグループとして移動・リサイズできる。niri ではカラム / ワークスペースの操作、他の WM では OS のウィンドウ操作を使う。
 - レイアウトプリセット（横並び / GUI のみ / エディタのみ）を保存・復元する。
-- 見た目は未確定。モックアップは方向性のみで、M7 でスタイルを探索する。
+- 見た目は [wiki-ui-design.html](wiki-ui-design.html) で凍結。ダーク、4カラム、右は「リンク」「情報」の2モード。M7 は実装上の磨き込み。
 - 保存状態は Content ごとに出す。ホストと埋め込み先を混ぜて「保存済み」と表示しない。
 - タイトル・検索・タグ・プロパティなどの入力欄は OS の IME に対応する。
 - キーボード: `Ctrl/Cmd+K` パレット、`Ctrl/Cmd+P` クイックオープン、`Ctrl/Cmd+S` 全 dirty 保存、`Esc`。主要操作にショートカット。
@@ -583,7 +584,7 @@ Harmion の最初の実用アプリとして、日常的に使える個人 Wiki 
 - Neovide は外部ウィンドウとして起動し、RPC で Content を開き、WM の配置・フォーカス機能で GUI と一体化する。niri を第一候補とし、off / 他の WM ではフォールバックする。
 - GUI と Neovide を1つのウィンドウグループとして移動・リサイズし、レイアウトプリセットを復元する。
 - 一貫した UX の必須条件: フォーカスの双方向同期、同じ Content の二重バッファ禁止、保存状態・競合の共有、テーマの一致、最後に開いた Content の復元、ウィンドウ配置の記憶。
-- UI のイメージ: [wiki-ui-mockup.html](wiki-ui-mockup.html) / [wiki-ui-mockup.png](wiki-ui-mockup.png)。GUI と Neovide を WM でタイルし、同じ Content を共有する様子。見た目は未確定で、モックアップは方向性のみ。
+- UI の確定版: [wiki-ui-design.html](wiki-ui-design.html) / [wiki-ui-design.png](wiki-ui-design.png)。GUI と Neovide を WM でタイルし、同じ Content を共有する。
 - **LSP**: プラグインの言語機能は `wiki-lsp` に分離する。MVP は diagnostics / definition / references / completion / hover。M2.5 に入れる。
 - **WebUI**: Android・共有・閲覧専用の fallback として保留。
 - 理由: 閲覧と編集の強みをそれぞれ活かせる。サーバーを分離すれば UI の追加・差し替えができる。
@@ -786,7 +787,7 @@ wiki-export/
 | D25 | kind の any-kind 認可 | アプリ側で kind ごとの Write を検査し、プラットフォームにも制約を要望 | 未決 |
 | D26 | Neovim LSP の範囲と時期 | v1.5 / M2.5 で MVP（diagnostics / definition / references / completion / hover、必要に応じて semantic tokens）。code actions は後 | 未決 |
 | D27 | WM 連携の範囲 | niri 第一候補。`wm = none` / 他の WM は手動配置にフォールバック。グループ移動・レイアウト復元 | 決定 |
-| D28 | GUI のビジュアル | 未確定。M7 でスタイル探索を行う | 未決 |
+| D28 | GUI のビジュアル | ダーク固定。4カラム + 2モードインスペクタ + 2-hopシェルフ。設計は docs/wiki-ui-design.html | 決定 |
 
 ## 17. マイルストーン
 
@@ -800,7 +801,7 @@ wiki-export/
 | M4 | Interpreter: 契約変更、ストリーミング入力、query 変換、call、表示、キャッシュ、Wiki provider | S30〜S32 とテスト provider の E2E が通る |
 | M5 | 検索・タグ・索引 | 1万ページで検索150ms以内 |
 | M6 | オフライン・エクスポート・インポート | S3・S9・S34 が通る |
-| M7 | 仕上げ: スニペット一覧、使用箇所、設定、アクセシビリティ、ビジュアル探索 | 日常利用に耐える |
+| M7 | 仕上げ: スニペット一覧、使用箇所、設定、アクセシビリティ、UIの磨き込み | 日常利用に耐える |
 | M8 | Android ノード＋Wiki アプリ | 別計画（§15） |
 
 ## 18. 用語

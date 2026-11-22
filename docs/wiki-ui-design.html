@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harmion Wiki — Dark native concept</title>
+<style>
+  :root {
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Noto Sans JP", "IBM Plex Sans JP", sans-serif;
+    --display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Hiragino Sans", "Noto Sans JP", sans-serif;
+    --mono: "SF Mono", "JetBrains Mono", "Noto Sans Mono CJK JP", monospace;
+    --bg: #1e1e1e;
+    --sidebar: #252527;
+    --panel: #252527;
+    --raised: #2c2c2e;
+    --raised-2: #3a3a3c;
+    --text: #f5f5f7;
+    --secondary: #a1a1a6;
+    --tertiary: #6e6e73;
+    --separator: #3a3a3c;
+    --accent: #0a84ff;
+    --accent-strong: #409cff;
+    --green: #30d158;
+    --selection: rgba(10, 132, 255, .35);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 13px;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+  ::selection { background: var(--selection); }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; border: 0; background: transparent; padding: 0; }
+  a { color: inherit; text-decoration: none; }
+  kbd {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 15px; height: 16px; padding: 0 4px;
+    border-radius: 3px; background: var(--raised-2);
+    color: var(--secondary); font-family: var(--sans); font-size: 9.5px;
+    line-height: 1; white-space: nowrap;
+  }
+  .window { height: 100%; display: grid; grid-template-rows: 52px minmax(0, 1fr); }
+
+  /* Toolbar */
+  .toolbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 0 14px 0 14px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--separator);
+  }
+  .toolbar-left, .toolbar-right { display: flex; align-items: center; gap: 5px; min-width: 0; }
+  .toolbar-title { color: var(--text); font-size: 13px; font-weight: 600; padding: 0 6px; white-space: nowrap; }
+  .toolbar-sub { color: var(--tertiary); font-size: 12px; white-space: nowrap; }
+  .icon-btn {
+    height: 26px; min-width: 26px; padding: 0 6px; border-radius: 5px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    color: var(--secondary); font-size: 14px;
+  }
+  .icon-btn:hover { background: var(--raised); color: var(--text); }
+  .toolbar .vdiv { width: 1px; height: 18px; background: var(--separator); margin: 0 4px; }
+  .search {
+    width: 210px; height: 28px; padding: 0 8px;
+    display: flex; align-items: center; gap: 6px;
+    background: var(--raised); border-radius: 6px;
+    color: var(--tertiary); font-size: 12px;
+  }
+  .search .shortcut { margin-left: auto; }
+  .button {
+    height: 28px; padding: 0 9px; border-radius: 6px;
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--raised); color: var(--text); font-size: 12px;
+  }
+  .button:hover { background: var(--raised-2); }
+  .button.primary { background: var(--accent); color: #fff; }
+  .button.primary:hover { background: var(--accent-strong); }
+  .toolbar .shortcut-label { color: var(--tertiary); font-size: 10px; }
+
+  /* Four-column workspace */
+  .workspace { min-height: 0; display: grid; grid-template-columns: 240px minmax(0, 1fr) 188px 300px; }
+
+  /* Sidebar */
+  .sidebar {
+    min-height: 0; padding: 10px 10px 10px;
+    display: flex; flex-direction: column;
+    background: var(--sidebar); border-right: 1px solid var(--separator);
+    overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--separator) transparent;
+  }
+  .side-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px 8px; }
+  .side-head .name { color: var(--text); font-size: 13px; font-weight: 600; }
+  .side-head .plus { color: var(--accent); font-size: 17px; line-height: 1; }
+  .side-section { margin: 16px 0 5px; padding: 0 10px; color: var(--tertiary); font-size: 11px; font-weight: 600; }
+  .row {
+    display: flex; align-items: center; gap: 8px;
+    height: 29px; padding: 0 9px; border-radius: 6px;
+    color: var(--text); font-size: 13px;
+  }
+  .row:hover { background: var(--raised); }
+  .row .glyph { width: 15px; text-align: center; color: var(--tertiary); font-size: 12px; }
+  .row.active { background: var(--accent); color: #fff; }
+  .row.active .glyph { color: rgba(255,255,255,.8); }
+  .row .count { margin-left: auto; color: var(--tertiary); font-size: 11px; }
+  .row.active .count { color: rgba(255,255,255,.75); }
+  .recent { display: grid; gap: 0; }
+  .recent a { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 5px 10px; border-radius: 5px; color: var(--secondary); font-size: 12px; }
+  .recent a:hover { background: var(--raised); color: var(--text); }
+  .recent a .when { color: var(--tertiary); font-size: 10px; }
+  .side-foot { margin-top: auto; padding: 14px 10px 0; display: grid; gap: 7px; }
+  .side-foot .hint { display: flex; align-items: center; justify-content: space-between; color: var(--tertiary); font-size: 10px; }
+  .side-foot .new-page { width: 100%; justify-content: center; margin-bottom: 3px; }
+
+  /* Editor column with tabs */
+  .editor-col { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+  .tabs {
+    flex: none; height: 36px; display: flex; align-items: flex-end; gap: 0;
+    padding: 0 10px; background: var(--sidebar); border-bottom: 1px solid var(--separator);
+    overflow-x: auto; scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    height: 29px; display: inline-flex; align-items: center; gap: 8px;
+    padding: 0 10px; border-radius: 6px 6px 0 0;
+    color: var(--secondary); font-size: 12px; white-space: nowrap;
+  }
+  .tab:hover { color: var(--text); background: var(--raised); }
+  .tab.active { color: var(--text); background: var(--bg); border: 1px solid var(--separator); border-bottom-color: var(--bg); margin-bottom: -1px; }
+  .tab .close { color: var(--tertiary); font-size: 12px; }
+  .tab .close:hover { color: var(--text); }
+  .tab-add { width: 26px; height: 26px; margin: 0 0 4px 4px; border-radius: 5px; color: var(--tertiary); font-size: 15px; }
+  .tab-add:hover { background: var(--raised); color: var(--text); }
+  .tab-spacer { flex: 1; }
+  .tab-hint { padding: 0 2px 7px 8px; color: var(--tertiary); font-size: 9.5px; white-space: nowrap; }
+
+  .article-scroll { min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--separator) transparent; }
+  .article { width: min(700px, 100%); margin: 0 auto; padding: 44px 48px 84px; }
+  .eyebrow { color: var(--tertiary); font-size: 11px; font-weight: 500; }
+  h1 { margin: 9px 0 0; font-family: var(--display); font-size: 29px; font-weight: 700; letter-spacing: -.022em; line-height: 1.25; }
+  .meta { margin-top: 9px; color: var(--secondary); font-size: 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+  .meta .sep { color: var(--tertiary); }
+  .meta .tags { color: var(--secondary); }
+  .lead { margin: 24px 0 0; font-size: 15.5px; line-height: 1.68; letter-spacing: -.004em; color: var(--text); }
+
+  .embed { margin: 24px 0 0; background: var(--raised); border-radius: 10px; overflow: hidden; }
+  .embed-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 14px 9px; }
+  .embed-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .embed-title strong { font-size: 13px; font-weight: 600; }
+  .embed-title .kind { color: var(--tertiary); font-family: var(--mono); font-size: 10px; }
+  .link-btn { color: var(--accent-strong); font-size: 12px; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+  .link-btn:hover { text-decoration: underline; }
+  .code { padding: 2px 14px 11px; font-family: var(--mono); font-size: 12px; line-height: 1.8; color: var(--text); }
+  .code .date { color: var(--secondary); }
+  .code .account { color: var(--secondary); }
+  .code .amount { color: var(--text); }
+  .code .blank { height: 7px; }
+  .embed-foot { display: flex; align-items: center; justify-content: space-between; padding: 0 14px 11px; color: var(--tertiary); font-size: 10.5px; }
+  .embed-foot .mono { font-family: var(--mono); font-size: 10px; }
+
+  .section { margin-top: 30px; }
+  .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding-bottom: 7px; border-bottom: 1px solid var(--separator); }
+  .section-head h2 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: -.005em; }
+  .section-head .aside { color: var(--tertiary); font-size: 11px; }
+  .balance { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding-top: 13px; }
+  .balance .number { font-family: var(--display); font-size: 39px; font-weight: 600; letter-spacing: -.03em; line-height: 1; }
+  .balance .period { margin-top: 6px; color: var(--secondary); font-size: 12px; }
+  .balance .source { color: var(--tertiary); font-family: var(--mono); font-size: 10px; padding-bottom: 2px; display: flex; align-items: center; gap: 6px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); display: inline-block; flex: none; }
+  .snippet-rows { display: grid; gap: 0; }
+  .snippet-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 0; border-bottom: 1px solid var(--separator); font-size: 12.5px; }
+  .snippet-row:last-child { border-bottom: 0; }
+  .snippet-row .name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .snippet-row .glyph { color: var(--tertiary); font-size: 10px; }
+  .snippet-row .when { color: var(--tertiary); font-size: 10.5px; white-space: nowrap; }
+  .snippet-row:hover .name { color: var(--accent-strong); }
+
+  /* Outline */
+  .outline-col { min-height: 0; padding: 22px 14px 18px; background: var(--bg); border-left: 1px solid var(--separator); overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--separator) transparent; }
+  .col-title { color: var(--tertiary); font-size: 11px; font-weight: 600; margin-bottom: 9px; }
+  .outline { display: grid; gap: 1px; }
+  .outline a { display: block; padding: 5px 9px; border-left: 2px solid transparent; color: var(--secondary); font-size: 12px; border-radius: 0 4px 4px 0; }
+  .outline a:hover { color: var(--text); background: var(--raised); }
+  .outline a.active { color: var(--text); border-left-color: var(--accent); }
+  .outline a.sub { padding-left: 20px; color: var(--tertiary); font-size: 11.5px; }
+
+  /* Inspector */
+  .inspector { min-height: 0; padding: 22px 16px 18px; background: var(--panel); border-left: 1px solid var(--separator); overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--separator) transparent; }
+  .inspector h2 { margin: 0 0 9px; color: var(--secondary); font-size: 11px; font-weight: 600; }
+  .inspector h2 .count { color: var(--tertiary); font-weight: 500; margin-left: 4px; }
+  .link-list { display: grid; gap: 0; }
+  .link-row { display: flex; align-items: baseline; gap: 8px; padding: 5px 0; color: var(--secondary); font-size: 12px; border-bottom: 1px solid color-mix(in srgb, var(--separator) 55%, transparent); }
+  .link-row:last-child { border-bottom: 0; }
+  .link-row .title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .link-row .arrow { margin-left: auto; color: var(--tertiary); font-size: 12px; }
+  .link-row:hover { color: var(--accent-strong); }
+  .link-row:hover .arrow { color: var(--accent-strong); }
+  .link-row.hop { color: var(--tertiary); }
+  .link-row.hop:hover { color: var(--accent-strong); }
+  .all-link { margin-top: 4px; color: var(--accent-strong); font-size: 11px; display: inline-flex; align-items: center; gap: 6px; }
+  .all-link:hover { text-decoration: underline; }
+  .inspector .sep { height: 1px; background: var(--separator); margin: 18px 0; }
+  .info-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 3px 0; font-size: 12px; }
+  .info-row .label { color: var(--secondary); }
+  .info-row .value { color: var(--text); text-align: right; }
+  .status-line { display: flex; align-items: center; gap: 7px; color: var(--secondary); font-size: 12px; }
+  .inspector .button { width: 100%; justify-content: center; margin-top: 9px; }
+  .note { color: var(--tertiary); font-size: 11px; line-height: 1.55; }
+
+  @media (max-width: 1360px) {
+    .workspace { grid-template-columns: 232px minmax(0, 1fr) 176px 280px; }
+    .article { padding-left: 36px; padding-right: 36px; }
+    .search { width: 180px; }
+  }
+  @media (max-width: 1120px) {
+    .workspace { grid-template-columns: 232px minmax(0, 1fr) 0 280px; }
+    .outline-col { display: none; }
+  }
+<style>
+  /* v3: a two-mode inspector keeps reading width and groups tasks by intent. */
+  .workspace { grid-template-columns: 236px minmax(0, 1fr) 176px 340px; }
+  .inspector { padding: 18px 20px 20px; }
+  .segmented {
+    display: flex; gap: 2px; padding: 2px; margin-bottom: 18px;
+    background: var(--raised); border-radius: 7px;
+  }
+  .segmented button {
+    flex: 1; height: 24px; border-radius: 5px;
+    color: var(--secondary); font-size: 11px;
+  }
+  .segmented button:hover { color: var(--text); }
+  .segmented button.active { background: var(--raised-2); color: var(--text); }
+  .pane { display: none; }
+  .pane.active { display: block; }
+  .next { display: grid; gap: 3px; margin-top: 8px; }
+  .next .suggestion {
+    display: block; position: relative;
+    padding: 10px 24px 10px 12px;
+    border-left: 2px solid transparent;
+    border-radius: 6px;
+  }
+  .next .suggestion:hover { background: var(--raised); }
+  .next .suggestion.selected { background: var(--raised); border-left-color: var(--accent); }
+  .next .suggestion::after {
+    content: "›"; position: absolute; right: 10px; top: 50%;
+    transform: translateY(-50%); color: var(--tertiary); font-size: 14px;
+  }
+  .next .suggestion:hover::after, .next .suggestion.selected::after { color: var(--accent-strong); }
+  .next .path { display: flex; align-items: center; gap: 5px; color: var(--secondary); font-size: 9.5px; }
+  .next .hop { padding: 1px 4px; border-radius: 3px; background: var(--raised-2); color: var(--tertiary); font-family: var(--mono); font-size: 8.5px; }
+  .next .title { margin-top: 3px; color: var(--text); font-size: 12.5px; font-weight: 600; }
+  .next .excerpt { margin-top: 3px; color: var(--secondary); font-size: 10.5px; line-height: 1.45; }
+  .next .why { margin-top: 4px; color: var(--tertiary); font-size: 9.5px; }
+  .next-hint {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    margin-top: 7px; color: var(--tertiary); font-size: 9px;
+  }
+  .next-hint kbd { min-width: 13px; height: 14px; font-size: 8.5px; }
+  .inspector .link-group { margin-top: 2px; }
+  .inspector .link-group .col-title { margin: 6px 0 2px; }
+  .inspector .link-group .link-row { padding: 4px 0; font-size: 11.5px; }
+  .inspector .info-row { padding: 5px 0; }
+  .inspector .sep { margin: 16px 0; }
+  .inspector .note { margin-top: 6px; }
+<style>
+  /* v4: the "show all" view is a non-modal bottom shelf that rises on hover. */
+  .window { position: relative; }
+  .outline-col { display: flex; flex-direction: column; justify-content: center; }
+  .shelf {
+    position: absolute; left: 236px; right: 0; bottom: 0;
+    height: 324px; z-index: 20;
+    background: var(--panel);
+    border-top: 1px solid var(--separator);
+    box-shadow: 0 -16px 40px rgba(0, 0, 0, .34);
+    transform: translateY(calc(100% - 36px));
+    transition: transform .24s cubic-bezier(.2, .8, .2, 1);
+  }
+  .shelf.open, .shelf:hover { transform: translateY(0); }
+  .shelf-handle {
+    height: 36px; padding: 0 20px;
+    display: flex; align-items: center; gap: 9px;
+    color: var(--secondary); font-size: 11px;
+    cursor: pointer; user-select: none;
+  }
+  .shelf-handle .handle-title { color: var(--text); font-weight: 600; }
+  .shelf-handle .handle-count {
+    min-width: 17px; height: 16px; padding: 0 4px; border-radius: 4px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--raised-2); color: var(--secondary); font-size: 9px;
+  }
+  .shelf-handle .handle-hint { margin-left: auto; color: var(--tertiary); font-size: 9.5px; }
+  .shelf-handle .chevron { color: var(--tertiary); font-size: 11px; }
+  .shelf-body {
+    height: calc(100% - 36px); overflow-y: auto;
+    padding: 8px 20px 16px;
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px;
+  }
+  .hop-group h3 {
+    margin: 0 0 5px; padding: 0 7px;
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+    color: var(--secondary); font-size: 10px; font-weight: 600;
+  }
+  .hop-group h3 .group-count { color: var(--tertiary); font-weight: 500; }
+  .hop-row {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 5px 7px; border-radius: 5px;
+  }
+  .hop-row:hover { background: var(--raised); }
+  .hop-row .hop-title { color: var(--text); font-size: 11.5px; font-weight: 500; white-space: nowrap; }
+  .hop-row .hop-reason { color: var(--secondary); font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hop-row .hop-arrow { margin-left: auto; color: var(--tertiary); font-size: 11px; }
+  .hop-row:hover .hop-arrow { color: var(--accent-strong); }
+<style>
+  /* v5: neutral selection, richer 2-hop rows, explicit syntax highlighting. */
+  .next .suggestion, .next .suggestion.selected { border-left: 0 !important; outline: none !important; }
+  .next .suggestion:focus, .next .suggestion:focus-visible { outline: none !important; }
+  .next .suggestion.selected { background: var(--raised); }
+  .shelf { height: 430px; }
+  .shelf-body { height: calc(100% - 36px); padding: 8px 20px 14px; }
+  .hop-group h3 { margin-bottom: 3px; }
+  .hop-row { display: block; padding: 7px 8px; border-radius: 6px; }
+  .hop-row:hover { background: var(--raised); }
+  .hop-line { display: flex; align-items: baseline; gap: 6px; }
+  .hop-title { color: var(--text); font-size: 11.5px; font-weight: 600; white-space: nowrap; }
+  .hop-kind { color: var(--tertiary); font-family: var(--mono); font-size: 8.5px; }
+  .hop-excerpt {
+    margin-top: 2px; color: var(--secondary); font-size: 10px; line-height: 1.4;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .hop-meta { margin-top: 3px; color: var(--tertiary); font-size: 9px; }
+  .hop-row:hover .hop-title { color: var(--accent-strong); }
+  .hop-row .hop-arrow { display: none; }
+  .segmented button kbd { margin-left: 4px; height: 14px; min-width: 12px; background: transparent; color: var(--tertiary); font-size: 8.5px; }
+  .segmented button.active kbd { color: var(--secondary); }
+  .code .date { color: #7aa2f7; }
+  .code .account { color: #9ece6a; }
+  .code .amount { color: #e0af68; }
+  .code .desc { color: #c0caf5; }
+  .code .comment { color: #565f89; }
+</style>
+</style>
+</style>
+</style>
+</head>
+<style>
+  /* v2: discovery and editor follow the active tab; no per-embed edit button. */
+  .workspace { grid-template-columns: 236px minmax(0, 1fr) 184px 316px; }
+  .editor-status {
+    height: 28px; padding: 0 9px; border-radius: 6px;
+    display: inline-flex; align-items: center; gap: 7px;
+    background: var(--raised); color: var(--secondary); font-size: 11px;
+  }
+  .editor-status:hover { background: var(--raised-2); color: var(--text); }
+  .editor-status .file { color: var(--text); }
+  .recent a .type { margin-left: auto; margin-right: 5px; color: var(--tertiary); font-size: 9px; }
+  .discover { margin-top: 2px; padding: 2px; background: var(--raised); border-radius: 8px; }
+  .suggestion { display: block; padding: 8px 20px 8px 9px; border-radius: 6px; position: relative; }
+  .suggestion::after { content: "›"; position: absolute; right: 9px; top: 50%; transform: translateY(-50%); color: var(--tertiary); font-size: 14px; }
+  .suggestion:hover::after { color: var(--accent-strong); }
+  .suggestion:hover { background: var(--raised-2); }
+  .suggestion .path { display: flex; align-items: center; gap: 4px; color: var(--secondary); font-size: 9.5px; }
+  .suggestion .title { margin-top: 2px; color: var(--text); font-size: 12px; font-weight: 600; }
+  .suggestion .reason { margin-top: 2px; color: var(--secondary); font-size: 11px; line-height: 1.45; }
+  .all-link { margin-top: 7px; }
+  .link-group { margin-top: 2px; }
+  .link-group .col-title { margin: 5px 0 2px; }
+  .link-group .link-row { padding: 4px 0; font-size: 11.5px; }
+  .quote {
+    margin: 22px 0 0; padding-left: 14px;
+    border-left: 2px solid var(--separator);
+    color: var(--secondary); font-size: 14px; line-height: 1.65;
+  }
+  .quote cite { display: block; margin-top: 3px; color: var(--tertiary); font-size: 10px; font-style: normal; }
+  .inspector h2 { margin-top: 0; }
+</style>
+</head>
+<body>
+<div class="window">
+  <header class="toolbar">
+    <div class="toolbar-left">
+      <button class="icon-btn" type="button" title="サイドバーを表示">▤</button>
+      <div class="vdiv"></div>
+      <button class="icon-btn" type="button" title="戻る Ctrl+[">‹</button>
+      <button class="icon-btn" type="button" title="進む Ctrl+]">›</button>
+      <div class="vdiv"></div>
+      <div class="toolbar-title">家計の記録</div>
+      <div class="toolbar-sub">家計</div>
+    </div>
+    <div class="toolbar-right">
+      <div class="search"><span>⌕&nbsp; 検索</span><span class="shortcut"><kbd>Ctrl+K</kbd></span></div>
+      <button class="editor-status" type="button" title="Neovide を表示 Ctrl+E"><span class="dot"></span>Neovide <span class="file">家計の記録</span><kbd>Ctrl+E</kbd></button>
+      <button class="icon-btn" type="button" title="情報 Ctrl+I">ⓘ<kbd>Ctrl+I</kbd></button>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <aside class="sidebar">
+      <div class="side-head"><span class="name">Wiki</span><button class="plus" type="button" title="新規ページ Ctrl+N">＋</button></div>
+
+      <div class="side-section">ライブラリ</div>
+      <a class="row" href="#"><span class="glyph">▤</span>すべてのページ<span class="count">12</span></a>
+      <a class="row" href="#"><span class="glyph">◷</span>最近<span class="count">4</span></a>
+      <a class="row" href="#"><span class="glyph">☆</span>お気に入り<span class="count">3</span></a>
+
+      <div class="side-section">ページ</div>
+      <a class="row active" href="#"><span class="glyph">◈</span>家計の記録</a>
+      <a class="row" href="#"><span class="glyph">◇</span>2026年の目標</a>
+      <a class="row" href="#"><span class="glyph">◇</span>レシート処理</a>
+      <a class="row" href="#"><span class="glyph">◇</span>固定費の見直し</a>
+
+      <div class="side-section">スニペット</div>
+      <a class="row" href="#"><span class="glyph">▤</span>買い物ジャーナル</a>
+      <a class="row" href="#"><span class="glyph">▤</span>予算クエリ</a>
+      <a class="row" href="#"><span class="glyph">▤</span>月次サマリ</a>
+
+      <div class="side-section">最近</div>
+      <div class="recent">
+        <a href="#"><span>家計の記録</span><span class="type">ledger</span><span class="when">14:31</span></a>
+        <a href="#"><span>読書ノート</span><span class="type">note</span><span class="when">昨日</span></a>
+        <a href="#"><span>Rustのメモ</span><span class="type">code</span><span class="when">11/20</span></a>
+        <a href="#"><span>日記 11/22</span><span class="type">diary</span><span class="when">11/22</span></a>
+      </div>
+
+      <div class="side-foot">
+        <button class="button new-page" type="button">新規ページ <kbd>Ctrl+N</kbd></button>
+        <div class="hint"><span>クイックオープン</span><kbd>Ctrl+P</kbd></div>
+        <div class="hint"><span>検索</span><kbd>Ctrl+K</kbd></div>
+      </div>
+    </aside>
+
+    <section class="editor-col">
+      <div class="tabs">
+        <div class="tab active"><span>家計の記録</span><button class="close" type="button" title="閉じる Ctrl+W">×</button></div>
+        <div class="tab"><span>読書ノート</span><button class="close" type="button" title="閉じる Ctrl+W">×</button></div>
+        <div class="tab"><span>Rustのメモ</span><button class="close" type="button" title="閉じる Ctrl+W">×</button></div>
+        <button class="tab-add" type="button" title="新しいタブ Ctrl+T">＋</button>
+        <div class="tab-spacer"></div>
+        <div class="tab-hint">Ctrl+W 閉じる</div>
+      </div>
+
+      <div class="article-scroll">
+        <article class="article">
+          <div class="eyebrow">ノート</div>
+          <h1>家計の記録</h1>
+          <div class="meta">
+            <span>更新 14:31</span><span class="sep">·</span><span>作成 10/02</span><span class="sep">·</span><span>642語</span><span class="sep">·</span><span>3 バックリンク</span><span class="sep">·</span><span class="tags">家計, ledger, 毎月</span>
+          </div>
+          <p class="lead">毎月の支出を hledger のジャーナルで管理している。</p>
+
+          <blockquote class="quote">固定費は先に把握する。<cite>2026年の目標</cite></blockquote>
+
+          <figure class="embed">
+            <div class="embed-head">
+              <div class="embed-title"><strong>買い物ジャーナル</strong><span class="kind">hledger · ledger</span></div>
+            </div>
+            <div class="code">
+              <div><span class="date">2026-11-16</span>  <span class="desc">* 買い物</span></div>
+              <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="account">支出:食費</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="amount">1,200 JPY</span></div>
+              <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="account">資産:現金</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="amount">-1,200 JPY</span></div>
+              <div class="blank"></div>
+              <div><span class="date">2026-11-17</span>  <span class="desc">* 電車</span></div>
+              <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="account">支出:交通</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="amount">420 JPY</span></div>
+              <div>&nbsp;&nbsp;&nbsp;&nbsp;<span class="account">資産:現金</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="amount">-420 JPY</span></div>
+              <div><span class="comment">; 11月分</span></div>
+            </div>
+            <div class="embed-foot"><span class="mono">3f2a9c1e…</span><span>最終更新 14:31</span></div>
+          </figure>
+
+          <section class="section">
+            <div class="section-head"><h2>今月の残高</h2><span class="aside">ledger/balance</span></div>
+            <div class="balance">
+              <div><div class="number">¥12,400</div><div class="period">2026-11-16 時点</div></div>
+              <div class="source"><span class="dot"></span>接続中</div>
+            </div>
+          </section>
+
+          <p class="lead" style="margin-top:24px">固定費の見直しは月1回、日曜日にまとめて行う。</p>
+        </article>
+      </div>
+    </section>
+
+    <aside class="outline-col">
+      <div class="col-title">Outline</div>
+      <nav class="outline">
+        <a class="active" href="#">今月の支出</a>
+        <a href="#">買い物ジャーナル</a>
+        <a class="sub" href="#">11/16 買い物</a>
+        <a class="sub" href="#">11/17 電車</a>
+        <a href="#">今月の残高</a>
+        <a href="#">固定費の見直し</a>
+      </nav>
+    </aside>
+
+    <aside class="inspector">
+      <div class="segmented">
+        <button class="active" type="button" data-pane="links">リンク <kbd>Ctrl+1</kbd></button>
+        <button type="button" data-pane="info">情報 <kbd>Ctrl+2</kbd></button>
+      </div>
+
+      <div class="pane active" id="pane-links">
+        <h2>次に読む <span class="count">3 / 12</span></h2>
+        <div class="next">
+          <a class="suggestion" href="#">
+            <div class="path">2026年の目標 から <span class="hop">2-hop</span></div>
+            <div class="title">家計簿の付け方</div>
+            <div class="excerpt">毎月の固定費を先に一覧にする。変動費は...</div>
+            <div class="why">共通タグ: 家計</div>
+          </a>
+          <a class="suggestion" href="#">
+            <div class="path">レシート処理 から <span class="hop">2-hop</span></div>
+            <div class="title">クレジットカード</div>
+            <div class="excerpt">引き落とし日と未払いを確認する。</div>
+            <div class="why">3 か所から参照</div>
+          </a>
+          <a class="suggestion" href="#">
+            <div class="path">固定費の見直し から <span class="hop">2-hop</span></div>
+            <div class="title">電気代</div>
+            <div class="excerpt">前月との差が大きい月を振り返る。</div>
+            <div class="why">共通タグ: 固定費</div>
+          </a>
+        </div>
+        <a class="all-link" href="#">2-hop をすべて見る <kbd>Ctrl+Alt+L</kbd></a>
+        <div class="next-hint">
+          <span><kbd>↑</kbd><kbd>↓</kbd> 選択</span>
+          <span><kbd>↵</kbd> 開く</span>
+          <span><kbd>Ctrl+Enter</kbd> 新規タブ</span>
+        </div>
+
+        <div class="sep"></div>
+
+        <h2>関連スニペット <span class="count">2</span></h2>
+        <div class="link-list">
+          <a class="link-row" href="#"><span class="title">予算クエリ</span><span class="arrow">11/18</span></a>
+          <a class="link-row" href="#"><span class="title">月次サマリ</span><span class="arrow">10/31</span></a>
+        </div>
+
+        <div class="sep"></div>
+
+        <h2>リンク <span class="count">7</span></h2>
+        <div class="link-group">
+          <div class="col-title">発リンク <span style="font-weight:500">4</span></div>
+          <a class="link-row" href="#"><span class="title">2026年の目標</span><span class="arrow">›</span></a>
+          <a class="link-row" href="#"><span class="title">レシート処理</span><span class="arrow">›</span></a>
+          <a class="link-row" href="#"><span class="title">固定費の見直し</span><span class="arrow">›</span></a>
+          <a class="link-row" href="#"><span class="title">買い物ジャーナル</span><span class="arrow">›</span></a>
+
+          <div class="col-title">バックリンク <span style="font-weight:500">3</span></div>
+          <a class="link-row" href="#"><span class="title">2026年の目標</span><span class="arrow">›</span></a>
+          <a class="link-row" href="#"><span class="title">月次レビュー</span><span class="arrow">›</span></a>
+          <a class="link-row" href="#"><span class="title">固定費の見直し</span><span class="arrow">›</span></a>
+        </div>
+      </div>
+
+      <div class="pane" id="pane-info">
+        <h2>ページ情報</h2>
+        <div class="info-row"><span class="label">作成</span><span class="value">2026-10-02</span></div>
+        <div class="info-row"><span class="label">更新</span><span class="value">14:31</span></div>
+        <div class="info-row"><span class="label">語数</span><span class="value">642</span></div>
+        <div class="info-row"><span class="label">タグ</span><span class="value">家計, ledger</span></div>
+
+        <div class="sep"></div>
+
+        <h2>接続 <span class="count">4</span></h2>
+        <div class="status-line"><span class="dot"></span>4 providers 接続中</div>
+        <div class="note">ledger/balance · wiki/backlinks · wiki/outline · wiki/transclude</div>
+
+        <div class="sep"></div>
+
+        <h2>エディタ</h2>
+        <div class="info-row"><span class="label">Neovide</span><span class="value">家計の記録を編集中</span></div>
+        <div class="note">タブを切り替えると、Neovide も同じ Content に追従します。</div>
+
+        <div class="sep"></div>
+
+        <h2>状態</h2>
+        <div class="status-line"><span class="dot"></span>保存済み · 同期済み</div>
+        <div class="note">競合なし</div>
+      </div>
+    </aside>
+
+  </div>
+  <div class="shelf open">
+    <div class="shelf-handle">
+      <span class="handle-title">2-hop リンク</span>
+      <span class="handle-count">12</span>
+      <span>すべて見る</span>
+      <span class="handle-hint">ホバーで表示 · <kbd>Ctrl+Alt+L</kbd></span>
+      <span class="chevron">⌃</span>
+    </div>
+    <div class="shelf-body">
+      <section class="hop-group">
+        <h3><span>2026年の目標 から</span><span class="group-count">4</span></h3>
+        <a class="hop-row" href="#">
+          <div class="hop-line"><span class="hop-title">家計簿の付け方</span><span class="hop-kind">page</span></div>
+          <div class="hop-excerpt">固定費を先に一覧にする。変動費は前月と比べる。</div>
+          <div class="hop-meta">更新 11/18 · 3 バックリンク · 家計</div>
+        </a>
+        <a class="hop-row" href="#">
+          <div class="hop-line"><span class="hop-title">毎月のレビュー</span><span class="hop-kind">page</span></div>
+          <div class="hop-excerpt">1か月の支出を振り返り、翌月の予算を決める。</div>
+          <div class="hop-meta">更新 11/20 · 2 バックリンク · 家計</div>
+        </a>
+        <a class="hop-row" href="#">
+          <div class="hop-line"><span class="hop-title">固定費の内訳</span><span class="hop-kind">page</span></div>
+          <div class="hop-excerpt">家賃・電気・通信の内訳をまとめる。</div>
+          <div class="hop-meta">更新 11/12 · 1 バックリンク</div>
+        </a>
+        <a class="hop-row" href="#">
+          <div class="hop-line"><span class="hop-title">貯金の目標</span><span class="hop-kind">page</span></div>
+          <div class="hop-excerpt">先取りで残す額を決める。</div>
+          <div class="hop-meta">更新 10/30 · 0 バックリンク</div>
+        </a>
+      </section>
+      <section class="hop-group">
+        <h3><span>レシート処理 から</span><span class="group-count">3</span></h3>
+        <a class="hop-row" href="#">
+          <div class="hop-line"><span class="hop-title">クレジットカード</span><span class="hop-kind">page</span></div>
+          <div class="hop-excerpt">引き落とし日と未払いを確認する。</div>
+          <div class="hop-meta">更新 11/19 · 3 参照</div>
+        </a>
+        <a class="hop-row" href="#">
+          <div class="hop-line"><span class="hop-title">電子マネー</span><span class="hop-kind">page</span></div>
+          <div class="hop-excerpt">チャージと残高の記録。</div>
+          <div class="hop-meta">更新 11/17 · 2 参照</div>
+        </a>
+        <a class="hop-row" href="#">
+          <div class="hop-line"><span class="hop-title">返品・交換</span><span class="hop-kind">page</span></div>
+          <div class="hop-excerpt">レシートの保管と期限。</div>
+          <div class="hop-meta">更新 11/10 · 1 参照</div>
+        </a>
+      </section>
+      <section class="hop-group">
+        <h3><span>固定費の見直し から</span><span class="group-count">5</span></h3>
+        <a class="hop-row" href="#">
+          <div class="hop-line"><span class="hop-title">電気代</span><span class="hop-kind">page</span></div>
+          <div class="hop-excerpt">前月との差が大きい月を振り返る。</div>
+          <div class="hop-meta">更新 11/16 · 4 参照</div>
+        </a>
+        <a class="hop-row" href="#">
+          <div class="hop-line"><span class="hop-title">ガス代</span><span class="hop-kind">page</span></div>
+          <div class="hop-excerpt">使用量の変化を確認する。</div>
+          <div class="hop-meta">更新 11/16 · 2 参照</div>
+        </a>
+        <a class="hop-row" href="#">
+          <div class="hop-line"><span class="hop-title">家賃</span><span class="hop-kind">page</span></div>
+          <div class="hop-excerpt">更新時期と契約条件。</div>
+          <div class="hop-meta">更新 10/28 · 1 参照</div>
+        </a>
+        <a class="hop-row" href="#">
+          <div class="hop-line"><span class="hop-title">通信費</span><span class="hop-kind">page</span></div>
+          <div class="hop-excerpt">プラン見直しの候補。</div>
+          <div class="hop-meta">更新 11/05 · 2 参照</div>
+        </a>
+        <a class="hop-row" href="#">
+          <div class="hop-line"><span class="hop-title">サブスク</span><span class="hop-kind">page</span></div>
+          <div class="hop-excerpt">利用状況と解約候補。</div>
+          <div class="hop-meta">更新 11/14 · 3 参照</div>
+        </a>
+      </section>
+    </div>
+  </div>
+</div>
+</body>
+</html>
+<script>
+  const initialPane = new URLSearchParams(location.search).get('pane') === 'info' ? 'info' : 'links';
+  const buttons = [...document.querySelectorAll('.segmented button')];
+  function showPane(name) {
+    document.querySelectorAll('.pane').forEach(pane => pane.classList.toggle('active', pane.id === 'pane-' + name));
+    buttons.forEach(button => button.classList.toggle('active', button.dataset.pane === name));
+  }
+  buttons.forEach(button => button.addEventListener('click', () => showPane(button.dataset.pane)));
+  showPane(initialPane);
+  window.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey) && (event.key === "1" || event.key === "2")) {
+      event.preventDefault();
+      showPane(event.key === "1" ? "links" : "info");
+    }
+  });
+</script>
