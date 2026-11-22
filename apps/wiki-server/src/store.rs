@@ -1532,6 +1532,46 @@ mod tests {
     }
 
     #[test]
+    fn workspace_returns_all_embeds_in_order() {
+        let mut page = Content::fixture(
+            "p-multi",
+            "page",
+            "Multi",
+            "!```ledger||aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n```\n\nbetween\n\n!```ledger||bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n```\n\nafter\n".to_owned(),
+        );
+        page.updated_at = 1;
+        let snippet_a = Content::fixture(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "snippet",
+            "A",
+            "a\n".to_owned(),
+        );
+        let snippet_b = Content::fixture(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "snippet",
+            "B",
+            "b\n".to_owned(),
+        );
+        let state = State::from_contents(
+            [page, snippet_a, snippet_b]
+                .into_iter()
+                .map(|content| (content.id.clone(), content))
+                .collect(),
+        );
+        let workspace = state.workspace("p-multi").unwrap();
+        assert_eq!(workspace.embeds.len(), 2);
+        assert_eq!(workspace.embeds[0].snippet.title, "A");
+        assert_eq!(workspace.embeds[1].snippet.title, "B");
+        assert!(
+            workspace.embeds[1]
+                .before
+                .iter()
+                .any(|line| line == "between")
+        );
+        assert!(workspace.after.iter().any(|line| line == "after"));
+    }
+
+    #[test]
     fn workspace_keeps_the_gui_contract_shape() {
         let state = State::load(None).unwrap();
         let value = serde_json::to_value(state.workspace("p-home").unwrap()).unwrap();

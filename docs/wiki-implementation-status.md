@@ -37,7 +37,7 @@ Last updated: 2026-11-23
 - Dev-only `--node DIR` snapshot using `harmion-client::Client::from_directory`
   (admin secret). `save` is body-only and refuses if the node body changed since
   the snapshot; create/convert/delete still return 501.
-- 35 + 2 tests pass (unit + integration)
+- 36 + 2 tests pass (unit + integration)
 
 ### `apps/wiki-lsp`
 
