@@ -9,6 +9,7 @@ mod backend;
 mod error;
 mod export;
 mod model;
+mod provider;
 mod slug;
 mod store;
 mod transclude;
@@ -392,6 +393,12 @@ fn dispatch_result(state: &Arc<Mutex<State>>, request: &Request) -> RpcResult<Va
         "status" => {
             let state = state.lock().expect("state lock");
             Ok(state.status())
+        }
+        "provider_list" => Ok(provider::list()),
+        "provider_call" => {
+            let name = required_str(params, "name")?;
+            let state = state.lock().expect("state lock");
+            provider::call(&state, &name, params)
         }
         "create_page" => {
             let title = required_str(params, "title")?;
