@@ -25,8 +25,14 @@ class AdminWeb:
         root = directory / "admin-ca.pem"
         root.write_bytes(subprocess.check_output([ADMIN, "provision", ui], timeout=15))
         self.process = subprocess.Popen(
-            [str(ADMIN), "run", node.path, ui], stdout=subprocess.PIPE, text=True
+            [str(ADMIN), "run", node.path, ui, "--approval", "stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
         )
+        assert self.process.stdin is not None
+        self.process.stdin.write("y\n" * 16)
+        self.process.stdin.flush()
         with selectors.DefaultSelector() as selector:
             selector.register(self.process.stdout, selectors.EVENT_READ)
             assert selector.select(10), "admin Web readiness timed out"

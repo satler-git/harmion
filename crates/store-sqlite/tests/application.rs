@@ -1577,7 +1577,7 @@ fn migration_preserves_v1_records_and_cursor_generation() {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
 }
 
 #[test]

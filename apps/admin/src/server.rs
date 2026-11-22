@@ -1,7 +1,7 @@
-use crate::api;
+use crate::{api, approval::Confirmer};
 use bytes::Bytes;
 use harmion_client::{
-    Client, ProtectedDir,
+    Client, ProtectedDir, SshSigner,
     protocol::{MAX_APP_RESPONSE_BYTES, hex, unhex},
     random_id,
 };
@@ -25,6 +25,7 @@ mod assets {
 }
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(120);
 const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+const SESSION_IDLE: Duration = Duration::from_secs(10 * 60);
 
 pub(crate) struct State {
     client: Client,
@@ -33,6 +34,9 @@ pub(crate) struct State {
     origin: String,
     access: Mutex<Access>,
     confirmations: crate::transfer::Confirmations,
+    signer: Option<SshSigner>,
+    confirmer: Confirmer,
+    enforce: bool,
 }
 
 struct Access {
@@ -43,11 +47,17 @@ struct Access {
 struct Secret {
     value: [u8; 32],
     expires: Instant,
+    last_used: Instant,
 }
 
 impl Secret {
     fn matches(&self, candidate: &[u8; 32]) -> bool {
-        self.expires > Instant::now() && bool::from(self.value.ct_eq(candidate))
+        self.expires > Instant::now()
+            && self.last_used.elapsed() < SESSION_IDLE
+            && bool::from(self.value.ct_eq(candidate))
+    }
+    fn touch(&mut self) {
+        self.last_used = Instant::now();
     }
 }
 
@@ -57,6 +67,9 @@ impl State {
         node: ProtectedDir,
         address: SocketAddr,
         content: Option<&str>,
+        signer: Option<SshSigner>,
+        confirmer: Confirmer,
+        enforce: bool,
     ) -> Result<(Self, String), harmion_client::Error> {
         let launch = random_id()?;
         let host = address.to_string();
@@ -73,10 +86,14 @@ impl State {
                     launch: Some(Secret {
                         value: launch,
                         expires: Instant::now() + BOOTSTRAP_TTL,
+                        last_used: Instant::now(),
                     }),
                     session: None,
                 }),
                 confirmations: Default::default(),
+                signer,
+                confirmer,
+                enforce,
             },
             link,
         ))
@@ -95,32 +112,36 @@ impl State {
             return Err(StatusCode::UNAUTHORIZED);
         }
         let value = random_id().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let now = Instant::now();
         access.launch = None;
         access.session = Some(Secret {
             value,
-            expires: Instant::now() + SESSION_TTL,
+            expires: now + SESSION_TTL,
+            last_used: now,
         });
         Ok(value)
     }
 
-    fn authorize(&self, request: &Request<Incoming>) -> Result<(), StatusCode> {
+    fn authorize(&self, request: &Request<Incoming>) -> Result<[u8; 32], StatusCode> {
         let token = header(request, "authorization")
             .and_then(|header| header.strip_prefix("Bearer "))
             .and_then(|token| unhex(token).ok())
             .ok_or(StatusCode::UNAUTHORIZED)?;
-        let access = self
+        let mut access = self
             .access
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if access
+        let secret = access
             .session
-            .as_ref()
-            .is_some_and(|secret| secret.matches(&token))
-        {
-            Ok(())
-        } else {
-            Err(StatusCode::UNAUTHORIZED)
-        }
+            .as_mut()
+            .filter(|secret| secret.matches(&token))
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+        secret.touch();
+        Ok(secret.value)
+    }
+
+    fn enforcement(&self) -> (bool, Option<&SshSigner>) {
+        (self.enforce, self.signer.as_ref())
     }
 }
 
@@ -199,9 +220,11 @@ async fn dispatch(state: &State, request: Request<Incoming>) -> Result<Response<
     if header(&request, "content-type") != Some("application/json") {
         return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
-    if path != "/session" {
-        state.authorize(&request)?;
-    }
+    let session = if path != "/session" {
+        Some(state.authorize(&request)?)
+    } else {
+        None
+    };
     let body = Limited::new(request.into_body(), MAX_APP_RESPONSE_BYTES)
         .collect()
         .await
@@ -224,14 +247,14 @@ async fn dispatch(state: &State, request: Request<Incoming>) -> Result<Response<
             .session = None;
         return Ok(json(StatusCode::OK, serde_json::json!({})));
     }
-    let result = api::dispatch(
-        &state.client,
-        &state.node,
-        &state.confirmations,
-        &path,
-        &body,
-    )
-    .await?;
+    if let Some(summary) = api::approval_summary(&path, &body, &state.confirmations)
+        && !state.confirmer.confirm(summary).await
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let (enforce, signer) = state.enforcement();
+    let caller = api::Caller::new(&state.client, signer, enforce, session.unwrap_or([0; 32]));
+    let result = api::dispatch(&caller, &state.node, &state.confirmations, &path, &body).await?;
     Ok(json(StatusCode::OK, result))
 }
 

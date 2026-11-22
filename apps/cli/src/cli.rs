@@ -9,6 +9,10 @@ use clap::{Parser, Subcommand};
 pub(crate) struct Cli {
     #[arg(long, value_name = "DIR")]
     pub node: String,
+    /// OpenSSH public key whose private half is held by ssh-agent, or a private
+    /// key file. Defaults to HARMION_OWNER_SSH_KEY or ~/.ssh/id_ed25519.pub.
+    #[arg(long, value_name = "PATH")]
+    pub owner_key: Option<String>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -93,6 +97,25 @@ pub(crate) enum Command {
     },
     /// Trust a peer for explicit local owner recovery.
     TrustRecoveryPeer { path: String },
+    /// Show owner credentials, enforcement and recent approvals.
+    OwnerStatus,
+    /// Add a backup owner SSH public key (requires an existing owner approval).
+    OwnerEnroll {
+        key: String,
+        #[arg(long, default_value = "owner")]
+        label: String,
+    },
+    /// Revoke an owner credential by its ID (requires an existing approval).
+    OwnerRevoke { credential: String },
+    /// Recover ownership with the offline recovery code and a new SSH key.
+    OwnerRecover {
+        code: String,
+        key: String,
+        #[arg(long, default_value = "owner")]
+        label: String,
+    },
+    /// Enable or disable owner enforcement.
+    OwnerEnforce { enable: bool },
     /// Replay a persisted save request.
     Save { path: String },
     /// Create content from a body file.
@@ -193,6 +216,11 @@ impl Command {
             Self::ConnectList => "connect-list",
             Self::ConnectApprove { .. } => "connect-approve",
             Self::TrustRecoveryPeer { .. } => "trust-recovery-peer",
+            Self::OwnerStatus => "owner-status",
+            Self::OwnerEnroll { .. } => "owner-enroll",
+            Self::OwnerRevoke { .. } => "owner-revoke",
+            Self::OwnerRecover { .. } => "owner-recover",
+            Self::OwnerEnforce { .. } => "owner-enforce",
             Self::Save { .. } => "save",
             Self::Create { .. } => "create",
             Self::Edit { .. } => "edit",

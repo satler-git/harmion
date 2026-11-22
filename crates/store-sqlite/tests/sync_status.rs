@@ -286,7 +286,7 @@ fn migrates_v9_without_fabricating_evidence_and_restore_copies_only_content() {
     assert_eq!(
         sql.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        16
+        17
     );
     t.success(1);
     let destination_path = t.path.with_extension("restore.db");

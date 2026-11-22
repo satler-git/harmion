@@ -277,6 +277,59 @@ pub trait Transaction: crate::oauth::Storage {
         &mut self,
         identity: &crate::identity::KnownIdentity,
     ) -> Result<(), Error>;
+
+    // Owner approvals are an optional local capability. Peer-only hosts keep
+    // the default fail-closed behavior and never pretend an owner key exists.
+    fn owner_credentials(&mut self) -> Result<Vec<crate::owner::OwnerCredential>, Error> {
+        Ok(Vec::new())
+    }
+    fn insert_owner_credential(
+        &mut self,
+        _credential: &crate::owner::OwnerCredential,
+    ) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+    fn update_owner_credential(
+        &mut self,
+        _credential: &crate::owner::OwnerCredential,
+    ) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+    fn owner_policy(&mut self) -> Result<crate::owner::OwnerPolicy, Error> {
+        Ok(crate::owner::OwnerPolicy::default())
+    }
+    fn put_owner_policy(&mut self, _policy: &crate::owner::OwnerPolicy) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+    fn insert_owner_challenge(
+        &mut self,
+        _challenge: &crate::owner::OwnerChallenge,
+    ) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+    fn owner_challenge(
+        &mut self,
+        _id: [u8; 32],
+    ) -> Result<Option<crate::owner::OwnerChallenge>, Error> {
+        Ok(None)
+    }
+    /// Atomically marks an unused, unexpired challenge as used.
+    fn consume_owner_challenge(&mut self, _id: [u8; 32], _now: i64) -> Result<bool, Error> {
+        Ok(false)
+    }
+    fn purge_owner_challenges(&mut self, _now: i64) -> Result<(), Error> {
+        Ok(())
+    }
+    fn owner_pending_challenges(&mut self, _app: AppId, _now: i64) -> Result<u32, Error> {
+        Ok(0)
+    }
+    /// Appends an audit entry and computes its hash chain. Returns the entry hash.
+    fn append_owner_audit(&mut self, _audit: &crate::owner::OwnerAudit) -> Result<[u8; 32], Error> {
+        Err(Error::Unsupported)
+    }
+    fn owner_audit_entries(&mut self, _limit: u32) -> Result<Vec<crate::owner::OwnerAudit>, Error> {
+        Ok(Vec::new())
+    }
 }
 
 pub fn read_graph(tx: &mut dyn Transaction) -> Result<Graph, Error> {

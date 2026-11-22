@@ -26,6 +26,14 @@ pub(crate) enum Command {
     },
     /// Print the OAuth browser trust root as PEM.
     OauthRoot { dir: String },
+    /// Enroll the first owner SSH key. Run while the daemon is stopped.
+    OwnerEnroll {
+        dir: String,
+        #[arg(long, value_name = "PATH")]
+        ssh_key: String,
+        #[arg(long, default_value = "owner")]
+        label: String,
+    },
     /// Run a node, overriding saved settings when options are supplied.
     Run {
         dir: String,

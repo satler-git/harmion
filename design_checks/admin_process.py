@@ -28,8 +28,18 @@ def check(node, directory):
     root = directory / "admin-ca.pem"
     root.write_bytes(subprocess.check_output([ADMIN, "provision", ui], timeout=15))
     assert (ui / "web-tls.json").stat().st_mode & 0o077 == 0
-    daemon = subprocess.Popen([ADMIN, "run", node.path, ui], stdout=subprocess.PIPE, text=True)
+    daemon = subprocess.Popen(
+        [ADMIN, "run", node.path, ui, "--approval", "stdio"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
     try:
+        assert daemon.stdin is not None
+        # Each R2 operation consumes one approval line. The test drives the
+        # out-of-band owner channel explicitly instead of relying on a TTY.
+        daemon.stdin.write("y\n" * 64)
+        daemon.stdin.flush()
         with selectors.DefaultSelector() as selector:
             selector.register(daemon.stdout, selectors.EVENT_READ)
             assert selector.select(10), "admin Web readiness timed out"

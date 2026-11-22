@@ -1,12 +1,14 @@
 mod api;
+mod approval;
 mod server;
 mod transfer;
 
+use approval::{ApprovalMode, Confirmer};
 use clap::{Parser, Subcommand};
-use harmion_client::{Client, ProtectedDir, protocol::unhex};
+use harmion_client::{Client, ProtectedDir, SshSigner, protocol::unhex};
 use harmion_local_web::BrowserTls;
 use serde::{Deserialize, Serialize};
-use std::{io, sync::Arc};
+use std::{io, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -30,6 +32,14 @@ enum Command {
         node_dir: String,
         ui_dir: String,
         content_id: Option<String>,
+        /// R2 approval source. Terminal is the safe default.
+        #[arg(long, value_enum, default_value = "terminal")]
+        approval: ApprovalMode,
+        /// OpenSSH public key whose private half is held by ssh-agent, or a
+        /// private key file. Defaults to the HARMION_OWNER_SSH_KEY environment
+        /// variable or ~/.ssh/id_ed25519.pub.
+        #[arg(long, value_name = "PATH")]
+        owner_key: Option<String>,
     },
 }
 
@@ -65,7 +75,13 @@ fn identity(state: &ProtectedDir) -> Result<BrowserTls> {
     })
 }
 
-async fn run(node: &str, state: &str, content: Option<&str>) -> Result<()> {
+async fn run(
+    node: &str,
+    state: &str,
+    content: Option<&str>,
+    approval: ApprovalMode,
+    owner_key: Option<&str>,
+) -> Result<()> {
     if let Some(content) = content {
         unhex::<32>(content)?;
     }
@@ -86,11 +102,44 @@ async fn run(node: &str, state: &str, content: Option<&str>) -> Result<()> {
         )
         .into());
     }
+    let owner_enforced = client
+        .owner_status()
+        .await
+        .map(|status| status["enforce"] == true)
+        .unwrap_or(false);
+    let key = owner_key
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HARMION_OWNER_SSH_KEY").map(PathBuf::from))
+        .or_else(default_owner_key);
+    let signer = key.map(SshSigner::new);
+    if owner_enforced && signer.is_none() {
+        eprintln!(
+            "harmion-admin: owner enforcement is on; R2 operations need --owner-key or HARMION_OWNER_SSH_KEY"
+        );
+    }
+    let confirmer = Confirmer::start(approval);
+    if let Some(reason) = confirmer.unavailable() {
+        eprintln!("harmion-admin: {reason}");
+    }
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let (server, link) = server::State::new(client, node, listener.local_addr()?, content)?;
+    let (server, link) = server::State::new(
+        client,
+        node,
+        listener.local_addr()?,
+        content,
+        signer,
+        confirmer,
+        owner_enforced,
+    )?;
     println!("{}", serde_json::json!({"url":link}));
     server::run(listener, Arc::new(server), config).await?;
     Ok(())
+}
+
+fn default_owner_key() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let path = PathBuf::from(home).join(".ssh").join("id_ed25519.pub");
+    path.is_file().then_some(path)
 }
 
 #[tokio::main]
@@ -105,7 +154,18 @@ async fn main() {
             node_dir,
             ui_dir,
             content_id,
-        } => run(&node_dir, &ui_dir, content_id.as_deref()).await,
+            approval,
+            owner_key,
+        } => {
+            run(
+                &node_dir,
+                &ui_dir,
+                content_id.as_deref(),
+                approval,
+                owner_key.as_deref(),
+            )
+            .await
+        }
     };
     if let Err(error) = result {
         eprintln!("harmion-admin: {error}");

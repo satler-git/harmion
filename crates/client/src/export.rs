@@ -1,4 +1,4 @@
-use crate::{Client, DEADLINE, Error, protocol};
+use crate::{Client, DEADLINE, Error, OwnerAssertion, protocol};
 use http_body_util::BodyExt;
 use protocol::export::{CONTENT_TYPE, FORMAT, MAX_FRAME_BYTES, SCOPE, VERSION};
 use serde_json::Value;
@@ -8,11 +8,16 @@ use tokio::time::timeout;
 impl Client {
     /// Consume an owner export one record at a time. A successful return verifies
     /// the format header, completion marker, record count and end of response.
-    pub async fn export(
+    pub async fn export(&self, consume: impl FnMut(Value) -> io::Result<()>) -> Result<(), Error> {
+        self.export_with(None, consume).await
+    }
+
+    pub async fn export_with(
         &self,
+        owner: Option<&OwnerAssertion>,
         mut consume: impl FnMut(Value) -> io::Result<()>,
     ) -> Result<(), Error> {
-        let (response, _connection) = timeout(DEADLINE, self.request("export", &[]))
+        let (response, _connection) = timeout(DEADLINE, self.request("export", &[], owner))
             .await
             .map_err(|_| Error::Timeout)??;
         if response

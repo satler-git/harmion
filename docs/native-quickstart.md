@@ -43,7 +43,7 @@ target/debug/harmion --node ./node-a sync NODE_B_ID
 
 `admin.secret`・`private-key.der`・`iroh.secret`は交換しない。管理資格情報は所有者bootstrap用で、OAuth access tokenではない。
 
-起動時にSQLite DBをschema v13へ移行する。編集トークンとrequest receiptには作成時刻を付け、30日より古い行をdaemonが起動時と6時間ごとに回収する。方針導入前の行は削除しない。回収済みトークンでの保存はHTTP 410 `token_expired` を返すので、アプリは取得し直す。同期状態の新しい観測領域は空で作り、過去の同期成功を推測で補わない。既知署名identityのpinは、現に有効な参加者とtrust rootだけを移行時にseedし、鍵を検証できない旧 peer は unknown のまま残す。旧DBの検索索引と項目の版参照は保持している更新から作る。Subscribeの変更履歴には移行後の更新を記録する。schema v4以前から移行した旧クラスタでは、起点にする1台だけを所有者が選び、`run DIR --bootstrap-cluster-root true`で共通の初期信頼証明を作る。他ノードは新しいv3登録でapprove/joinし直す。無署名だった既存Peerを、署名検証鍵を確認せず自動的に他端末へ紹介しない。データ・アプリ資格情報・データcursorは維持する。署名HTTPS（登録v4）は[署名HTTPSのdraft](../contracts/https-peer-v2-draft.md)を参照する。
+起動時にSQLite DBをschema v17へ移行する。schema v17は所有者credential・challenge・監査テーブルを追加する。編集トークンとrequest receiptには作成時刻を付け、30日より古い行をdaemonが起動時と6時間ごとに回収する。方針導入前の行は削除しない。回収済みトークンでの保存はHTTP 410 `token_expired` を返すので、アプリは取得し直す。同期状態の新しい観測領域は空で作り、過去の同期成功を推測で補わない。既知署名identityのpinは、現に有効な参加者とtrust rootだけを移行時にseedし、鍵を検証できない旧 peer は unknown のまま残す。旧DBの検索索引と項目の版参照は保持している更新から作る。Subscribeの変更履歴には移行後の更新を記録する。schema v4以前から移行した旧クラスタでは、起点にする1台だけを所有者が選び、`run DIR --bootstrap-cluster-root true`で共通の初期信頼証明を作る。他ノードは新しいv3登録でapprove/joinし直す。無署名だった既存Peerを、署名検証鍵を確認せず自動的に他端末へ紹介しない。データ・アプリ資格情報・データcursorは維持する。署名HTTPS（登録v4）は[署名HTTPSのdraft](../contracts/https-peer-v2-draft.md)を参照する。
 
 ## Workerレプリカを追加する
 
@@ -185,6 +185,37 @@ target/debug/harmion --node ./recovery approve ./node-b/peer.json
 
 ヒントは2秒待って集約し、長いbackoff中でも最大30秒に1回の再試行波を許す。待機中の追加ヒントで期限を延ばし続けず、同期中に届いたヒントは次の1ラウンドに保持する。失敗回数はリセットせず、復旧していなければ通常のbackoffに戻る。同時4Peer・待機順の割り当て・認証と退役検査は維持する。`RUST_LOG=harmiond=debug` でヒントと再試行を確認できる。
 
+## 所有者鍵を登録する
+
+所有者鍵は最初だけdaemon停止中に登録する。`admin.secret`だけを盗んだ相手がノードAPIから自分の鍵を登録できないようにするため、最初のenrollmentは通常のApp APIに置いていない。
+
+```sh
+target/debug/harmiond init ./node-a
+ssh-keygen -t ed25519 -C owner
+target/debug/harmiond owner-enroll ./node-a --ssh-key ~/.ssh/id_ed25519.pub
+target/debug/harmiond run ./node-a
+```
+
+`owner-enroll`はSSH公開鍵のfingerprintと一度だけ表示される回復コードを出力する。回復コードはオフラインで保管する。以降は`admin.secret`に加えて、R2（grant変更、参加・退役、接続・Provider承認、Export、OAuth認可）にSSH署名が必要になる。
+
+```sh
+# 状態と直近の監査
+target/debug/harmion --node ./node-a owner-status
+
+# バックアップ鍵の追加（端末で承認し、既存鍵で署名する）
+target/debug/harmion --node ./node-a --owner-key ~/.ssh/id_ed25519.pub \
+  owner-enroll ~/.ssh/backup.pub --label backup
+
+# 回復コードで全credentialを置き換える
+target/debug/harmion --node ./node-a owner-recover RECOVERY_CODE ~/.ssh/new.pub
+```
+
+管理アプリもR2に署名する。`--owner-key`または`HARMION_OWNER_SSH_KEY`を指定する。指定がない場合は`~/.ssh/id_ed25519.pub`を使う。
+
+FIDO2の`sk-ssh-ed25519@openssh.com`、PIVカード、`ssh-add -c`を使うと、署名ごとのユーザー確認を得られる。パスフレーズをKeychainに入れただけのソフトウェア鍵は、agentがunlock中に無確認で署名できるため、per-useの確認にはならない。`ssh-keygen`が無いホストではR2を拒否する。
+
+同一OSユーザーの任意コード実行はこの仕組みでも防げない。仕様6.3の信頼境界は変わらない。
+
 ## 管理 Web アプリ
 
 フロントエンドは Svelte・TypeScript・Vite で構成する。開発時は Node.js 22.12以降または24系と npm を使い、初回に `npm ci --prefix apps/admin/ui` を実行する。Cargo が UI をビルドして管理アプリの実行ファイルに同梱する。利用時には Node.js プロセスは不要。型チェックは `npm --prefix apps/admin/ui run check` で実行できる。
@@ -195,10 +226,10 @@ UI を更新した後は `cargo build --workspace` を実行し、起動中の�
 
 ```sh
 target/debug/harmion-admin provision ./admin-ui > harmion-admin-root.pem
-target/debug/harmion-admin run ./node-a ./admin-ui
+target/debug/harmion-admin run ./node-a ./admin-ui --owner-key ~/.ssh/id_ed25519.pub
 ```
 
-ブラウザに `harmion-admin-root.pem` を Web サイト用 CA として登録し、端末に表示された単回リンクを開く。リンクは2分、セッションは30分有効。再読込後は、新しいセッションを作るために管理アプリを再起動する。特定の Content を開く場合は `run` の末尾に Content ID を指定する。公開 CA は `harmion-admin root ./admin-ui` で再取得できる。OAuth の認可画面を開く場合は、[ノードの OAuth 専用 CA](#oauthを有効にする) も登録する。
+ブラウザに `harmion-admin-root.pem` を Web サイト用 CA として登録し、端末に表示された単回リンクを開く。リンクは2分、セッションはアイドル10分・絶対30分有効。R2は起動端末での承認が必要で、`--approval=stdio`は監督下の自動化専用。再読込後は、新しいセッションを作るために管理アプリを再起動する。特定の Content を開く場合は `run` の末尾に Content ID を指定する。公開 CA は `harmion-admin root ./admin-ui` で再取得できる。OAuth の認可画面を開く場合は、[ノードの OAuth 専用 CA](#oauthを有効にする) も登録する。
 
 画面はダークテーマを標準とし、概要・コンテンツ・競合解決・Peer・アプリ・Export を分ける。コンテンツ画面で本文と属性を読み、競合解決画面で候補を比較・編集・選択する。画面の切替中も編集内容と保存の再試行要求を保持する。ノードの管理資格情報は管理アプリのプロセスが使用する。 [管理 Web アプリの契約](specification.md#64-ローカル管理-web-アプリ)
 

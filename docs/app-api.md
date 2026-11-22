@@ -125,6 +125,32 @@ SDKは通知を適用してから対応カーソルを保存する。購読キ�
 
 `POST /app/v1/metrics` は本文なしで呼び、全管理権限を必要とする。Content の総数 `contents`、表示中の数 `visible_contents`、受理済み更新数 `accepted_updates`、更新レコードのバイト合計 `record_bytes`、期限内かつ失効していないアプリ登録数 `active_apps` を返す。数は精度を保つため10進文字列。ノードの同一トランザクションで集計し、DB の余白・索引サイズやプロセスの CPU・メモリ使用量は集計範囲外。
 
+### 所有者承認（owner-*）
+
+ノードの所有者ポリシーが`enforce=1`のとき、R2（grant変更、参加・退役、接続・Provider承認、OAuth認可、Export、所有者credential管理）は`admin.secret`だけでは実行できない。ノードが発行したchallengeに対するSSH署名（SSHSIG、namespace `harmion-owner`）を要求する。詳細な設計と脅威モデルは[所有者認証・承認の改善案](owner-authentication-design.md)、実装は[owner.rs](../crates/node/src/owner.rs)。
+
+| 操作 | クラス | 内容 |
+|---|---|---|
+| `owner-status` | 管理・読み取り | credential一覧、enforce、回復コードの有無、直近の監査と、その範囲のチェーン整合性 |
+| `owner-challenge` | 管理・読み取り | `{operation,target,args_sha256,session}`を受け、`{challenge,statement,expires_at}`を返す。operationはR2のみ |
+| `owner-enroll` | R2 | 2つ目以降のSSH公開鍵を追加。既存assertion必須 |
+| `owner-revoke` | R2 | credentialを失効。最後のcredentialは回復コード必須 |
+| `owner-recover` | 管理 | 回復コードと新しいSSH公開鍵で全credentialを置き換える。assertionは要求しない |
+| `owner-enforce` | R2 | enforceの切り替え。既存assertion必須 |
+
+R2要求には次のヘッダーを付ける。署名はchallenge発行時の`statement`（canonical bytes）に対して行う。
+
+```text
+X-Harmion-Owner-Challenge: <hex32>
+X-Harmion-Owner-Signature: base64url(<SSHSIG PEM>)
+```
+
+statementは`HOA1\0`に続けて`cluster`、`node`、`operation`、`target`、`args_sha256`、`session`、`challenge`、`issued_at`、`expires_at`を固定形式で並べる。`args_sha256`は要求本文のSHA-256で、ノードが同じtransactionで再計算する。challengeは120秒で失効し、一度だけ使用できる。成功時は`owner_audit`へハッシュチェーン付きで記録する。
+
+最初のcredentialはApp APIではなく、daemon停止中のhost専用`harmiond owner-enroll --ssh-key PATH`で登録する。`admin.secret`だけを盗んだ相手がAPIから自分の鍵を登録できないようにするためである。
+
+エラーは、assertionなし/不一致がHTTP 403 `owner_assertion_required`・`owner_assertion_invalid`、challenge期限切れが410 `owner_challenge_expired`、使用済みが409 `owner_challenge_used`、回復コード不一致が403 `owner_recovery_invalid`、保留challenge過多が429 `owner_capacity`、`ssh-keygen`不在が503 `owner_verifier_unavailable`。
+
 ### 管理 Web アプリの接続コード
 
 Peer の接続コードは `harmion-peer:v1:z:BASE64URL`。ペイロードは公開 `PeerRegistration` の UTF-8 JSON を gzip 圧縮し、パディングなし Base64url で符号化したもの。展開後のデータは1 MiBまで。圧縮なしの `harmion-peer:v1:BASE64URL` も読み取れる。管理 Web アプリの `peer-preview` はクラスタ・Node ID・公開鍵を表示する単回の確認値を作る。変更を行う `peer-confirm` はその値を消費し、既存の App API の参加・承認処理を呼ぶ。読み取り・プレビューだけでは参加状態を更新しない。

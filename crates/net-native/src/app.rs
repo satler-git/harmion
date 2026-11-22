@@ -1,11 +1,12 @@
 //! Native App API using pinned loopback HTTPS. Browser authorization has a separate listener.
 use crate::{Error, SharedStore, SystemHost, peer, tls::TlsIdentity, transport};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use harmion_domain::{ClusterId, ContentId, NodeId};
 use harmion_node::{
     access::{self, Credential},
     application::{self, Host},
-    membership,
+    membership, owner,
     storage::Store,
 };
 use harmion_protocol::*;
@@ -214,6 +215,18 @@ fn failure(error: Error) -> Response<Body> {
         }
         Error::Node(N::InterpreterTimeout) => (StatusCode::GATEWAY_TIMEOUT, "interpreter_timeout"),
         Error::Node(N::Unsupported) => (StatusCode::NOT_IMPLEMENTED, "unsupported"),
+        Error::Node(N::OwnerAssertionRequired) => {
+            (StatusCode::FORBIDDEN, "owner_assertion_required")
+        }
+        Error::Node(N::OwnerAssertionInvalid) => (StatusCode::FORBIDDEN, "owner_assertion_invalid"),
+        Error::Node(N::OwnerChallengeExpired) => (StatusCode::GONE, "owner_challenge_expired"),
+        Error::Node(N::OwnerChallengeUsed) => (StatusCode::CONFLICT, "owner_challenge_used"),
+        Error::Node(N::OwnerRecoveryInvalid) => (StatusCode::FORBIDDEN, "owner_recovery_invalid"),
+        Error::Node(N::OwnerCapacity) => (StatusCode::TOO_MANY_REQUESTS, "owner_capacity"),
+        Error::Node(N::OwnerVerifierUnavailable) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "owner_verifier_unavailable",
+        ),
         Error::Node(N::ConnectionNotFound) => (StatusCode::NOT_FOUND, "connection_not_found"),
         Error::Node(N::ConnectionExpired) => (StatusCode::GONE, "connection_expired"),
         Error::Node(N::ConnectionCompleted) => (StatusCode::CONFLICT, "connection_completed"),
@@ -233,6 +246,63 @@ fn failure(error: Error) -> Response<Body> {
     };
     response(status, json!({"error":code}))
 }
+struct OwnerHeaders {
+    challenge: Option<[u8; 32]>,
+    signature: Option<Vec<u8>>,
+}
+
+fn owner_headers(headers: &hyper::HeaderMap) -> Result<OwnerHeaders, harmion_node::Error> {
+    let challenge = single_header(headers, harmion_protocol::owner::CHALLENGE_HEADER)?;
+    let signature = single_header(headers, harmion_protocol::owner::SIGNATURE_HEADER)?;
+    if challenge.is_some() != signature.is_some() {
+        return Err(invalid());
+    }
+    let challenge = challenge.map(harmion_protocol::unhex::<32>).transpose()?;
+    let signature = signature
+        .map(|value| {
+            URL_SAFE_NO_PAD
+                .decode(value)
+                .map_err(|_| harmion_node::Error::InvalidRequest)
+        })
+        .transpose()?;
+    if signature
+        .as_ref()
+        .is_some_and(|value| value.len() > harmion_protocol::owner::MAX_SSH_SIGNATURE_BYTES)
+    {
+        return Err(invalid());
+    }
+    Ok(OwnerHeaders {
+        challenge,
+        signature,
+    })
+}
+
+fn single_header<'a>(
+    headers: &'a hyper::HeaderMap,
+    name: &str,
+) -> Result<Option<&'a str>, harmion_node::Error> {
+    if headers.get_all(name).iter().count() > 1 {
+        return Err(invalid());
+    }
+    Ok(headers.get(name).and_then(|value| value.to_str().ok()))
+}
+
+async fn require_admin<S: Store + Send + 'static>(
+    store: &SharedStore<S>,
+    credential: &Credential,
+    now: i64,
+) -> Result<(), Error> {
+    let credential = credential.clone();
+    let grants = store
+        .run(move |store| access::permissions(store, &credential, now))
+        .await?;
+    if grants.is_administrator() {
+        Ok(())
+    } else {
+        Err(harmion_node::Error::Forbidden.into())
+    }
+}
+
 async fn respond<S: Store + Send + 'static>(
     context: Arc<RequestContext<S>>,
     activity: watch::Sender<()>,
@@ -302,6 +372,15 @@ async fn respond<S: Store + Send + 'static>(
         .strip_prefix("/app/v1/")
         .unwrap_or("")
         .to_owned();
+    let owner = match owner_headers(request.headers()) {
+        Ok(headers) => headers,
+        Err(_) => {
+            return Ok(response(
+                StatusCode::BAD_REQUEST,
+                json!({"error":"invalid_owner_headers"}),
+            ));
+        }
+    };
     let body = match Limited::new(request.into_body(), MAX_RECORD_BYTES)
         .collect()
         .await
@@ -331,6 +410,32 @@ async fn respond<S: Store + Send + 'static>(
     let Some(credential) = credential else {
         return Ok(failure(harmion_node::Error::Unauthenticated.into()));
     };
+    if harmion_protocol::owner::requires_assertion(&operation) {
+        let store = context.store.clone();
+        let owner_credential = credential.clone();
+        let owner_operation = operation.clone();
+        let owner_body = body.to_vec();
+        let now = SystemHost.now_micros();
+        if let Err(error) = store
+            .run(move |store| {
+                store.transaction(|tx| {
+                    owner::authorize(
+                        tx,
+                        &owner_credential,
+                        &owner_operation,
+                        &owner_body,
+                        owner.challenge,
+                        owner.signature.as_deref(),
+                        "app",
+                        now,
+                    )
+                })
+            })
+            .await
+        {
+            return Ok(failure(error));
+        }
+    }
     if operation == "export" {
         if !body.is_empty() {
             return Ok(failure(invalid().into()));
@@ -389,6 +494,137 @@ fn manifest_json(manifest: &harmion_node::provisioning::ExportManifest) -> Json 
         "contacts": manifest.contacts.iter().map(member_json).collect::<Vec<_>>(),
     })
 }
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerEnrollRequest {
+    public_key: String,
+    #[serde(default)]
+    label: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerRevokeRequest {
+    credential: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerRecoverRequest {
+    recovery_code: String,
+    public_key: String,
+    #[serde(default)]
+    label: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerEnforceRequest {
+    enforce: bool,
+}
+
+async fn owner_operation<S: Store + Send + 'static>(
+    store: &SharedStore<S>,
+    credential: Credential,
+    operation: &str,
+    body: Vec<u8>,
+) -> Result<Json, Error> {
+    match operation {
+        "owner-status" => {
+            if !body.is_empty() {
+                return Err(invalid().into());
+            }
+            require_admin(store, &credential, SystemHost.now_micros()).await?;
+            let status = store
+                .run(|store| store.transaction(|tx| owner::status(tx)))
+                .await?;
+            Ok(json!(status))
+        }
+        "owner-challenge" => {
+            let request: harmion_protocol::owner::ChallengeRequest =
+                serde_json::from_slice(&body).map_err(|_| invalid())?;
+            let id = SystemHost.random_bytes()?;
+            let now = SystemHost.now_micros();
+            let challenge = store
+                .run(move |store| {
+                    store.transaction(|tx| owner::challenge(tx, &credential, request, id, now))
+                })
+                .await?;
+            Ok(json!(challenge))
+        }
+        "owner-enroll" => {
+            let request: OwnerEnrollRequest =
+                serde_json::from_slice(&body).map_err(|_| invalid())?;
+            let id = SystemHost.random_bytes()?;
+            let now = SystemHost.now_micros();
+            let credential = store
+                .run(move |store| {
+                    store.transaction(|tx| {
+                        owner::enroll(tx, &request.public_key, &request.label, id, "owner", now)
+                    })
+                })
+                .await?;
+            Ok(json!({
+                "credential":hex(&credential.id),
+                "fingerprint":credential.fingerprint,
+                "label":credential.label,
+            }))
+        }
+        "owner-revoke" => {
+            let request: OwnerRevokeRequest =
+                serde_json::from_slice(&body).map_err(|_| invalid())?;
+            let id = harmion_protocol::unhex::<32>(&request.credential)?;
+            let now = SystemHost.now_micros();
+            store
+                .run(move |store| store.transaction(|tx| owner::revoke(tx, id, "owner", now)))
+                .await?;
+            Ok(json!({"revoked":true}))
+        }
+        "owner-recover" => {
+            let request: OwnerRecoverRequest =
+                serde_json::from_slice(&body).map_err(|_| invalid())?;
+            require_admin(store, &credential, SystemHost.now_micros()).await?;
+            let recovery_code = harmion_protocol::unhex::<32>(&request.recovery_code)?;
+            let new_recovery_code = SystemHost.random_bytes()?;
+            let id = SystemHost.random_bytes()?;
+            let now = SystemHost.now_micros();
+            let credential = store
+                .run(move |store| {
+                    store.transaction(|tx| {
+                        owner::recover(
+                            tx,
+                            &recovery_code,
+                            &request.public_key,
+                            &request.label,
+                            &new_recovery_code,
+                            id,
+                            now,
+                        )
+                    })
+                })
+                .await?;
+            Ok(json!({
+                "credential":hex(&credential.id),
+                "fingerprint":credential.fingerprint,
+                "label":credential.label,
+                "recovery_code":hex(&new_recovery_code),
+            }))
+        }
+        "owner-enforce" => {
+            let request: OwnerEnforceRequest =
+                serde_json::from_slice(&body).map_err(|_| invalid())?;
+            let now = SystemHost.now_micros();
+            store
+                .run(move |store| {
+                    store.transaction(|tx| owner::set_enforce(tx, request.enforce, "owner", now))
+                })
+                .await?;
+            Ok(json!({"enforce":request.enforce}))
+        }
+        _ => Err(harmion_node::Error::NotFound.into()),
+    }
+}
+
 async fn dispatch<S: Store + Send + 'static>(
     context: &RequestContext<S>,
     credential: Credential,
@@ -400,6 +636,9 @@ async fn dispatch<S: Store + Send + 'static>(
     let subscriptions = context.subscriptions.clone();
     let interpreter = &context.interpreter;
     let registration = context.registration.clone();
+    if operation.starts_with("owner-") {
+        return owner_operation(store, credential, &operation, body).await;
+    }
     if matches!(operation.as_str(), "connect-list" | "connect-approve") {
         return crate::connect::handle_admin(store, credential, &operation, body).await;
     }
@@ -734,7 +973,7 @@ async fn dispatch<S: Store + Send + 'static>(
                     "permissions" => json!(GrantSpec::from(permissions)),
                     _ => {
                         let mut methods = vec!["get","query","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","provision-manifest","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants","interpreter-list","interpreter-describe","interpreter-register","interpreter-approve","interpreter-call","interpreter-cancel"];
-                        methods.extend(["metrics", "sync-status"]);
+                        methods.extend(["metrics", "sync-status", "owner-status", "owner-challenge", "owner-enroll", "owner-revoke", "owner-recover", "owner-enforce"]);
                         if oauth.is_some() { methods.extend(["oauth-register","oauth-consent","oauth-preview"]); }
                         json!({"version":1,"oauth":oauth.is_some(),"query":true,"subscriptions":true,
                         "interpreter":true,

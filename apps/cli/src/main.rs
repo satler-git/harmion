@@ -4,7 +4,7 @@ use clap::Parser;
 use cli::{Cli, Command as CliCommand};
 use domain::{Change, ContentId, Field, UpdateId, Value};
 use harmion_client::{
-    Client, ProtectedDir,
+    Client, OwnerSigner, ProtectedDir, SshSigner,
     protocol::{
         connect::ConnectionApproval, interpreter, interpreter::InvocationId,
         interpreter::ProviderId, *,
@@ -12,7 +12,12 @@ use harmion_client::{
     random_id,
 };
 use resolution::{MergeInputRequest, MergePart, parse_selections};
-use std::{collections::BTreeMap, fs::File, io::Read, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::{IsTerminal, Read, Write},
+    path::{Path, PathBuf},
+};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 fn read(path: &str, max: usize) -> Result<Vec<u8>> {
@@ -86,18 +91,105 @@ async fn save(
         serde_json::json!({"content_id":hex(&content_id.0),"request_id":hex(&request.request_id.0),"request_file":path,"result":result}),
     )
 }
+struct OwnerCli {
+    signer: Option<SshSigner>,
+    enforce: bool,
+}
+
+impl OwnerCli {
+    async fn new(client: &Client, key: Option<&str>) -> Result<Self> {
+        let signer = key
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HARMION_OWNER_SSH_KEY").map(PathBuf::from))
+            .or_else(|| {
+                let home = std::env::var_os("HOME")?;
+                let path = PathBuf::from(home).join(".ssh").join("id_ed25519.pub");
+                path.is_file().then_some(path)
+            })
+            .map(SshSigner::new);
+        let enforce = client
+            .owner_status()
+            .await
+            .map(|status| status["enforce"] == true)
+            .unwrap_or(false);
+        Ok(Self { signer, enforce })
+    }
+
+    async fn call(
+        &self,
+        client: &Client,
+        operation: &str,
+        body: &[u8],
+        target: Option<[u8; 32]>,
+        summary: &str,
+    ) -> Result<serde_json::Value> {
+        if self.enforce && harmion_client::protocol::owner::requires_assertion(operation) {
+            let signer = self
+                .signer
+                .as_ref()
+                .ok_or("owner enforcement is on; pass --owner-key or set HARMION_OWNER_SSH_KEY")?;
+            confirm(summary)?;
+            Ok(client
+                .call_owner(operation, body, target, None, signer)
+                .await?)
+        } else {
+            Ok(client.call(operation, body).await?)
+        }
+    }
+
+    async fn export(&self, client: &Client, path: &str) -> Result<serde_json::Value> {
+        if !self.enforce {
+            return Ok(client.export_directory(path).await?);
+        }
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or("owner enforcement is on; pass --owner-key or set HARMION_OWNER_SSH_KEY")?;
+        confirm(&format!("全データを {path} へExport"))?;
+        let challenge = client.owner_challenge("export", None, &[], None).await?;
+        let statement = unhex_bytes(&challenge.statement, MAX_RECORD_BYTES)?;
+        let signature = signer.sign(&statement)?;
+        Ok(client
+            .export_directory_signed(path, unhex(&challenge.challenge)?, signature)
+            .await?)
+    }
+}
+
+fn confirm(summary: &str) -> Result<()> {
+    if !std::io::stdin().is_terminal() {
+        return Err("owner approval requires a TTY; refusing a non-interactive R2".into());
+    }
+    eprint!("\n[harmion] 所有者の承認が必要です\n{summary}\n承認しますか? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    if matches!(input.trim(), "y" | "Y" | "yes" | "YES") {
+        Ok(())
+    } else {
+        Err("owner approval denied".into())
+    }
+}
+
 async fn execute(cli: &Cli) -> Result<serde_json::Value> {
     let directory = &cli.node;
     let client = Client::from_directory(directory)?;
+    let owner = OwnerCli::new(&client, cli.owner_key.as_deref()).await?;
     let command = cli.command.operation();
     match &cli.command {
-        CliCommand::Join { path } | CliCommand::JoinRecovery { path } => Ok(client
-            .join_directory(
-                &ProtectedDir::open(directory)?,
-                &read(path, MAX_RECORD_BYTES)?,
-                command == "join-recovery",
-            )
-            .await?),
+        CliCommand::Join { path } | CliCommand::JoinRecovery { path } => {
+            let registration = owner
+                .call(
+                    &client,
+                    command,
+                    &read(path, MAX_RECORD_BYTES)?,
+                    None,
+                    "ピア登録を確認してノードを参加させます",
+                )
+                .await?;
+            let bytes = serde_json::to_vec(&registration)?;
+            ProtectedDir::open(directory)?.replace("peer.json", &bytes)?;
+            Ok(registration)
+        }
         CliCommand::Identity
         | CliCommand::Capabilities
         | CliCommand::Permissions
@@ -109,7 +201,7 @@ async fn execute(cli: &Cli) -> Result<serde_json::Value> {
                 .transpose()?;
             Ok(serde_json::to_value(client.sync_status(update).await?)?)
         }
-        CliCommand::Export { path } => Ok(client.export_directory(path).await?),
+        CliCommand::Export { path } => Ok(owner.export(&client, path).await?),
         CliCommand::OauthRegister { name, redirect } => Ok(client
             .call(
                 command,
@@ -120,31 +212,67 @@ async fn execute(cli: &Cli) -> Result<serde_json::Value> {
             )
             .await?),
         CliCommand::OauthConsent { request } => {
-            Ok(client.call(command, &unhex::<32>(request)?).await?)
+            let request = unhex::<32>(request)?;
+            owner
+                .call(
+                    &client,
+                    command,
+                    &request,
+                    Some(request),
+                    &format!("OAuth要求 {} の認可リンクを発行", hex(&request)),
+                )
+                .await
         }
-        CliCommand::Get { id }
-        | CliCommand::Conflicts { id }
-        | CliCommand::Inspect { id }
-        | CliCommand::Sync { id }
-        | CliCommand::Retire { id }
+        CliCommand::Get { id } | CliCommand::Conflicts { id } | CliCommand::Inspect { id } => {
+            Ok(client.call(command, &unhex::<32>(id)?).await?)
+        }
+        CliCommand::Sync { id } => Ok(client.call(command, &unhex::<32>(id)?).await?),
+        CliCommand::Retire { id }
         | CliCommand::DismissRetirement { id }
         | CliCommand::ConfirmRetirement { id } => {
-            Ok(client.call(command, &unhex::<32>(id)?).await?)
+            let id = unhex::<32>(id)?;
+            owner
+                .call(
+                    &client,
+                    command,
+                    &id,
+                    Some(id),
+                    &format!("{command}: ノード/証明 {}", hex(&id)),
+                )
+                .await
         }
         CliCommand::Approve { path }
         | CliCommand::ChangeGrants { path }
         | CliCommand::TrustRecoveryPeer { path } => {
-            Ok(client.call(command, &read(path, MAX_RECORD_BYTES)?).await?)
+            let body = read(path, MAX_RECORD_BYTES)?;
+            owner
+                .call(
+                    &client,
+                    command,
+                    &body,
+                    None,
+                    &format!("{command}: {path} の内容を適用"),
+                )
+                .await
         }
         CliCommand::InterpreterList => Ok(client.interpreter_list().await?),
         CliCommand::ConnectList => Ok(client.connect_list().await?),
-        CliCommand::ConnectApprove { id, deny, replace } => Ok(client
-            .connect_approve(&ConnectionApproval {
+        CliCommand::ConnectApprove { id, deny, replace } => {
+            let body = serde_json::to_vec(&ConnectionApproval {
                 connection_id: id.to_string(),
                 allow: !deny,
                 replace: *replace,
-            })
-            .await?),
+            })?;
+            owner
+                .call(
+                    &client,
+                    "connect-approve",
+                    &body,
+                    None,
+                    &format!("接続要求 {id} を{}", if *deny { "拒否" } else { "承認" }),
+                )
+                .await
+        }
         CliCommand::InterpreterDescribe { id } => {
             Ok(client.interpreter_describe(ProviderId(unhex(id)?)).await?)
         }
@@ -155,9 +283,22 @@ async fn execute(cli: &Cli) -> Result<serde_json::Value> {
             )?)?;
             Ok(client.interpreter_register(&registration).await?)
         }
-        CliCommand::InterpreterApprove { id, replace } => Ok(client
-            .interpreter_approve(ProviderId(unhex(id)?), *replace)
-            .await?),
+        CliCommand::InterpreterApprove { id, replace } => {
+            let provider = ProviderId(unhex(id)?);
+            let body = serde_json::to_vec(&serde_json::json!({
+                "provider_id": provider,
+                "replace": *replace,
+            }))?;
+            owner
+                .call(
+                    &client,
+                    "interpreter-approve",
+                    &body,
+                    Some(provider.0),
+                    &format!("Interpreter Provider {id} を承認"),
+                )
+                .await
+        }
         CliCommand::InterpreterCall { request } => {
             let request = interpreter::decode_call_request(&read(
                 request,
@@ -169,7 +310,15 @@ async fn execute(cli: &Cli) -> Result<serde_json::Value> {
             Ok(client.interpreter_cancel(InvocationId(unhex(id)?)).await?)
         }
         CliCommand::ProvisionManifest { peer, out } => {
-            let manifest = client.call(command, &peer_registration(peer)?).await?;
+            let manifest = owner
+                .call(
+                    &client,
+                    command,
+                    &peer_registration(peer)?,
+                    None,
+                    "Workerのprovisioning manifestを生成します",
+                )
+                .await?;
             match out {
                 Some(path) => {
                     let mut text = serde_json::to_string_pretty(&manifest)?;
@@ -179,6 +328,63 @@ async fn execute(cli: &Cli) -> Result<serde_json::Value> {
                 }
                 None => Ok(manifest),
             }
+        }
+        CliCommand::OwnerStatus => Ok(client.owner_status().await?),
+        CliCommand::OwnerEnroll { key, label } => {
+            let public_key = String::from_utf8(read(key, 16 * 1024)?)?;
+            let body = serde_json::to_vec(&serde_json::json!({
+                "public_key": public_key,
+                "label": label,
+            }))?;
+            owner
+                .call(
+                    &client,
+                    "owner-enroll",
+                    &body,
+                    None,
+                    "所有者のバックアップ鍵を追加します",
+                )
+                .await
+        }
+        CliCommand::OwnerRevoke { credential } => {
+            let credential = unhex::<32>(credential)?;
+            let body = serde_json::to_vec(&serde_json::json!({
+                "credential": hex(&credential),
+            }))?;
+            owner
+                .call(
+                    &client,
+                    "owner-revoke",
+                    &body,
+                    Some(credential),
+                    "所有者credentialを失効します",
+                )
+                .await
+        }
+        CliCommand::OwnerRecover { code, key, label } => {
+            let public_key = String::from_utf8(read(key, 16 * 1024)?)?;
+            let body = serde_json::to_vec(&serde_json::json!({
+                "recovery_code": code,
+                "public_key": public_key,
+                "label": label,
+            }))?;
+            confirm("回復コードで全所有者credentialを置き換えます")?;
+            Ok(client.call("owner-recover", &body).await?)
+        }
+        CliCommand::OwnerEnforce { enable } => {
+            let body = serde_json::to_vec(&serde_json::json!({"enforce": enable}))?;
+            owner
+                .call(
+                    &client,
+                    "owner-enforce",
+                    &body,
+                    None,
+                    &format!(
+                        "所有者enforcementを{}",
+                        if *enable { "有効" } else { "無効" }
+                    ),
+                )
+                .await
         }
         CliCommand::Save { path } => {
             let bytes = read(path, MAX_RECORD_BYTES)?;
@@ -322,7 +528,6 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     fn registration_code() -> (Vec<u8>, String) {
         let registration = serde_json::json!({

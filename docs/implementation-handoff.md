@@ -64,7 +64,7 @@ quota節約のため、**Cloudflareレプリカ本体・Android・Windowsの新�
 次の実装順:
 
 1. Interpreter（契約確定 → registry/provider_session/invocation → App/Provider API → SDK/CLI → 管理UI） — native v1初期スライスはR52、統合接続と権限はR53で完了
-1b. 所有者認証（メモを元に、OS鍵保管/Passkey → Cluster Ownerポリシー → 回復・ローテーションの順で検討） — 未着手・所有者判断待ち
+1b. 所有者認証（R2端末承認＋ノード検証SSH assertion＋監査はR56で実装済み。[設計案](owner-authentication-design.md)。残りはWebAuthn/OS鍵保管/Cluster Owner/threshold） — 追加判断待ち
 2. 所有者が必要とした時点でWorkersの本番運用準備（Accessポリシー、secret配布、TLS終端、isolate単位のschemaキャッシュ）
 3. Android → WindowsのOSホスト
 4. E2Eの残り（workerd再起動を含むDO耐久、管理画面を含むdaemon起動の通し確認）

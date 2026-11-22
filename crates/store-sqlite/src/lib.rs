@@ -15,6 +15,7 @@ use harmion_node::{
     Error,
     access::{App, Filter, Grants},
     application::{RequestResult, TokenPurpose, TokenState},
+    owner::{OwnerAudit, OwnerChallenge, OwnerCredential, OwnerPolicy},
     query::{QueryPosition, QueryRevision},
     storage::{ChangeWindow, ContentChange, Identity, Store, Transaction},
 };
@@ -34,6 +35,33 @@ fn db(e: rusqlite::Error) -> Error {
 fn fixed(bytes: Vec<u8>) -> Result<[u8; 32], Error> {
     bytes.try_into().map_err(|_| Error::CorruptLog)
 }
+
+type OwnerCredentialRow = (Vec<u8>, i64, String, String, String, i64, Option<i64>, bool);
+type OwnerChallengeRow = (
+    Vec<u8>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    String,
+    Option<Vec<u8>>,
+    Vec<u8>,
+    i64,
+    i64,
+    Option<i64>,
+);
+type OwnerAuditRow = (
+    i64,
+    i64,
+    String,
+    String,
+    Option<Vec<u8>>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    String,
+    Vec<u8>,
+    Vec<u8>,
+);
 
 struct InterpreterRow {
     provider: Vec<u8>,
@@ -249,7 +277,7 @@ impl SqliteStore {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(db)?;
-        if !(0..=16).contains(&version) {
+        if !(0..=17).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
@@ -451,6 +479,56 @@ impl SqliteStore {
             )
             .map_err(db)?;
         }
+        if version < 17 {
+            // Owner approvals are node-local. Existing nodes keep enforce=0 and
+            // continue to work until the host runs the offline enrollment.
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS owner_credentials (
+                    id BLOB PRIMARY KEY CHECK(length(id)=32),
+                    mechanism INTEGER NOT NULL CHECK(mechanism=1),
+                    public_key TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    last_used_at INTEGER,
+                    revoked INTEGER NOT NULL CHECK(revoked IN (0,1)));
+                CREATE TABLE IF NOT EXISTS owner_policy (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    enforce INTEGER NOT NULL CHECK(enforce IN (0,1)),
+                    recovery_hash BLOB CHECK(recovery_hash IS NULL OR length(recovery_hash)=32),
+                    updated_at INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS owner_challenges (
+                    id BLOB PRIMARY KEY CHECK(length(id)=32),
+                    app BLOB NOT NULL CHECK(length(app)=32),
+                    statement_hash BLOB NOT NULL CHECK(length(statement_hash)=32),
+                    session BLOB CHECK(session IS NULL OR length(session)=32),
+                    operation TEXT NOT NULL,
+                    target BLOB CHECK(target IS NULL OR length(target)=32),
+                    args_hash BLOB NOT NULL CHECK(length(args_hash)=32),
+                    issued_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    used_at INTEGER);
+                CREATE INDEX IF NOT EXISTS owner_challenges_expiry
+                    ON owner_challenges(expires_at);
+                CREATE INDEX IF NOT EXISTS owner_challenges_app
+                    ON owner_challenges(app, used_at, expires_at);
+                CREATE TABLE IF NOT EXISTS owner_audit (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    at INTEGER NOT NULL,
+                    actor TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    target BLOB CHECK(target IS NULL OR length(target)=32),
+                    args_hash BLOB NOT NULL CHECK(length(args_hash)=32),
+                    credential BLOB CHECK(credential IS NULL OR length(credential)=32),
+                    challenge BLOB CHECK(challenge IS NULL OR length(challenge)=32),
+                    session BLOB CHECK(session IS NULL OR length(session)=32),
+                    result TEXT NOT NULL,
+                    prev_hash BLOB NOT NULL CHECK(length(prev_hash)=32),
+                    entry_hash BLOB NOT NULL UNIQUE CHECK(length(entry_hash)=32));
+                PRAGMA user_version=17;",
+            )
+            .map_err(db)?;
+        }
         {
             let mut storage = SqlTransaction { sql: &tx, identity };
             // Reject broken bytes/dependencies at startup; never salvage only the
@@ -507,7 +585,7 @@ impl SqliteStore {
         let version: i64 = tx
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db)?;
-        if !(1..=16).contains(&version) {
+        if !(1..=17).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
@@ -912,6 +990,341 @@ impl Transaction for SqlTransaction<'_> {
             )
             .map_err(db)?;
         Ok(())
+    }
+    fn owner_credentials(&mut self) -> Result<Vec<OwnerCredential>, Error> {
+        let mut statement = self
+            .sql
+            .prepare(
+                "SELECT id,mechanism,public_key,fingerprint,label,created_at,last_used_at,revoked
+                 FROM owner_credentials ORDER BY created_at,id",
+            )
+            .map_err(db)?;
+        let rows: Vec<OwnerCredentialRow> = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            })
+            .map_err(db)?
+            .collect::<Result<_, _>>()
+            .map_err(db)?;
+        rows.into_iter()
+            .map(
+                |(
+                    id,
+                    mechanism,
+                    public_key,
+                    fingerprint,
+                    label,
+                    created_at,
+                    last_used_at,
+                    revoked,
+                )| {
+                    let mechanism = u8::try_from(mechanism).map_err(|_| Error::CorruptLog)?;
+                    if mechanism != 1 {
+                        return Err(Error::CorruptLog);
+                    }
+                    Ok(OwnerCredential {
+                        id: fixed(id)?,
+                        mechanism,
+                        public_key,
+                        fingerprint,
+                        label,
+                        created_at,
+                        last_used_at,
+                        revoked,
+                    })
+                },
+            )
+            .collect()
+    }
+    fn insert_owner_credential(&mut self, credential: &OwnerCredential) -> Result<(), Error> {
+        self.sql
+            .execute(
+                "INSERT INTO owner_credentials
+                 (id,mechanism,public_key,fingerprint,label,created_at,last_used_at,revoked)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    credential.id,
+                    credential.mechanism,
+                    credential.public_key,
+                    credential.fingerprint,
+                    credential.label,
+                    credential.created_at,
+                    credential.last_used_at,
+                    credential.revoked,
+                ],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+    fn update_owner_credential(&mut self, credential: &OwnerCredential) -> Result<(), Error> {
+        let changed = self
+            .sql
+            .execute(
+                "UPDATE owner_credentials SET public_key=?2,fingerprint=?3,label=?4,
+                    last_used_at=?5,revoked=?6 WHERE id=?1",
+                params![
+                    credential.id,
+                    credential.public_key,
+                    credential.fingerprint,
+                    credential.label,
+                    credential.last_used_at,
+                    credential.revoked,
+                ],
+            )
+            .map_err(db)?;
+        if changed != 1 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
+    }
+    fn owner_policy(&mut self) -> Result<OwnerPolicy, Error> {
+        let row: Option<(bool, Option<Vec<u8>>, i64)> = self
+            .sql
+            .query_row(
+                "SELECT enforce,recovery_hash,updated_at FROM owner_policy WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        match row {
+            Some((enforce, recovery, updated_at)) => Ok(OwnerPolicy {
+                enforce,
+                recovery_hash: recovery.map(fixed).transpose()?,
+                updated_at,
+            }),
+            None => Ok(OwnerPolicy::default()),
+        }
+    }
+    fn put_owner_policy(&mut self, policy: &OwnerPolicy) -> Result<(), Error> {
+        self.sql
+            .execute(
+                "INSERT INTO owner_policy(singleton,enforce,recovery_hash,updated_at)
+                 VALUES(1,?1,?2,?3)
+                 ON CONFLICT(singleton) DO UPDATE SET
+                    enforce=excluded.enforce,
+                    recovery_hash=excluded.recovery_hash,
+                    updated_at=excluded.updated_at",
+                params![
+                    policy.enforce,
+                    policy.recovery_hash.as_ref().map(|hash| hash.as_slice()),
+                    policy.updated_at
+                ],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+    fn insert_owner_challenge(&mut self, challenge: &OwnerChallenge) -> Result<(), Error> {
+        self.sql
+            .execute(
+                "INSERT INTO owner_challenges
+                 (id,app,statement_hash,session,operation,target,args_hash,issued_at,expires_at,used_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![
+                    challenge.id,
+                    challenge.app.0,
+                    challenge.statement_hash,
+                    challenge.session.as_ref().map(|id| id.as_slice()),
+                    challenge.operation,
+                    challenge.target.as_ref().map(|id| id.as_slice()),
+                    challenge.args_hash,
+                    challenge.issued_at,
+                    challenge.expires_at,
+                    challenge.used_at,
+                ],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+    fn owner_challenge(&mut self, id: [u8; 32]) -> Result<Option<OwnerChallenge>, Error> {
+        let row: Option<OwnerChallengeRow> = self
+            .sql
+            .query_row(
+                "SELECT app,statement_hash,session,operation,target,args_hash,issued_at,expires_at,used_at
+                 FROM owner_challenges WHERE id=?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(db)?;
+        row.map(
+            |(
+                app,
+                statement_hash,
+                session,
+                operation,
+                target,
+                args_hash,
+                issued_at,
+                expires_at,
+                used_at,
+            )| {
+                Ok(OwnerChallenge {
+                    id,
+                    app: AppId(fixed(app)?),
+                    statement_hash: fixed(statement_hash)?,
+                    session: session.map(fixed).transpose()?,
+                    operation,
+                    target: target.map(fixed).transpose()?,
+                    args_hash: fixed(args_hash)?,
+                    issued_at,
+                    expires_at,
+                    used_at,
+                })
+            },
+        )
+        .transpose()
+    }
+    fn consume_owner_challenge(&mut self, id: [u8; 32], now: i64) -> Result<bool, Error> {
+        let changed = self
+            .sql
+            .execute(
+                "UPDATE owner_challenges SET used_at=?1
+                 WHERE id=?2 AND used_at IS NULL AND expires_at>?1",
+                params![now, id],
+            )
+            .map_err(db)?;
+        Ok(changed == 1)
+    }
+    fn purge_owner_challenges(&mut self, now: i64) -> Result<(), Error> {
+        self.sql
+            .execute(
+                "DELETE FROM owner_challenges
+                 WHERE expires_at<?1 OR (used_at IS NOT NULL AND used_at<?2)",
+                params![now, now.saturating_sub(86_400_000_000)],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+    fn owner_pending_challenges(&mut self, app: AppId, now: i64) -> Result<u32, Error> {
+        let count: i64 = self
+            .sql
+            .query_row(
+                "SELECT COUNT(*) FROM owner_challenges
+                 WHERE app=?1 AND used_at IS NULL AND expires_at>?2",
+                params![app.0, now],
+                |row| row.get(0),
+            )
+            .map_err(db)?;
+        u32::try_from(count).map_err(|_| Error::CorruptLog)
+    }
+    fn append_owner_audit(&mut self, audit: &OwnerAudit) -> Result<[u8; 32], Error> {
+        let previous: Option<Vec<u8>> = self
+            .sql
+            .query_row(
+                "SELECT entry_hash FROM owner_audit ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db)?;
+        let previous = previous.map(fixed).transpose()?.unwrap_or([0; 32]);
+        let entry = harmion_node::owner::audit_entry_hash(previous, audit);
+        self.sql
+            .execute(
+                "INSERT INTO owner_audit
+                 (at,actor,operation,target,args_hash,credential,challenge,session,result,prev_hash,entry_hash)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![
+                    audit.at,
+                    audit.actor,
+                    audit.operation,
+                    audit.target.as_ref().map(|id| id.as_slice()),
+                    audit.args_hash,
+                    audit.credential.as_ref().map(|id| id.as_slice()),
+                    audit.challenge.as_ref().map(|id| id.as_slice()),
+                    audit.session.as_ref().map(|id| id.as_slice()),
+                    audit.result,
+                    previous,
+                    entry,
+                ],
+            )
+            .map_err(db)?;
+        Ok(entry)
+    }
+    fn owner_audit_entries(&mut self, limit: u32) -> Result<Vec<OwnerAudit>, Error> {
+        let mut statement = self
+            .sql
+            .prepare(
+                "SELECT seq,at,actor,operation,target,args_hash,credential,challenge,session,
+                    result,prev_hash,entry_hash
+                 FROM owner_audit ORDER BY seq DESC LIMIT ?1",
+            )
+            .map_err(db)?;
+        let rows: Vec<OwnerAuditRow> = statement
+            .query_map([i64::from(limit)], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                ))
+            })
+            .map_err(db)?
+            .collect::<Result<_, _>>()
+            .map_err(db)?;
+        rows.into_iter()
+            .map(
+                |(
+                    seq,
+                    at,
+                    actor,
+                    operation,
+                    target,
+                    args_hash,
+                    credential,
+                    challenge,
+                    session,
+                    result,
+                    prev_hash,
+                    entry_hash,
+                )| {
+                    Ok(OwnerAudit {
+                        seq: u64::try_from(seq).map_err(|_| Error::CorruptLog)?,
+                        at,
+                        actor,
+                        operation,
+                        target: target.map(fixed).transpose()?,
+                        args_hash: fixed(args_hash)?,
+                        credential: credential.map(fixed).transpose()?,
+                        challenge: challenge.map(fixed).transpose()?,
+                        session: session.map(fixed).transpose()?,
+                        result,
+                        prev_hash: fixed(prev_hash)?,
+                        entry_hash: fixed(entry_hash)?,
+                    })
+                },
+            )
+            .collect()
     }
     fn identity(&self) -> Identity {
         self.identity

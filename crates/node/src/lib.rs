@@ -11,6 +11,7 @@ pub mod membership;
 pub mod membership_log;
 pub mod membership_state;
 pub mod oauth;
+pub mod owner;
 pub mod provisioning;
 pub mod query;
 pub mod replication;
@@ -62,6 +63,20 @@ pub enum Error {
         #[source]
         reason: domain::Error,
     },
+    /// The operation requires a fresh owner approval, but none was supplied.
+    OwnerAssertionRequired,
+    /// The owner signature, challenge binding, or credential is invalid.
+    OwnerAssertionInvalid,
+    /// The owner challenge exists but has expired.
+    OwnerChallengeExpired,
+    /// The owner challenge was already consumed.
+    OwnerChallengeUsed,
+    /// The recovery code does not match the node's recovery policy.
+    OwnerRecoveryInvalid,
+    /// Too many pending owner challenges.
+    OwnerCapacity,
+    /// The host cannot run the configured owner-signature verifier.
+    OwnerVerifierUnavailable,
     /// The host does not provide this optional storage capability.
     Unsupported,
     /// Another approved Provider already owns the requested name.

@@ -1,5 +1,5 @@
 use crate::{
-    Client, Error, ProtectedDir,
+    Client, Error, OwnerAssertion, ProtectedDir,
     protocol::{export as format, hex, unhex},
 };
 use serde_json::{Value, json};
@@ -11,8 +11,32 @@ use std::{
 impl Client {
     /// Write a completed owner export to a new local directory.
     pub async fn export_directory(&self, path: &str) -> Result<Value, Error> {
+        self.export_directory_with(path, None).await
+    }
+
+    pub async fn export_directory_signed(
+        &self,
+        path: &str,
+        challenge: [u8; 32],
+        signature: Vec<u8>,
+    ) -> Result<Value, Error> {
+        self.export_directory_with(
+            path,
+            Some(OwnerAssertion {
+                challenge,
+                signature,
+            }),
+        )
+        .await
+    }
+
+    async fn export_directory_with(
+        &self,
+        path: &str,
+        owner: Option<OwnerAssertion>,
+    ) -> Result<Value, Error> {
         let mut output = None;
-        self.export(|record| {
+        self.export_with(owner.as_ref(), |record| {
             if record["type"] == "header" {
                 output = Some(Output::new(path)?);
                 Ok(())

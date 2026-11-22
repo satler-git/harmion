@@ -115,6 +115,22 @@ impl Confirmations {
             .filter(|value| value.expires > Instant::now())
             .ok_or(StatusCode::GONE)
     }
+    pub fn summary(&self, input: &str) -> Option<String> {
+        let key = unhex(input).ok()?;
+        let tickets = self.0.lock().ok()?;
+        let pending = tickets.get(&key)?;
+        if pending.expires <= Instant::now() {
+            return None;
+        }
+        let action = match pending.action {
+            PeerAction::Approve => "承認",
+            PeerAction::Join => "参加",
+        };
+        Some(format!(
+            "Peerを{action}: Node ID {} / Cluster ID {}",
+            pending.registration.node_id, pending.registration.cluster_id
+        ))
+    }
 }
 
 #[cfg(test)]

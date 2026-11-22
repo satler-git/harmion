@@ -1,9 +1,9 @@
 use crate::transfer::{self, Confirmations, PeerAction};
 use harmion_client::{
-    Client, Error, ProtectedDir,
+    Client, Error, OwnerSigner, ProtectedDir, SshSigner,
     protocol::{
-        ChangeGrantsRequest, Command, EditToken, OAuthRegistration, PeerBinding, PeerRegistration,
-        RequestId, SaveRequest,
+        ChangeGrantsRequest, Command, EditToken, MAX_RECORD_BYTES, OAuthRegistration, PeerBinding,
+        PeerRegistration, RequestId, SaveRequest,
         connect::ConnectionApproval,
         domain::{Change, ContentId, Field, UpdateId, Value as FieldValue},
         interpreter::ProviderId,
@@ -11,12 +11,72 @@ use harmion_client::{
         resolution::{
             MergeInputRequest, MergePart, SelectionField, SelectionSpec, parse_selections,
         },
-        unhex,
+        unhex, unhex_bytes,
     },
 };
 use hyper::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+pub(crate) struct Caller<'a> {
+    client: &'a Client,
+    signer: Option<&'a SshSigner>,
+    enforce: bool,
+    session: [u8; 32],
+}
+
+impl<'a> Caller<'a> {
+    pub fn new(
+        client: &'a Client,
+        signer: Option<&'a SshSigner>,
+        enforce: bool,
+        session: [u8; 32],
+    ) -> Self {
+        Self {
+            client,
+            signer,
+            enforce,
+            session,
+        }
+    }
+
+    fn client(&self) -> &Client {
+        self.client
+    }
+
+    async fn call(
+        &self,
+        operation: &str,
+        body: &[u8],
+        target: Option<[u8; 32]>,
+    ) -> Result<Value, Error> {
+        if self.enforce && harmion_client::protocol::owner::requires_assertion(operation) {
+            let signer = self.signer.ok_or(Error::Http(403))?;
+            self.client
+                .call_owner(operation, body, target, Some(self.session), signer)
+                .await
+        } else {
+            self.client.call(operation, body).await
+        }
+    }
+
+    async fn export(&self, path: &str) -> Result<Value, Error> {
+        if self.enforce {
+            let signer = self.signer.ok_or(Error::Http(403))?;
+            let challenge = self
+                .client
+                .owner_challenge("export", None, &[], Some(self.session))
+                .await?;
+            let statement = unhex_bytes(&challenge.statement, MAX_RECORD_BYTES)?;
+            let signature = signer.sign(&statement)?;
+            self.client
+                .export_directory_signed(path, unhex(&challenge.challenge)?, signature)
+                .await
+        } else {
+            self.client.export_directory(path).await
+        }
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,7 +191,7 @@ struct RestoreField {
 }
 
 pub(crate) async fn dispatch(
-    client: &Client,
+    caller: &Caller<'_>,
     node: &ProtectedDir,
     confirmations: &Confirmations,
     path: &str,
@@ -140,11 +200,11 @@ pub(crate) async fn dispatch(
     match path {
         "/overview" => {
             let (identity, permissions, capabilities, metrics, members) = tokio::try_join!(
-                client.call("identity", &[]),
-                client.call("permissions", &[]),
-                client.call("capabilities", &[]),
-                client.call("metrics", &[]),
-                client.call("members", &[]),
+                caller.call("identity", &[], None),
+                caller.call("permissions", &[], None),
+                caller.call("capabilities", &[], None),
+                caller.call("metrics", &[], None),
+                caller.call("members", &[], None),
             )
             .map_err(remote)?;
             let transfer = transfer::encode_peer(&identity)?;
@@ -156,7 +216,11 @@ pub(crate) async fn dispatch(
         "/peer-preview" => {
             let request: PeerPreview = parse(body)?;
             let registration = transfer::decode_peer(&request.input)?;
-            let local = client.call("identity", &[]).await.map_err(remote)?;
+            let local = caller
+                .client()
+                .call("identity", &[])
+                .await
+                .map_err(remote)?;
             // v3 is the native TLS/iroh registration; v4 is the explicit
             // signed-HTTPS binding. Never reinterpret one version as the other.
             let version_ok = match (&registration.binding, registration.version) {
@@ -191,13 +255,14 @@ pub(crate) async fn dispatch(
                     registration: preview.registration,
                 },
             };
-            node_operation(client, node, operation).await
+            node_operation(caller, node, operation).await
         }
         "/app-preview" => {
             let request: TextInput = parse(body)?;
             let input = request.input.trim();
             if let Some(request_id) = input.strip_prefix("harmion-auth:v1:") {
-                let preview = client
+                let preview = caller
+                    .client()
                     .call("oauth-preview", &id(request_id)?)
                     .await
                     .map_err(remote)?;
@@ -209,19 +274,20 @@ pub(crate) async fn dispatch(
                 )
             }
         }
-        "/members" => client.call("members", &[]).await.map_err(remote),
-        "/connect-list" => client.call("connect-list", &[]).await.map_err(remote),
+        "/members" => caller.call("members", &[], None).await.map_err(remote),
+        "/connect-list" => caller.call("connect-list", &[], None).await.map_err(remote),
         "/connect-approve" => {
             let request: ConnectionApproval = parse(body)?;
-            client
-                .call("connect-approve", &encode(&request)?)
+            caller
+                .call("connect-approve", &encode(&request)?, None)
                 .await
                 .map_err(remote)
         }
-        "/interpreter-list" => client.interpreter_list().await.map_err(remote),
+        "/interpreter-list" => caller.client().interpreter_list().await.map_err(remote),
         "/interpreter-describe" => {
             let request: DescribeProvider = parse(body)?;
-            client
+            caller
+                .client()
                 .interpreter_describe(ProviderId(
                     unhex(&request.provider).map_err(|_| StatusCode::BAD_REQUEST)?,
                 ))
@@ -230,33 +296,39 @@ pub(crate) async fn dispatch(
         }
         "/interpreter-approve" => {
             let request: ApproveProvider = parse(body)?;
-            client
-                .interpreter_approve(
-                    ProviderId(unhex(&request.provider).map_err(|_| StatusCode::BAD_REQUEST)?),
-                    request.replace,
-                )
+            let provider =
+                ProviderId(unhex(&request.provider).map_err(|_| StatusCode::BAD_REQUEST)?);
+            let body = serde_json::to_vec(&json!({
+                "provider_id": provider,
+                "replace": request.replace,
+            }))
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            caller
+                .call("interpreter-approve", &body, Some(provider.0))
                 .await
                 .map_err(remote)
         }
-        "/node" => node_operation(client, node, parse(body)?).await,
+        "/node" => node_operation(caller, node, parse(body)?).await,
         "/oauth-register" => {
             let request: OAuthRegistration = parse(body)?;
-            client
-                .call("oauth-register", &encode(&request)?)
+            caller
+                .call("oauth-register", &encode(&request)?, None)
                 .await
                 .map_err(remote)
         }
         "/oauth-consent" => {
             let request: ConsentRequest = parse(body)?;
-            client
-                .call("oauth-consent", &id(&request.request)?)
+            let target = id(&request.request)?;
+            caller
+                .call("oauth-consent", &target, Some(target))
                 .await
                 .map_err(remote)
         }
         "/change-grants" => {
             let request: ChangeGrantsRequest = parse(body)?;
-            client
-                .call("change-grants", &encode(&request)?)
+            let target = id(&request.app_id)?;
+            caller
+                .call("change-grants", &encode(&request)?, Some(target))
                 .await
                 .map_err(remote)
         }
@@ -265,17 +337,17 @@ pub(crate) async fn dispatch(
             if request.directory.is_empty() {
                 return Err(StatusCode::BAD_REQUEST);
             }
-            client
-                .export_directory(&request.directory)
-                .await
-                .map_err(remote)
+            caller.export(&request.directory).await.map_err(remote)
         }
         "/contents" => {
             let request: Page = parse(body)?;
             let page = if let Some(next) = request.next {
-                client.query_next(QueryCursor(id(&next)?), 24).await
+                caller
+                    .client()
+                    .query_next(QueryCursor(id(&next)?), 24)
+                    .await
             } else {
-                client.query(Condition::And(vec![]), 24).await
+                caller.client().query(Condition::And(vec![]), 24).await
             }
             .map_err(remote)?;
             let items: Vec<_> = page.items.iter().map(|item| json!({
@@ -293,8 +365,8 @@ pub(crate) async fn dispatch(
         }
         "/inspect" => {
             let request: Inspection = parse(body)?;
-            let mut data = client
-                .call("inspect", &id(&request.content)?)
+            let mut data = caller
+                .call("inspect", &id(&request.content)?, None)
                 .await
                 .map_err(remote)?;
             // Render typed attributes as exact JSON text in the UI, including large numbers.
@@ -329,9 +401,9 @@ pub(crate) async fn dispatch(
                 part: MergePart::Base(request.base.as_deref().map(id).transpose()?.map(UpdateId)),
             };
             let serialized = if path == "/merge-base" {
-                serde_json::to_value(client.merge_input(input).await.map_err(remote)?)
+                serde_json::to_value(caller.client().merge_input(input).await.map_err(remote)?)
             } else {
-                serde_json::to_value(client.merge_plan(input).await.map_err(remote)?)
+                serde_json::to_value(caller.client().merge_plan(input).await.map_err(remote)?)
             };
             serialized.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
         }
@@ -366,7 +438,8 @@ pub(crate) async fn dispatch(
                     }
                 }
             };
-            let receipt = client
+            let receipt = caller
+                .client()
                 .save(&SaveRequest {
                     content_id: ContentId(id(&request.content)?),
                     request_id: RequestId(id(&request.request_id)?),
@@ -380,29 +453,114 @@ pub(crate) async fn dispatch(
     }
 }
 
+pub(crate) fn approval_summary(
+    path: &str,
+    body: &[u8],
+    confirmations: &Confirmations,
+) -> Option<String> {
+    let summary = match path {
+        "/change-grants" => {
+            let request: ChangeGrantsRequest = serde_json::from_slice(body).ok()?;
+            let grants = serde_json::to_string(&request.grants).ok()?;
+            format!(
+                "アプリ {} のgrantを変更（revoked={}）\n{}",
+                request.app_id, request.revoked, grants
+            )
+        }
+        "/node" => {
+            let request: NodeOperation = serde_json::from_slice(body).ok()?;
+            match request {
+                NodeOperation::Approve { registration } => {
+                    format!("ノード {} を承認", registration.node_id)
+                }
+                NodeOperation::Join { registration } => {
+                    format!("ノード {} をこのクラスタへ参加", registration.node_id)
+                }
+                NodeOperation::Sync { .. } => return None,
+                NodeOperation::Retire { node } => format!("ノード {node} を退役"),
+                NodeOperation::ConfirmRetirement { certificate } => {
+                    format!("退役証明 {certificate} を確定")
+                }
+                NodeOperation::DismissRetirement { certificate } => {
+                    format!("保留中の退役証明 {certificate} を却下")
+                }
+            }
+        }
+        "/peer-confirm" => {
+            let request: Confirmation = serde_json::from_slice(body).ok()?;
+            confirmations.summary(&request.ticket)?
+        }
+        "/connect-approve" => {
+            let request: ConnectionApproval = serde_json::from_slice(body).ok()?;
+            format!(
+                "接続要求 {} を{}",
+                request.connection_id,
+                if request.allow { "承認" } else { "拒否" }
+            )
+        }
+        "/interpreter-approve" => {
+            let request: ApproveProvider = serde_json::from_slice(body).ok()?;
+            format!(
+                "Interpreter Provider {} を承認（replace={}）",
+                request.provider, request.replace
+            )
+        }
+        "/oauth-consent" => {
+            let request: ConsentRequest = serde_json::from_slice(body).ok()?;
+            format!("OAuth要求 {} の認可リンクを発行", request.request)
+        }
+        "/export" => {
+            let request: Export = serde_json::from_slice(body).ok()?;
+            format!("全データを {} へExport", request.directory)
+        }
+        _ => return None,
+    };
+    Some(
+        summary
+            .chars()
+            .filter(|character| *character == '\n' || !character.is_control())
+            .take(2000)
+            .collect(),
+    )
+}
+
 async fn node_operation(
-    client: &Client,
+    caller: &Caller<'_>,
     node: &ProtectedDir,
     request: NodeOperation,
 ) -> Result<Value, StatusCode> {
-    let (operation, body) = match request {
+    let (operation, body, target) = match request {
         NodeOperation::Join { registration } => {
-            return client
-                .join_directory(node, &encode(&registration)?, false)
+            let target = id(&registration.node_id)?;
+            let result = caller
+                .call("join", &encode(&registration)?, Some(target))
                 .await
-                .map_err(remote);
+                .map_err(remote)?;
+            let bytes =
+                serde_json::to_vec(&result).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            node.replace("peer.json", &bytes)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            return Ok(result);
         }
-        NodeOperation::Approve { registration } => ("approve", encode(&registration)?),
-        NodeOperation::Retire { node } => ("retire", id(&node)?.to_vec()),
-        NodeOperation::Sync { node } => ("sync", id(&node)?.to_vec()),
-        NodeOperation::ConfirmRetirement { certificate } => {
-            ("confirm-retirement", id(&certificate)?.to_vec())
-        }
-        NodeOperation::DismissRetirement { certificate } => {
-            ("dismiss-retirement", id(&certificate)?.to_vec())
-        }
+        NodeOperation::Approve { registration } => (
+            "approve",
+            encode(&registration)?,
+            Some(id(&registration.node_id)?),
+        ),
+        NodeOperation::Retire { node } => ("retire", id(&node)?.to_vec(), Some(id(&node)?)),
+        NodeOperation::Sync { node } => ("sync", id(&node)?.to_vec(), Some(id(&node)?)),
+        NodeOperation::ConfirmRetirement { certificate } => (
+            "confirm-retirement",
+            id(&certificate)?.to_vec(),
+            Some(id(&certificate)?),
+        ),
+        NodeOperation::DismissRetirement { certificate } => (
+            "dismiss-retirement",
+            id(&certificate)?.to_vec(),
+            Some(id(&certificate)?),
+        ),
     };
-    client.call(operation, &body).await.map_err(remote)
+    caller.call(operation, &body, target).await.map_err(remote)
 }
 
 fn encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, StatusCode> {

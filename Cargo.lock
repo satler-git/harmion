@@ -1188,6 +1188,7 @@ dependencies = [
  "ed25519-dalek",
  "harmion-domain",
  "harmion-protocol",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "subtle",

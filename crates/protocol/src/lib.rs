@@ -7,6 +7,7 @@ pub mod interpreter;
 mod json;
 pub mod membership;
 pub mod metrics;
+pub mod owner;
 pub mod websocket;
 pub use json::decode_app_json;
 mod discovery;

@@ -590,6 +590,49 @@ async fn run(path: &str, options: RunOptions) -> Result<()> {
     }
     outcome
 }
+fn enroll_owner(path: &str, key_path: &str, label: &str) -> Result<()> {
+    let directory = ProtectedDir::open(path)?;
+    // Hold the daemon lock: enrollment writes the DB directly and must not race
+    // a running node.
+    let _lock = directory.lock()?;
+    let config: Config = serde_json::from_slice(&directory.read("node.json", 4096)?)?;
+    let identity = config.identity()?;
+    verify_database_files(&directory)?;
+    let mut store = SqliteStore::open(directory.path().join("node.db"), identity)?;
+    let secret: [u8; 32] = directory
+        .read("admin.secret", 32)?
+        .try_into()
+        .map_err(|_| DaemonError::InvalidKeyLength("admin"))?;
+    let credential = harmion_node::access::Credential::from_bytes(secret);
+    let now = SystemHost.now_micros();
+    let grants = harmion_node::access::permissions(&mut store, &credential, now)?;
+    if !grants.is_administrator() {
+        return Err(harmion_node::Error::Forbidden.into());
+    }
+    let public_key = std::fs::read_to_string(key_path)?;
+    if public_key.len() > 16 * 1024 {
+        return Err("SSH public key is too large".into());
+    }
+    let mut host = SystemHost;
+    let id = host.random_bytes()?;
+    let recovery = host.random_bytes()?;
+    let now = host.now_micros();
+    let enrolled = store.transaction(|tx| {
+        harmion_node::owner::enroll_initial(tx, &public_key, label, &recovery, id, now)
+    })?;
+    eprintln!("harmiond: store this one-time recovery code offline; it will not be shown again");
+    println!(
+        "{}",
+        serde_json::json!({
+            "enrolled": true,
+            "fingerprint": enrolled.fingerprint,
+            "label": enrolled.label,
+            "recovery_code": hex(&recovery),
+        })
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -612,6 +655,11 @@ async fn main() {
             .map_err(Into::into)
             .and_then(|directory| browser_tls(&directory))
             .map(|tls| print!("{}", tls.root_pem())),
+        Command::OwnerEnroll {
+            dir,
+            ssh_key,
+            label,
+        } => enroll_owner(&dir, &ssh_key, &label),
         Command::Run { dir, options } => run(&dir, options).await,
     };
     if let Err(error) = result {

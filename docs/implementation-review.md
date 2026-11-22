@@ -487,6 +487,15 @@ domainの更新受理・projection・属性値、protocolのrecord/App/Peer code
 - 検証: 全workspaceテスト、Clippy、fmt、wasm check、管理UI check/build、`connect_process.py`、既存の設計チェックが成功した。
 - 限界: 完了キャッシュはメモリのみで、生のaccess/refresh tokenを最大60秒保持する。Pongの期限監視・自動invocation再送・永続auditは未実装。Providerごとのquotaはプロセス内の同時実行上限だけで、永続的な課金・監査はない。`connect-complete`のキャッシュはプロセスごとなので、複数プロセス配置では同じ応答を保証しない。
 
+### R56 — 所有者承認の端末確認とノード検証SSH assertion
+
+- 管理操作をR0/R1/R2に分類し、R2（grant変更、参加・退役、接続・Provider承認、Export、OAuth認可、所有者credential管理）は起動端末での単回承認を必須にした。`harmion-admin run --approval=terminal|stdio|deny`、既定はterminalで、非TTYではR2を拒否する。管理セッションはアイドル10分・絶対30分にした。[approval](../apps/admin/src/approval.rs)
+- ノードは`owner-challenge`で単回challengeを発行し、R2要求の`X-Harmion-Owner-Challenge`と`X-Harmion-Owner-Signature`を検証する。statementはcluster/node/operation/target/args hash/session/challenge/期限を固定幅で結合し、SSHSIGのnamespaceは`harmion-owner`。検証はノード上の`ssh-keygen -Y verify`で行い、Rustの秘密鍵管理やagent接続をノードへ持ち込まない。`enforce=1`では`admin.secret`だけではR2を実行できない。[owner](../crates/node/src/owner.rs)・[protocol](../crates/protocol/src/owner.rs)
+- 最初の所有者鍵はdaemon停止中の`harmiond owner-enroll --ssh-key PATH`で登録する。オンラインの追加enroll・revoke・enforceは既存assertionを必要とし、recoverはオフライン回復コードと新しい鍵で全credentialを置き換える。監査は`owner_audit`へhash chainで記録する。schemaはv17。
+- Rust SDKへ`OwnerSigner`/`SshSigner`、`owner-challenge`、`call_owner`、`export_directory_signed`を追加した。CLIは`owner-status`・`owner-enroll`・`owner-revoke`・`owner-recover`・`owner-enforce`と、既存R2コマンドの署名付き実行を提供する。管理サーバーも署名付きR2を送る。[client](../crates/client/src/lib.rs)・[cli](../apps/cli/src/main.rs)
+- 検証: `nix develop`のdev shellで`cargo test --workspace --offline`、`cargo clippy --workspace --all-targets --offline -- -D warnings`、`cargo fmt --all -- --check`、管理UIの`npm run check`/`npm run build`が成功。`owner_https`テストで、assertionなしのR2が403、正しい鍵のenrollが成功、未登録鍵が403になることを確認した。実プロセスで`harmiond init`→`owner-enroll`→`run`→`owner-status`、PTY上のCLI `owner-enroll`（端末承認→SSHSIG→ノード検証→credential追加）、および実`harmion-admin run --approval=stdio --owner-key ...`から`/export`を呼び、端末承認とSSHSIG検証を通ってExportが成功することを確認した。設計チェック`admin_process.py`、`connect_process.py`、`oauth_process.py`、`export_process.py`、`two_process_sync.py`（HTTPS/iroh）、`membership_process_sync.py`（HTTPS/iroh）、`recovery_process.py`、`restore_process.py`が成功した。
+- 限界: 同一OSユーザーの任意コード実行は依然として保証外。`ssh-keygen`が無いホストではR2をfail closedする。管理UIに所有者credential管理画面はなく、追加・失効・回復はCLIのみ。`admin.secret`の二段階ローテーションは未実装。WebAuthn/Passkey、OS鍵保管、Cluster Owner、thresholdは未実装。
+
 ## 基準時点の複数ノード同期の検証条件
 
 1. 3〜5ノードで、A↔B↔Cの中継、循環、分断中の別々の編集、後着の競合解決、再送が収束し、静止後のログ件数が増えない。

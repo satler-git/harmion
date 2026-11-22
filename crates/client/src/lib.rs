@@ -9,6 +9,7 @@ mod subscription;
 pub use provider::{ProviderClient, ProviderEvent};
 pub use subscription::{Subscription, SubscriptionCheckpoint, SubscriptionNotification};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{Request, Response, body::Incoming};
@@ -17,10 +18,18 @@ use protocol::connect::{
     ConnectionApproval, ConnectionCompleteRequest, ConnectionOffer, ConnectionStatusRequest,
 };
 use protocol::interpreter::{CallRequest, InvocationId, ProviderId, ProviderRegistration};
+use protocol::owner::{Challenge, ChallengeRequest};
 use protocol::query::{Condition, QueryCursor, QueryRequest};
 use protocol::{ConnectionInfo, MAX_APP_RESPONSE_BYTES, MAX_RECORD_BYTES, TLS_NAME};
 use rustls::{ClientConfig, RootCertStore, pki_types::CertificateDer};
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{
+    fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{net::TcpStream, time::timeout};
 use tokio_rustls::TlsConnector;
 
@@ -51,6 +60,18 @@ pub enum Error {
     Timeout,
     Http(u16),
     ProviderAttachRejected { code: i64 },
+    Signer(String),
+}
+
+impl From<protocol::CodecError> for Error {
+    fn from(_: protocol::CodecError) -> Self {
+        Self::InvalidRequest
+    }
+}
+impl From<serde_json::Error> for Error {
+    fn from(_: serde_json::Error) -> Self {
+        Self::InvalidRequest
+    }
 }
 
 /// No Debug implementation: the bearer credential must never enter diagnostics.
@@ -65,6 +86,85 @@ pub struct QueryPage {
     pub items: Vec<serde_json::Value>,
     pub next: Option<QueryCursor>,
 }
+
+pub struct OwnerAssertion {
+    pub challenge: [u8; 32],
+    pub signature: Vec<u8>,
+}
+
+/// Signs the node-issued canonical statement. The node verifies the signature;
+/// this trait only keeps the transport independent of the key backend.
+pub trait OwnerSigner: Send + Sync {
+    fn sign(&self, statement: &[u8]) -> Result<Vec<u8>, Error>;
+}
+
+/// OpenSSH signer. `key` may be a public key whose private half is held by
+/// ssh-agent, or a private key file. No key material is read by this process.
+#[derive(Clone, Debug)]
+pub struct SshSigner {
+    pub key: PathBuf,
+    pub namespace: String,
+}
+
+impl SshSigner {
+    pub fn new(key: impl Into<PathBuf>) -> Self {
+        Self {
+            key: key.into(),
+            namespace: protocol::owner::NAMESPACE.to_owned(),
+        }
+    }
+}
+
+impl OwnerSigner for SshSigner {
+    fn sign(&self, statement: &[u8]) -> Result<Vec<u8>, Error> {
+        let directory = temp_dir()?;
+        let result = (|| {
+            let statement_path = directory.join("statement");
+            fs::write(&statement_path, statement)?;
+            let output = Command::new("ssh-keygen")
+                .args(["-Y", "sign", "-f"])
+                .arg(&self.key)
+                .args(["-n", &self.namespace])
+                .arg(&statement_path)
+                .stdin(Stdio::null())
+                .env("LC_ALL", "C")
+                .output()
+                .map_err(|error| Error::Signer(error.to_string()))?;
+            if !output.status.success() {
+                return Err(Error::Signer(
+                    String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                ));
+            }
+            let mut path = statement_path.into_os_string();
+            path.push(".sig");
+            let signature = fs::read(PathBuf::from(path))?;
+            if signature.is_empty() {
+                return Err(Error::Signer("empty SSH signature".into()));
+            }
+            Ok(signature)
+        })();
+        let _ = fs::remove_dir_all(directory);
+        result
+    }
+}
+
+fn temp_dir() -> Result<PathBuf, Error> {
+    let base = std::env::temp_dir();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let path = base.join(format!("harmion-owner-sign-{}-{nanos}", std::process::id()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(&path)?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir(&path)?;
+    Ok(path)
+}
+
 impl Client {
     pub fn from_directory(path: impl AsRef<Path>) -> Result<Self, Error> {
         let directory = ProtectedDir::open(path)?;
@@ -101,8 +201,17 @@ impl Client {
     }
 
     pub async fn call(&self, operation: &str, body: &[u8]) -> Result<serde_json::Value, Error> {
+        self.call_with(operation, body, None).await
+    }
+
+    pub async fn call_with(
+        &self,
+        operation: &str,
+        body: &[u8],
+        owner: Option<&OwnerAssertion>,
+    ) -> Result<serde_json::Value, Error> {
         timeout(DEADLINE, async {
-            let (response, _connection) = self.request(operation, body).await?;
+            let (response, _connection) = self.request(operation, body, owner).await?;
             let bytes = Limited::new(response.into_body(), MAX_APP_RESPONSE_BYTES)
                 .collect()
                 .await
@@ -114,11 +223,58 @@ impl Client {
         .map_err(|_| Error::Timeout)?
     }
 
+    pub async fn owner_status(&self) -> Result<serde_json::Value, Error> {
+        self.call("owner-status", &[]).await
+    }
+
+    pub async fn owner_challenge(
+        &self,
+        operation: &str,
+        target: Option<[u8; 32]>,
+        body: &[u8],
+        session: Option<[u8; 32]>,
+    ) -> Result<Challenge, Error> {
+        let request = ChallengeRequest {
+            operation: operation.to_owned(),
+            target: target.map(|target| protocol::hex(&target)),
+            args_sha256: protocol::hex(&protocol::owner::args_hash(body)),
+            session: session.map(|session| protocol::hex(&session)),
+        };
+        let value = self
+            .call("owner-challenge", &serde_json::to_vec(&request)?)
+            .await?;
+        serde_json::from_value(value).map_err(|_| Error::InvalidResponse)
+    }
+
+    /// Request a challenge, sign its canonical statement and submit the
+    /// operation with the owner assertion. The caller must have already shown
+    /// the terminal summary; the signature is the node-verifiable proof.
+    pub async fn call_owner(
+        &self,
+        operation: &str,
+        body: &[u8],
+        target: Option<[u8; 32]>,
+        session: Option<[u8; 32]>,
+        signer: &dyn OwnerSigner,
+    ) -> Result<serde_json::Value, Error> {
+        let challenge = self
+            .owner_challenge(operation, target, body, session)
+            .await?;
+        let statement = protocol::unhex_bytes(&challenge.statement, MAX_RECORD_BYTES)?;
+        let signature = signer.sign(&statement)?;
+        let assertion = OwnerAssertion {
+            challenge: protocol::unhex(&challenge.challenge)?,
+            signature,
+        };
+        self.call_with(operation, body, Some(&assertion)).await
+    }
+
     /// Verify the pinned TLS leaf before constructing or sending Authorization.
     async fn request(
         &self,
         operation: &str,
         body: &[u8],
+        owner: Option<&OwnerAssertion>,
     ) -> Result<(Response<Incoming>, Connection), Error> {
         if operation.is_empty()
             || !operation
@@ -159,10 +315,22 @@ impl Client {
         ))
         .map_err(|_| Error::InvalidRequest)?;
         authorization.set_sensitive(true);
-        let request = Request::post(format!("/app/v1/{operation}"))
+        let mut builder = Request::post(format!("/app/v1/{operation}"))
             .header("host", TLS_NAME)
             .header("authorization", authorization)
-            .header("content-type", "application/octet-stream")
+            .header("content-type", "application/octet-stream");
+        if let Some(owner) = owner {
+            builder = builder
+                .header(
+                    protocol::owner::CHALLENGE_HEADER,
+                    protocol::hex(&owner.challenge),
+                )
+                .header(
+                    protocol::owner::SIGNATURE_HEADER,
+                    URL_SAFE_NO_PAD.encode(&owner.signature),
+                );
+        }
+        let request = builder
             .body(Full::new(Bytes::copy_from_slice(body)))
             .map_err(|_| Error::InvalidRequest)?;
         let response = sender
