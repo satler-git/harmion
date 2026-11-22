@@ -87,6 +87,7 @@ local function schedule_autosave(buf)
   timer:start(1500, 0, function()
     vim.schedule(function()
       autosave_timers[buf] = nil
+      timer:close()
       if vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].modified then
         vim.api.nvim_buf_call(buf, function()
           vim.cmd("silent write")
