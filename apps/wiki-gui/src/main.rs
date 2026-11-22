@@ -1,17 +1,48 @@
+//! Harmion Wiki GUI — the frozen v5 shell.
+//!
+//! The GUI is a reading surface: a four-column workspace (library, article, outline,
+//! inspector) plus a non-modal two-hop shelf and a global palette. Editing stays in an
+//! external Neovide attached to the active Content through `wiki-server`.
+//!
+//! Data comes from the local JSON-RPC server over `WIKI_SOCKET` (`list`, `open`,
+//! `workspace`, `search`, `save`). When the server is unavailable the GUI uses a
+//! built-in fixture and says so in the toolbar and the status bar.
+
+mod highlight;
+mod neovide;
+
+#![allow(dead_code)]
+
+use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::rc::Rc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anti_webui::prelude::*;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 const DEFAULT_SOCKET: &str = "/tmp/harmion-wiki-m0.sock";
-const HOME_ID: &str = "p-home";
 const JOURNAL_ID: &str = "3f2a9c1e00000000000000000000000000000000000000000000000000000001";
+const BUDGET_ID: &str = "3f2a9c1e00000000000000000000000000000000000000000000000000000002";
+const MONTHLY_ID: &str = "3f2a9c1e00000000000000000000000000000000000000000000000000000003";
+const HOME_ID: &str = "p-home";
+const READING_ID: &str = "p-reading";
+const RUST_ID: &str = "p-rust";
+const WINDOW_WIDTH: u32 = 1600;
+const WINDOW_HEIGHT: u32 = 1000;
+const SHELF_HEIGHT: f32 = 430.0;
+const SHELF_HANDLE: f32 = 36.0;
 
 mod bundled {
     include!(concat!(env!("OUT_DIR"), "/fonts.rs"));
 }
+
+// ---------------------------------------------------------------------------
+// Fonts and theme
+// ---------------------------------------------------------------------------
 
 fn fonts() -> &'static (String, String) {
     static FONTS: OnceLock<(String, String)> = OnceLock::new();
@@ -56,69 +87,618 @@ fn mono() -> &'static str {
 
 fn app_theme() -> Theme {
     Theme {
-        page: rgb(0x12100e),
-        surface: rgb(0x181512),
-        surface_muted: rgb(0x201c18),
-        overlay: rgb(0x241f1a),
-        hover: rgb(0x2a251f),
-        pressed: rgb(0x332c25),
-        selected: rgb(0x2a2119),
-        text: rgb(0xeee7dc),
-        text_muted: rgb(0x9c9183),
-        text_disabled: rgb(0x665e54),
-        on_accent: rgb(0x1a120d),
-        border: rgb(0x2e2822),
-        border_strong: rgb(0x4a4036),
-        accent: rgb(0xd08a5a),
-        accent_hover: rgb(0xe09a68),
-        accent_pressed: rgb(0xb97a4f),
-        accent_text: rgb(0xe0a273),
-        accent_muted: rgb(0x3a2a1f),
-        success: rgb(0x8fae8b),
-        success_muted: rgb(0x1f2a1f),
-        success_text: rgb(0x9fc49a),
+        page: rgb(0x1e1e1e),
+        surface: rgb(0x252527),
+        surface_muted: rgb(0x2c2c2e),
+        overlay: rgb(0x2c2c2e),
+        hover: rgb(0x2c2c2e),
+        pressed: rgb(0x3a3a3c),
+        selected: rgb(0x0a84ff),
+        text: rgb(0xf5f5f7),
+        text_muted: rgb(0xa1a1a6),
+        text_disabled: rgb(0x6e6e73),
+        on_accent: rgb(0xffffff),
+        border: rgb(0x3a3a3c),
+        border_strong: rgb(0x48484a),
+        accent: rgb(0x0a84ff),
+        accent_hover: rgb(0x409cff),
+        accent_pressed: rgb(0x0070e0),
+        accent_text: rgb(0x409cff),
+        accent_muted: rgb(0x1c3a5e),
+        success: rgb(0x30d158),
+        success_muted: rgb(0x17351f),
+        success_text: rgb(0x30d158),
         ..Theme::dark()
     }
 }
 
-#[derive(Clone)]
-struct Snapshot {
-    pages: Vec<String>,
-    snippets: Vec<String>,
-    page_title: String,
-    before: Vec<String>,
-    snippet_title: String,
-    snippet_id: String,
-    snippet_meta: String,
-    snippet_lines: Vec<String>,
+// ---------------------------------------------------------------------------
+// Wire model (mirrors apps/wiki-server/src/model.rs)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Deserialize)]
+struct Summary {
+    id: String,
+    #[serde(rename = "type")]
+    content_type: String,
+    title: String,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    kinds: Vec<String>,
+    #[serde(default)]
+    rev: u64,
+    #[serde(default)]
+    updated_label: String,
+    #[serde(default)]
+    excerpt: String,
+    /// Not on the wire; the fixture uses it for the shelf's reference count.
+    #[serde(default)]
+    refs: usize,
 }
 
-impl Snapshot {
-    fn fallback() -> Self {
+impl Summary {
+    fn is_page(&self) -> bool {
+        self.content_type == "page"
+    }
+
+    fn is_snippet(&self) -> bool {
+        self.content_type == "snippet"
+    }
+
+    fn kind_label(&self) -> String {
+        summary_kind(self)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct Content {
+    id: String,
+    #[serde(rename = "type")]
+    content_type: String,
+    title: String,
+    body: String,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    kinds: Vec<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    rev: u64,
+    #[serde(default)]
+    created: String,
+    #[serde(default)]
+    updated_at: i64,
+    #[serde(default)]
+    updated_label: String,
+}
+
+impl From<&Content> for Summary {
+    fn from(content: &Content) -> Self {
         Self {
-            pages: vec!["家計の記録".to_owned(), "2026年の目標".to_owned()],
-            snippets: vec!["買い物ジャーナル".to_owned(), "予算クエリ".to_owned()],
-            page_title: "家計の記録".to_owned(),
-            before: vec!["毎月の支出を hledger のジャーナルで管理している。".to_owned()],
-            snippet_title: "買い物ジャーナル".to_owned(),
-            snippet_id: JOURNAL_ID.to_owned(),
-            snippet_meta: "HLEDGER / ledger / ledger, free".to_owned(),
-            snippet_lines: vec![
-                "2026-11-16 * 買い物".to_owned(),
-                "    支出:食費   1,200 JPY".to_owned(),
-                "    資産:現金  -1,200 JPY".to_owned(),
-                "2026-11-17 * 電車".to_owned(),
-                "    支出:交通     420 JPY".to_owned(),
-                "    資産:現金    -420 JPY".to_owned(),
-            ],
+            id: content.id.clone(),
+            content_type: content.content_type.clone(),
+            title: content.title.clone(),
+            format: content.format.clone(),
+            language: content.language.clone(),
+            kinds: content.kinds.clone(),
+            rev: content.rev,
+            updated_label: content.updated_label.clone(),
+            excerpt: excerpt(&content.body),
+            refs: 0,
         }
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct OutlineItem {
+    #[serde(default)]
+    level: u8,
+    title: String,
+    #[serde(default)]
+    line: usize,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct TwoHop {
+    via: Summary,
+    target: Summary,
+    #[serde(default)]
+    reason: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct Links {
+    #[serde(default)]
+    outgoing: Vec<Summary>,
+    #[serde(default)]
+    backlinks: Vec<Summary>,
+    #[serde(default)]
+    two_hop: Vec<TwoHop>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct PageInfo {
+    #[serde(default)]
+    created: String,
+    #[serde(default)]
+    updated: String,
+    #[serde(default)]
+    word_count: usize,
+    #[serde(default)]
+    tags: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct Workspace {
+    page: Content,
+    #[serde(default)]
+    before: Vec<String>,
+    #[serde(default)]
+    after: Vec<String>,
+    #[serde(default)]
+    snippet: Option<Content>,
+    #[serde(default)]
+    outline: Vec<OutlineItem>,
+    #[serde(default)]
+    links: Links,
+    #[serde(default)]
+    related: Vec<Summary>,
+    #[serde(default)]
+    recent: Vec<Summary>,
+    #[serde(default)]
+    info: PageInfo,
+}
+
+#[derive(Clone, Debug)]
+struct Tab {
+    id: Option<String>,
+    title: String,
+    kind: String,
+    workspace: Option<Workspace>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    Server,
+    Fallback,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Inspector {
+    Links,
+    Info,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaletteMode {
+    Search,
+    QuickOpen,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EditorState {
+    attached: bool,
+    follow: bool,
+    detail: String,
+    warning: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Clone)]
+struct AppState {
+    source: Signal<Source>,
+    boot_error: Option<String>,
+    socket: String,
+    summaries: Signal<Vec<Summary>>,
+    tabs: Signal<Vec<Tab>>,
+    active: Signal<usize>,
+    inspector: Signal<Inspector>,
+    inspector_visible: Signal<bool>,
+    shelf_pinned: Signal<bool>,
+    shelf_hover: Signal<bool>,
+    palette: Signal<Option<PaletteMode>>,
+    query: Signal<String>,
+    results: Signal<Vec<Summary>>,
+    palette_error: Signal<Option<String>>,
+    next_selected: Signal<usize>,
+    editor: Signal<EditorState>,
+    history: Signal<Vec<String>>,
+    history_index: Signal<usize>,
+    root: NodeRef,
+    manager: Rc<RefCell<neovide::Manager>>,
+}
+
+impl AppState {
+    fn active_tab(&self) -> Option<Tab> {
+        let tabs = self.tabs.get_untracked();
+        tabs.get(
+            self.active
+                .get_untracked()
+                .min(tabs.len().saturating_sub(1)),
+        )
+        .cloned()
+    }
+
+    fn active_index(&self) -> usize {
+        let tabs = self.tabs.get_untracked();
+        self.active
+            .get_untracked()
+            .min(tabs.len().saturating_sub(1))
+    }
+
+    fn active_workspace(&self) -> Option<Workspace> {
+        self.active_tab().and_then(|tab| tab.workspace)
+    }
+
+    fn ensure_workspace(&self, index: usize) {
+        let Some(tab) = self.tabs.get_untracked().get(index).cloned() else {
+            return;
+        };
+        if tab.workspace.is_some() || tab.error.is_some() {
+            return;
+        }
+        let result = match (&tab.id, self.source.get_untracked()) {
+            (None, _) => Err("このページの Content ID はまだ解決できていません。".to_owned()),
+            (Some(id), Source::Fallback) => fixture_workspace(id, &tab.title)
+                .ok_or_else(|| "フォールバックにこのページのデータがありません。".to_owned()),
+            (Some(id), Source::Server) => rpc("workspace", json!({ "id": id }))
+                .and_then(|value| {
+                    serde_json::from_value::<Workspace>(value)
+                        .map_err(|error| format!("workspace の解釈に失敗: {error}"))
+                })
+                .map_err(|error| format!("workspace を取得できません: {error}")),
+        };
+        self.tabs.update(|tabs| {
+            if let Some(tab) = tabs.get_mut(index) {
+                match result {
+                    Ok(workspace) => {
+                        tab.title = workspace.page.title.clone();
+                        tab.kind = workspace.page.content_type.clone();
+                        tab.workspace = Some(workspace);
+                        tab.error = None;
+                    }
+                    Err(error) => tab.error = Some(error),
+                }
+            }
+        });
+    }
+
+    fn switch_tab(&self, index: usize) {
+        let length = self.tabs.get_untracked().len();
+        if index >= length {
+            return;
+        }
+        self.active.set(index);
+        self.ensure_workspace(index);
+        if let Some(tab) = self.active_tab() {
+            self.push_history(tab.id);
+            self.follow_editor();
+        }
+    }
+
+    fn open_summary(&self, summary: &Summary) {
+        self.open_id(&summary.id, &summary.title, &summary.content_type);
+    }
+
+    fn open_id(&self, id: &str, title: &str, kind: &str) {
+        if let Some(index) = self
+            .tabs
+            .get_untracked()
+            .iter()
+            .position(|tab| tab.id.as_deref() == Some(id))
+        {
+            self.active.set(index);
+        } else {
+            let tab = Tab {
+                id: Some(id.to_owned()),
+                title: title.to_owned(),
+                kind: kind.to_owned(),
+                workspace: None,
+                error: None,
+            };
+            let index = self.tabs.get_untracked().len();
+            self.tabs.update(|tabs| tabs.push(tab));
+            self.active.set(index);
+        }
+        let index = self.active_index();
+        self.ensure_workspace(index);
+        self.push_history(Some(id.to_owned()));
+        self.palette.set(None);
+        self.palette_error.set(None);
+        self.request_root_focus();
+        self.follow_editor();
+    }
+
+    fn close_tab(&self, index: usize) {
+        let mut tabs = self.tabs.get_untracked();
+        if tabs.len() <= 1 || index >= tabs.len() {
+            return;
+        }
+        tabs.remove(index);
+        let new_active = self.active.get_untracked().min(tabs.len() - 1);
+        self.tabs.set(tabs);
+        self.active.set(new_active);
+        self.ensure_workspace(new_active);
+        self.follow_editor();
+    }
+
+    fn push_history(&self, id: Option<String>) {
+        let Some(id) = id else { return };
+        let current = self.history.get_untracked();
+        let index = self.history_index.get_untracked();
+        if current.get(index).is_some_and(|entry| *entry == id) {
+            return;
+        }
+        let end = if current.is_empty() {
+            0
+        } else {
+            (index + 1).min(current.len())
+        };
+        let mut next = current[..end].to_vec();
+        next.push(id);
+        self.history_index.set(next.len() - 1);
+        self.history.set(next);
+    }
+
+    fn back(&self) {
+        let index = self.history_index.get_untracked();
+        if index == 0 {
+            return;
+        }
+        self.history_index.set(index - 1);
+        self.open_history_entry();
+    }
+
+    fn forward(&self) {
+        let index = self.history_index.get_untracked();
+        if index + 1 >= self.history.get_untracked().len() {
+            return;
+        }
+        self.history_index.set(index + 1);
+        self.open_history_entry();
+    }
+
+    fn open_history_entry(&self) {
+        let index = self.history_index.get_untracked();
+        let Some(id) = self.history.get_untracked().get(index).cloned() else {
+            return;
+        };
+        if let Some(tab_index) = self
+            .tabs
+            .get_untracked()
+            .iter()
+            .position(|tab| tab.id.as_deref() == Some(id.as_str()))
+        {
+            self.active.set(tab_index);
+            self.ensure_workspace(tab_index);
+            self.follow_editor();
+            return;
+        }
+        let summary = self
+            .summaries
+            .get_untracked()
+            .into_iter()
+            .find(|summary| summary.id == id);
+        if let Some(summary) = summary {
+            self.open_id(&summary.id, &summary.title, &summary.content_type);
+        }
+    }
+
+    fn open_palette(&self, mode: PaletteMode) {
+        self.palette.set(Some(mode));
+        self.query.set(String::new());
+        self.palette_error.set(None);
+        self.refresh_results();
+    }
+
+    fn close_palette(&self) {
+        self.palette.set(None);
+        self.palette_error.set(None);
+        self.request_root_focus();
+    }
+
+    fn on_query(&self, text: &str) {
+        self.query.set(text.to_owned());
+        self.refresh_results();
+    }
+
+    fn refresh_results(&self) {
+        let query = self.query.get_untracked();
+        let mode = self.palette.get_untracked();
+        match mode {
+            Some(PaletteMode::QuickOpen) => {
+                let needle = query.to_lowercase();
+                let mut results = self
+                    .summaries
+                    .get_untracked()
+                    .into_iter()
+                    .filter(|summary| summary.is_page())
+                    .filter(|summary| {
+                        needle.is_empty() || summary.title.to_lowercase().contains(&needle)
+                    })
+                    .collect::<Vec<_>>();
+                results.truncate(8);
+                self.results.set(results);
+                self.palette_error.set(None);
+            }
+            Some(PaletteMode::Search) => {
+                if query.trim().is_empty() {
+                    let mut results = self
+                        .summaries
+                        .get_untracked()
+                        .into_iter()
+                        .filter(|summary| summary.is_page())
+                        .collect::<Vec<_>>();
+                    results.truncate(8);
+                    self.results.set(results);
+                    self.palette_error.set(None);
+                    return;
+                }
+                if self.source.get_untracked() == Source::Server {
+                    match rpc("search", json!({ "query": query })) {
+                        Ok(value) => match value.get("items").cloned() {
+                            Some(items) => match serde_json::from_value::<Vec<Summary>>(items) {
+                                Ok(mut results) => {
+                                    results.truncate(8);
+                                    self.results.set(results);
+                                    self.palette_error.set(None);
+                                }
+                                Err(error) => {
+                                    self.results
+                                        .set(local_search(&self.summaries.get_untracked(), &query));
+                                    self.palette_error
+                                        .set(Some(format!("検索結果の解釈に失敗: {error}")));
+                                }
+                            },
+                            None => {
+                                self.results
+                                    .set(local_search(&self.summaries.get_untracked(), &query));
+                                self.palette_error
+                                    .set(Some("検索結果に items がありません。".to_owned()));
+                            }
+                        },
+                        Err(error) => {
+                            self.results
+                                .set(local_search(&self.summaries.get_untracked(), &query));
+                            self.palette_error
+                                .set(Some(format!("検索サーバーに接続できません: {error}")));
+                        }
+                    }
+                } else {
+                    self.results
+                        .set(local_search(&self.summaries.get_untracked(), &query));
+                    self.palette_error.set(None);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn open_editor(&self) {
+        let Some(tab) = self.active_tab() else { return };
+        let Some(id) = tab.id else {
+            self.set_editor_error("Content ID がないため Neovide で開けません。".to_owned());
+            return;
+        };
+        self.open_editor_for(&id, &tab.title);
+    }
+
+    fn open_editor_for(&self, id: &str, title: &str) {
+        let outcome = self.manager.borrow_mut().open(id, title);
+        match outcome {
+            Ok(outcome) => {
+                self.editor.set(EditorState {
+                    attached: true,
+                    follow: true,
+                    detail: outcome.message,
+                    warning: outcome.warning,
+                    error: None,
+                });
+            }
+            Err(error) => {
+                eprintln!("wiki-gui: neovide: {error}");
+                self.set_editor_error(error);
+            }
+        }
+        self.request_root_focus();
+    }
+
+    fn set_editor_error(&self, error: String) {
+        let mut editor = self.editor.get_untracked();
+        editor.attached = self.manager.borrow().has_server();
+        editor.error = Some(error);
+        editor.detail = self.manager.borrow().status_label();
+        self.editor.set(editor);
+    }
+
+    fn follow_editor(&self) {
+        let editor = self.editor.get_untracked();
+        if !editor.follow {
+            return;
+        }
+        let Some(tab) = self.active_tab() else { return };
+        let Some(id) = tab.id else { return };
+        let outcome = self.manager.borrow_mut().open(&id, &tab.title);
+        match outcome {
+            Ok(outcome) => {
+                let mut editor = self.editor.get_untracked();
+                editor.attached = true;
+                editor.detail = outcome.message;
+                editor.warning = outcome.warning;
+                editor.error = None;
+                self.editor.set(editor);
+            }
+            Err(error) => {
+                let mut editor = self.editor.get_untracked();
+                editor.attached = self.manager.borrow().has_server();
+                editor.detail = self.manager.borrow().status_label();
+                editor.error = Some(error);
+                self.editor.set(editor);
+            }
+        }
+    }
+
+    fn request_root_focus(&self) {
+        let root = self.root;
+        request_frame(move |_| root.focus());
+    }
+}
+
+fn summary_kind(summary: &Summary) -> String {
+    if let Some(kind) = summary.kinds.iter().find(|kind| kind.as_str() != "wiki") {
+        return kind.clone();
+    }
+    if let Some(format) = &summary.format {
+        return format.clone();
+    }
+    if let Some(language) = &summary.language {
+        return language.clone();
+    }
+    summary.content_type.clone()
+}
+
+fn local_search(summaries: &[Summary], query: &str) -> Vec<Summary> {
+    let needle = query.to_lowercase();
+    let mut results = summaries
+        .iter()
+        .filter(|summary| {
+            summary.title.to_lowercase().contains(&needle)
+                || summary.excerpt.to_lowercase().contains(&needle)
+                || summary
+                    .kinds
+                    .iter()
+                    .any(|kind| kind.to_lowercase().contains(&needle))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    results.truncate(8);
+    results
+}
+
+// ---------------------------------------------------------------------------
+// JSON-RPC
+// ---------------------------------------------------------------------------
+
+fn socket_path() -> String {
+    std::env::var("WIKI_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_owned())
+}
+
 fn rpc(method: &str, params: Value) -> Result<Value, String> {
-    let path = std::env::var("WIKI_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_owned());
+    let path = socket_path();
     let mut stream =
         UnixStream::connect(&path).map_err(|error| format!("connect {path}: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| error.to_string())?;
     let request = json!({ "id": 1, "method": method, "params": params });
     let mut bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     bytes.push(b'\n');
@@ -131,6 +711,9 @@ fn rpc(method: &str, params: Value) -> Result<Value, String> {
     BufReader::new(stream)
         .read_line(&mut line)
         .map_err(|error| error.to_string())?;
+    if line.trim().is_empty() {
+        return Err("server closed the connection without a response".to_owned());
+    }
     let response: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
     if let Some(error) = response.get("error") {
         return Err(error.to_string());
@@ -138,550 +721,1229 @@ fn rpc(method: &str, params: Value) -> Result<Value, String> {
     Ok(response.get("result").cloned().unwrap_or(Value::Null))
 }
 
-fn clean_lines(text: &str) -> Vec<String> {
-    text.lines()
+#[allow(dead_code)]
+fn save_content(id: &str, rev: u64, body: &str) -> Result<Content, String> {
+    let value = rpc("save", json!({ "id": id, "rev": rev, "body": body }))?;
+    serde_json::from_value(value).map_err(|error| format!("save の解釈に失敗: {error}"))
+}
+
+fn load_summaries() -> Result<Vec<Summary>, String> {
+    let value = rpc("list", json!({}))?;
+    let items = value
+        .get("items")
+        .cloned()
+        .ok_or_else(|| "list result has no items".to_owned())?;
+    serde_json::from_value(items).map_err(|error| format!("list の解釈に失敗: {error}"))
+}
+
+fn boot(snapshot: bool) -> AppState {
+    let socket = socket_path();
+    let (summaries, source, boot_error) = match load_summaries() {
+        Ok(summaries) => {
+            eprintln!("wiki-gui: loaded list from {socket}");
+            (summaries, Source::Server, None)
+        }
+        Err(error) => {
+            eprintln!("wiki-gui: server unavailable ({error}); using built-in fixture");
+            (fixture_summaries(), Source::Fallback, Some(error))
+        }
+    };
+
+    let mut tabs = Vec::new();
+    for title in ["家計の記録", "読書ノート", "Rustのメモ"] {
+        let summary = summaries.iter().find(|summary| summary.title == title);
+        tabs.push(Tab {
+            id: summary.map(|summary| summary.id.clone()),
+            title: title.to_owned(),
+            kind: summary
+                .map(|summary| summary.content_type.clone())
+                .unwrap_or_else(|| "page".to_owned()),
+            workspace: None,
+            error: None,
+        });
+    }
+
+    let manager = Rc::new(RefCell::new(neovide::Manager::detect()));
+    let attached = manager.borrow().has_server();
+    let detail = manager.borrow().status_label();
+    let root = node_ref();
+    let state = AppState {
+        source: signal(source),
+        boot_error,
+        socket,
+        summaries: signal(summaries),
+        tabs: signal(tabs),
+        active: signal(0),
+        inspector: signal(Inspector::Links),
+        inspector_visible: signal(true),
+        shelf_pinned: signal(snapshot),
+        shelf_hover: signal(false),
+        palette: signal(None),
+        query: signal(String::new()),
+        results: signal(Vec::new()),
+        palette_error: signal(None),
+        next_selected: signal(0),
+        editor: signal(EditorState {
+            attached,
+            follow: attached,
+            detail,
+            warning: None,
+            error: None,
+        }),
+        history: signal(Vec::new()),
+        history_index: signal(0),
+        root,
+        manager,
+    };
+    for index in 0..3 {
+        state.ensure_workspace(index);
+    }
+    if let Some(id) = state.active_tab().and_then(|tab| tab.id) {
+        state.push_history(Some(id));
+    }
+    state
+}
+
+// ---------------------------------------------------------------------------
+// Small view helpers
+// ---------------------------------------------------------------------------
+
+fn ui_text(label: impl Into<String>, size: f32, color: Color) -> Text {
+    text(label.into())
+        .font_family(sans())
+        .text_size(size)
+        .text_color(color)
+}
+
+fn mono_text(label: impl Into<String>, size: f32, color: Color) -> Text {
+    text(label.into())
+        .font_family(mono())
+        .text_size(size)
+        .text_color(color)
+}
+
+fn dot(color: Color) -> Div {
+    div().w(7.0_f32).h(7.0_f32).rounded(3.5_f32).bg(color)
+}
+
+fn kbd(label: impl Into<String>) -> Div {
+    div()
+        .h(16.0_f32)
+        .px(4.0_f32)
+        .rounded(3.0_f32)
+        .bg(theme().surface_muted)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(ui_text(label, 9.0, theme().text_muted))
+}
+
+fn section_label(label: impl Into<String>) -> Text {
+    ui_text(label, 11.0, theme().text_disabled).font_weight(FontWeight::SEMIBOLD)
+}
+
+fn chip(label: impl Into<String>, color: Color) -> Div {
+    div()
+        .px(6.0_f32)
+        .py(1.0_f32)
+        .rounded(4.0_f32)
+        .bg(theme().surface_muted)
+        .child(mono_text(label, 8.5, color))
+}
+
+fn meta_sep() -> Text {
+    ui_text("·", 11.0, theme().text_disabled)
+}
+
+fn tag_text(tags: &str) -> String {
+    tags.split(',')
         .map(str::trim)
-        .filter(|line| {
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn short_date(date: &str) -> String {
+    if date.len() == 10
+        && date.as_bytes().get(4) == Some(&b'-')
+        && date.as_bytes().get(7) == Some(&b'-')
+    {
+        format!("{}/{}", &date[5..7], &date[8..10])
+    } else {
+        date.to_owned()
+    }
+}
+
+fn short_id(id: &str) -> String {
+    let prefix = id.chars().take(8).collect::<String>();
+    format!("{prefix}…")
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let mut chars = text.chars();
+    let out = chars.by_ref().take(max).collect::<String>();
+    if chars.next().is_some() {
+        format!("{out}…")
+    } else {
+        out
+    }
+}
+
+fn excerpt_of(body: &str) -> String {
+    let line = body
+        .lines()
+        .map(str::trim)
+        .find(|line| {
             !line.is_empty()
                 && !line.starts_with('#')
                 && !line.starts_with("!```")
                 && !line.starts_with("```")
                 && !line.starts_with("関連:")
         })
-        .map(str::to_owned)
-        .collect()
-}
-
-fn load_from_server() -> Result<Snapshot, String> {
-    let list = rpc("list", json!({}))?;
-    let items = list
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "list result has no items".to_owned())?;
-    let mut pages = Vec::new();
-    let mut snippets = Vec::new();
-    for item in items {
-        let Some(title) = item.get("title").and_then(Value::as_str) else {
-            continue;
-        };
-        match item.get("type").and_then(Value::as_str) {
-            Some("page") => pages.push(title.to_owned()),
-            Some("snippet") => snippets.push(title.to_owned()),
-            _ => {}
-        }
-    }
-
-    let page = rpc("open", json!({ "id": HOME_ID }))?;
-    let page_title = page
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("家計の記録")
-        .to_owned();
-    let body = page.get("body").and_then(Value::as_str).unwrap_or_default();
-    let block = harmion_wiki_core::scan_embedded_blocks(body)
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|block| block.spec.id.is_some())
-        .ok_or_else(|| "page has no canonical embedded block".to_owned())?;
-    let snippet_id = block.spec.id.clone().expect("filtered on id");
-    let before = clean_lines(&body[..block.start]);
-
-    let snippet = rpc("open", json!({ "id": snippet_id }))?;
-    let snippet_title = snippet
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("snippet")
-        .to_owned();
-    let format = snippet
-        .get("format")
-        .and_then(Value::as_str)
-        .unwrap_or("text");
-    let language = snippet
-        .get("language")
-        .and_then(Value::as_str)
-        .unwrap_or(format);
-    let kinds = snippet
-        .get("kinds")
-        .and_then(Value::as_array)
-        .map(|kinds| {
-            kinds
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|kind| *kind != "wiki")
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
         .unwrap_or_default();
-    let snippet_meta = if kinds.is_empty() {
-        format!("{format} / {language}")
-    } else {
-        format!("{format} / {language} / {kinds}")
-    };
-    let snippet_lines = clean_lines(
-        snippet
-            .get("body")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    );
-
-    Ok(Snapshot {
-        pages,
-        snippets,
-        page_title,
-        before,
-        snippet_title,
-        snippet_id,
-        snippet_meta,
-        snippet_lines,
-    })
+    truncate_chars(line, 80)
 }
 
-fn load() -> Snapshot {
-    match load_from_server() {
-        Ok(snapshot) => {
-            eprintln!(
-                "wiki-gui: loaded from {}",
-                std::env::var("WIKI_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_owned())
-            );
-            snapshot
-        }
-        Err(error) => {
-            eprintln!("wiki-gui: server unavailable ({error}); using built-in fixture");
-            Snapshot::fallback()
-        }
+fn class_color(class: highlight::Class) -> Color {
+    match class {
+        highlight::Class::Plain => rgb(0xc0caf5),
+        highlight::Class::Date => rgb(0x7aa2f7),
+        highlight::Class::Account => rgb(0x9ece6a),
+        highlight::Class::Amount => rgb(0xe0af68),
+        highlight::Class::Desc => rgb(0xc0caf5),
+        highlight::Class::Comment => rgb(0x565f89),
+        highlight::Class::Keyword => rgb(0xbb9af7),
+        highlight::Class::Type => rgb(0x2ac3de),
+        highlight::Class::Func => rgb(0x7aa2f7),
+        highlight::Class::String => rgb(0x9ece6a),
+        highlight::Class::Number => rgb(0xff9e64),
+        highlight::Class::Bool => rgb(0xff9e64),
+        highlight::Class::Key => rgb(0x7aa2f7),
+        highlight::Class::Punct => rgb(0xa9b1d6),
     }
 }
 
-fn dot(color: Color) -> Div {
-    div().w(6.0).h(6.0).rounded(3.0).bg(color)
+fn code_line(line: &str, language: &str) -> RichText {
+    let tokens = highlight::line(line, language);
+    let runs = tokens
+        .into_iter()
+        .map(|token| span(token.text).text_color(class_color(token.class)))
+        .collect::<Vec<_>>();
+    rich_text(runs)
+        .font_family(mono())
+        .text_size(12.0_f32)
+        .line_height(LineHeight::Relative(1.75_f32))
 }
 
-fn chip(label: &str) -> Div {
-    div()
-        .px(7.0)
-        .py(2.0)
-        .rounded(4.0)
-        .bg(theme().surface_muted)
-        .border(1.0)
-        .border_color(theme().border)
-        .child(
-            text(label.to_owned())
-                .font_family(sans())
-                .text_size(10.0)
-                .text_color(theme().text_muted),
-        )
-}
-
-fn section_label(label: &str) -> Text {
-    text(label.to_owned())
-        .font_family(sans())
-        .text_size(10.0)
-        .letter_spacing(0.9)
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme().text_muted)
-}
-
-fn nav_row(label: &str, active: bool) -> Div {
-    div()
-        .px(10.0)
-        .py(7.0)
-        .rounded(6.0)
-        .border_l(2.0)
-        .border_color(if active {
-            theme().accent
+fn code_block(lines: &[&str], language: &str) -> Div {
+    let mut block = div().flex().flex_col();
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            block = block.child(div().h(7.0_f32));
+        } else if index == 0 {
+            block = block.child(code_line(line, language));
         } else {
-            Color::TRANSPARENT
-        })
-        .bg(if active {
-            theme().selected
-        } else {
-            Color::TRANSPARENT
-        })
-        .child(
-            text(label.to_owned())
-                .font_family(sans())
-                .text_size(12.5)
-                .text_color(if active {
-                    theme().text
-                } else {
-                    theme().text_muted
-                }),
-        )
+            block = block.child(code_line(line, language));
+        }
+    }
+    block
 }
 
-fn header(snapshot: &Snapshot) -> Div {
+// ---------------------------------------------------------------------------
+// Shell
+// ---------------------------------------------------------------------------
+
+fn layout(state: &AppState) -> Div {
+    let root = state.root;
+    let key_state = state.clone();
+    let root_ref = root;
+    request_frame(move |_| root_ref.focus());
     div()
-        .h(48.0)
-        .px(20.0)
+        .w_full()
+        .h_full()
+        .relative()
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .bg(theme().page)
+        .text_color(theme().text)
+        .node_ref(root)
+        .focusable()
+        .on_key_down(move |event| handle_key(&key_state, event))
+        .child(dyn_view({
+            let state = state.clone();
+            move || toolbar(&state)
+        }))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h(0.0_f32)
+                .child(dyn_view({
+                    let state = state.clone();
+                    move || sidebar(&state)
+                }))
+                .child(dyn_view({
+                    let state = state.clone();
+                    move || editor_column(&state)
+                }))
+                .child(dyn_view({
+                    let state = state.clone();
+                    move || outline_column(&state)
+                }))
+                .child(dyn_view({
+                    let state = state.clone();
+                    move || inspector_column(&state)
+                })),
+        )
+        .child(shelf(state))
+        .child(dyn_view({
+            let state = state.clone();
+            move || status_bar(&state)
+        }))
+        .child(palette(state))
+}
+
+fn handle_key(state: &AppState, event: &KeyboardEvent) {
+    let ctrl = event.modifiers.ctrl;
+    let alt = event.modifiers.alt;
+    if event.key == Key::Named(NamedKey::Escape) {
+        if state.palette.get_untracked().is_some() {
+            event.prevent_default();
+            state.close_palette();
+            return;
+        }
+        if state.shelf_pinned.get_untracked() && !state.shelf_hover.get_untracked() {
+            event.prevent_default();
+            state.shelf_pinned.set(false);
+            return;
+        }
+    }
+    if ctrl && alt {
+        if event.key.is_char('l') {
+            event.prevent_default();
+            state.shelf_pinned.update(|pinned| *pinned = !*pinned);
+            return;
+        }
+    }
+    if !ctrl {
+        return;
+    }
+    if event.key == Key::Named(NamedKey::Enter) {
+        if state.palette.get_untracked().is_some() {
+            event.prevent_default();
+            if let Some(first) = state.results.get_untracked().into_iter().next() {
+                state.open_summary(&first);
+            }
+        }
+        return;
+    }
+    if event.key.is_char('k') {
+        event.prevent_default();
+        state.open_palette(PaletteMode::Search);
+    } else if event.key.is_char('p') {
+        event.prevent_default();
+        state.open_palette(PaletteMode::QuickOpen);
+    } else if event.key.is_char('e') {
+        event.prevent_default();
+        state.open_editor();
+    } else if event.key.is_char('i') {
+        event.prevent_default();
+        state
+            .inspector_visible
+            .update(|visible| *visible = !*visible);
+    } else if event.key.is_char('1') {
+        event.prevent_default();
+        state.inspector.set(Inspector::Links);
+        state.inspector_visible.set(true);
+    } else if event.key.is_char('2') {
+        event.prevent_default();
+        state.inspector.set(Inspector::Info);
+        state.inspector_visible.set(true);
+    } else if event.key.is_char('w') {
+        event.prevent_default();
+        let index = state.active_index();
+        state.close_tab(index);
+    } else if event.key.is_char('[') {
+        event.prevent_default();
+        state.back();
+    } else if event.key.is_char(']') {
+        event.prevent_default();
+        state.forward();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Toolbar
+// ---------------------------------------------------------------------------
+
+fn toolbar(state: &AppState) -> Div {
+    let tab = state.active_tab();
+    let title = tab
+        .as_ref()
+        .map(|tab| tab.title.clone())
+        .unwrap_or_else(|| "Wiki".to_owned());
+    let editor = state.editor.get();
+    let fallback = state.source.get() == Source::Fallback;
+
+    let mut left = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(5.0_f32)
+        .child(icon_button("▤", "サイドバー"))
+        .child(vdiv())
+        .child(icon_button("‹", "戻る Ctrl+[").on_click({
+            let state = state.clone();
+            move |_| state.back()
+        }))
+        .child(icon_button("›", "進む Ctrl+]").on_click({
+            let state = state.clone();
+            move |_| state.forward()
+        }))
+        .child(vdiv())
+        .child(ui_text(&title, 13.0, theme().text).font_weight(FontWeight::SEMIBOLD))
+        .child(ui_text("Wiki", 12.0, theme().text_disabled));
+    if fallback {
+        left = left.child(
+            div()
+                .px(6.0_f32)
+                .py(2.0_f32)
+                .rounded(4.0_f32)
+                .bg(rgb(0x3a2a12))
+                .child(ui_text("fixture", 9.0, rgb(0xe0af68))),
+        );
+    }
+
+    let editor_label = tab
+        .as_ref()
+        .map(|tab| tab.title.clone())
+        .unwrap_or_else(|| "—".to_owned());
+    let editor_color = if editor.error.is_some() {
+        rgb(0xff453a)
+    } else if editor.attached {
+        theme().success
+    } else {
+        theme().text_disabled
+    };
+
+    div()
+        .h(52.0_f32)
+        .px(14.0_f32)
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
-        .bg(theme().surface)
-        .border_b(1.0)
-        .border_color(theme().border)
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(10.0)
-                .child(
-                    div()
-                        .w(18.0)
-                        .h(18.0)
-                        .rounded(5.0)
-                        .bg(theme().accent)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            text("W")
-                                .font_family(sans())
-                                .text_size(10.0)
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(theme().on_accent),
-                        ),
-                )
-                .child(
-                    text("Harmion")
-                        .font_family(sans())
-                        .text_size(13.5)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme().text),
-                )
-                .child(
-                    text("/")
-                        .font_family(sans())
-                        .text_size(12.0)
-                        .text_color(theme().text_disabled),
-                )
-                .child(
-                    text("家計")
-                        .font_family(sans())
-                        .text_size(12.0)
-                        .text_color(theme().text_muted),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(10.0)
-                .child(
-                    div()
-                        .w(238.0)
-                        .h(30.0)
-                        .px(10.0)
-                        .rounded(6.0)
-                        .bg(theme().surface_muted)
-                        .border(1.0)
-                        .border_color(theme().border)
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(6.0)
-                                .child(
-                                    text("⌕")
-                                        .font_family(sans())
-                                        .text_size(12.0)
-                                        .text_color(theme().text_muted),
-                                )
-                                .child(
-                                    text("検索")
-                                        .font_family(sans())
-                                        .text_size(11.5)
-                                        .text_color(theme().text_muted),
-                                ),
-                        )
-                        .child(
-                            text("⌘K")
-                                .font_family(sans())
-                                .text_size(10.0)
-                                .text_color(theme().text_disabled),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(5.0)
-                        .child(dot(theme().success))
-                        .child(
-                            text("同期済み")
-                                .font_family(sans())
-                                .text_size(10.5)
-                                .text_color(theme().text_muted),
-                        ),
-                )
-                .child(quiet_button("Neovide").on_click({
-                    let id = snapshot.snippet_id.clone();
-                    move |_| open_in_nvim(&id)
-                })),
-        )
-}
-
-fn sidebar(snapshot: &Snapshot) -> Div {
-    let mut sidebar = div()
-        .w(222.0)
-        .h_full()
-        .p(16.0)
         .bg(theme().page)
-        .border_r(1.0)
+        .border_b(1.0_f32)
         .border_color(theme().border)
-        .flex()
-        .flex_col()
-        .gap(2.0)
-        .child(section_label("ページ"));
-    for (index, page) in snapshot.pages.iter().enumerate() {
-        sidebar = sidebar.child(nav_row(page, index == 1 || page == "家計の記録"));
-    }
-    sidebar = sidebar
-        .child(div().h(18.0))
-        .child(section_label("スニペット"));
-    for snippet in &snapshot.snippets {
-        sidebar = sidebar.child(
-            div()
-                .px(10.0)
-                .py(6.0)
-                .rounded(6.0)
-                .flex()
-                .items_center()
-                .gap(7.0)
-                .child(
-                    text("▤")
-                        .font_family(sans())
-                        .text_size(10.0)
-                        .text_color(theme().text_disabled),
-                )
-                .child(
-                    text(snippet.clone())
-                        .font_family(sans())
-                        .text_size(12.0)
-                        .text_color(theme().text_muted),
-                ),
-        );
-    }
-    sidebar
-        .child(div().flex_1())
-        .child(
-            text("⌘K  検索")
-                .font_family(sans())
-                .text_size(10.0)
-                .text_color(theme().text_disabled),
-        )
-        .child(
-            text("⌘P  クイックオープン")
-                .font_family(sans())
-                .text_size(10.0)
-                .text_color(theme().text_disabled),
-        )
-}
-
-fn embed(snapshot: &Snapshot) -> Div {
-    let mut lines = div().py(8.0).flex().flex_col();
-    for (index, line) in snapshot.snippet_lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        let color = if trimmed.starts_with("支出") || trimmed.starts_with("資産") {
-            theme().text_muted
-        } else {
-            theme().text
-        };
-        lines = lines.child(
-            div()
-                .px(16.0)
-                .py(2.0)
-                .flex()
-                .flex_row()
-                .items_start()
-                .gap(14.0)
-                .child(
-                    text(format!("{:>2}", index + 1))
-                        .font_family(mono())
-                        .text_size(11.0)
-                        .text_color(theme().text_disabled),
-                )
-                .child(
-                    text(line.clone())
-                        .font_family(mono())
-                        .text_size(12.5)
-                        .text_color(color),
-                ),
-        );
-    }
-
-    div()
-        .mt(22.0)
-        .rounded(10.0)
-        .bg(theme().surface)
-        .border(1.0)
-        .border_color(theme().border)
-        .overflow_hidden()
+        .child(left)
         .child(
             div()
-                .px(16.0)
-                .py(11.0)
                 .flex()
                 .flex_row()
                 .items_center()
-                .justify_between()
-                .border_b(1.0)
-                .border_color(theme().border)
+                .gap(6.0_f32)
                 .child(
                     div()
+                        .w(210.0_f32)
+                        .h(28.0_f32)
+                        .px(8.0_f32)
+                        .rounded(6.0_f32)
+                        .bg(theme().surface_muted)
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(8.0)
-                        .child(
-                            text("▤")
-                                .font_family(sans())
-                                .text_size(12.0)
-                                .text_color(theme().accent),
-                        )
-                        .child(
-                            text(snapshot.snippet_title.clone())
-                                .font_family(sans())
-                                .text_size(12.5)
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme().text),
-                        )
-                        .child(chip("HLEDGER"))
-                        .child(chip("ledger, free")),
-                )
-                .child(quiet_button("Neovide で開く").on_click({
-                    let id = snapshot.snippet_id.clone();
-                    move |_| open_in_nvim(&id)
-                })),
-        )
-        .child(lines)
-        .child(
-            div()
-                .px(16.0)
-                .py(8.0)
-                .border_t(1.0)
-                .border_color(theme().border)
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(
-                    text("3f2a9c1e…  ·  最終更新 14:31")
-                        .font_family(mono())
-                        .text_size(9.5)
-                        .text_color(theme().text_disabled),
+                        .gap(6.0_f32)
+                        .hover(|style| style.bg(theme().hover))
+                        .on_click({
+                            let state = state.clone();
+                            move |_| state.open_palette(PaletteMode::Search)
+                        })
+                        .child(ui_text("◎", 13.0, theme().text_muted))
+                        .child(ui_text("検索", 12.0, theme().text_muted))
+                        .child(div().flex_1())
+                        .child(kbd("Ctrl+K")),
                 )
                 .child(
-                    text("snippet")
-                        .font_family(sans())
-                        .text_size(9.5)
-                        .text_color(theme().text_disabled),
+                    div()
+                        .h(28.0_f32)
+                        .px(9.0_f32)
+                        .rounded(6.0_f32)
+                        .bg(theme().surface_muted)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(6.0_f32)
+                        .hover(|style| style.bg(theme().hover))
+                        .on_click({
+                            let state = state.clone();
+                            move |_| state.open_editor()
+                        })
+                        .child(dot(editor_color))
+                        .child(
+                            ui_text("Neovide", 11.0, theme().text_muted)
+                                .font_weight(FontWeight::MEDIUM),
+                        )
+                        .child(ui_text("·", 10.0, theme().text_disabled))
+                        .child(ui_text(&editor_label, 11.0, theme().text))
+                        .child(kbd("Ctrl+E")),
+                )
+                .child(
+                    div()
+                        .h(28.0_f32)
+                        .px(7.0_f32)
+                        .rounded(6.0_f32)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(4.0_f32)
+                        .hover(|style| style.bg(theme().hover))
+                        .on_click({
+                            let state = state.clone();
+                            move |_| {
+                                state
+                                    .inspector_visible
+                                    .update(|visible| *visible = !*visible)
+                            }
+                        })
+                        .child(ui_text("ⓘ", 14.0, theme().text_muted))
+                        .child(kbd("Ctrl+I")),
                 ),
         )
 }
 
-fn article(snapshot: &Snapshot) -> Div {
-    let mut body = div()
-        .w_full()
-        .max_w(720.0)
-        .px(40.0)
-        .py(44.0)
+fn vdiv() -> Div {
+    div().w(1.0_f32).h(18.0_f32).mx(4.0_f32).bg(theme().border)
+}
+
+fn icon_button(glyph: &str, tooltip: &str) -> Div {
+    div()
+        .h(26.0_f32)
+        .min_w(26.0_f32)
+        .px(6.0_f32)
+        .rounded(5.0_f32)
+        .flex()
+        .items_center()
+        .justify_center()
+        .hover(|style| style.bg(theme().surface_muted))
+        .child(ui_text(glyph, 14.0, theme().text_muted))
+        .access({
+            let tooltip = tooltip.to_owned();
+            move |access| access.label(tooltip.clone())
+        })
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar
+// ---------------------------------------------------------------------------
+
+fn sidebar(state: &AppState) -> Div {
+    let summaries = state.summaries.get();
+    let active_tab = state.active_tab();
+    let active_id = active_tab
+        .as_ref()
+        .and_then(|tab| tab.id.as_deref())
+        .unwrap_or_default()
+        .to_owned();
+    let workspace = state.active_workspace();
+    let pages = summaries
+        .iter()
+        .filter(|summary| summary.is_page())
+        .collect::<Vec<_>>();
+    let snippets = summaries
+        .iter()
+        .filter(|summary| summary.is_snippet())
+        .collect::<Vec<_>>();
+    let mut recent = workspace
+        .as_ref()
+        .map(|workspace| workspace.recent.clone())
+        .filter(|recent| !recent.is_empty())
+        .unwrap_or_else(|| summaries.iter().take(4).cloned().collect());
+    recent.sort_by_key(|summary| !summary.is_page());
+
+    let mut column = div()
+        .w(236.0_f32)
+        .h_full()
+        .min_h(0.0_f32)
+        .px(10.0_f32)
+        .py(10.0_f32)
+        .bg(theme().surface)
+        .border_r(1.0_f32)
+        .border_color(theme().border)
         .flex()
         .flex_col()
+        .overflow_y_scroll()
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(7.0)
+                .justify_between()
+                .px(10.0_f32)
+                .pt(6.0_f32)
+                .pb(8.0_f32)
+                .child(ui_text("Wiki", 13.0, theme().text).font_weight(FontWeight::SEMIBOLD))
                 .child(
-                    text("ノート")
-                        .font_family(sans())
-                        .text_size(10.5)
-                        .text_color(theme().text_muted),
-                )
-                .child(
-                    text("/")
-                        .font_family(sans())
-                        .text_size(10.5)
-                        .text_color(theme().text_disabled),
-                )
-                .child(
-                    text("家計")
-                        .font_family(sans())
-                        .text_size(10.5)
-                        .text_color(theme().text_muted),
+                    div()
+                        .hover(|style| style.bg(theme().surface_muted))
+                        .rounded(4.0_f32)
+                        .child(ui_text("＋", 17.0, theme().accent)),
                 ),
         )
-        .child(
-            text(snapshot.page_title.clone())
-                .mt(14.0)
-                .font_family(sans())
-                .text_size(36.0)
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme().text),
-        )
-        .child(
-            div()
-                .mt(10.0)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(9.0)
-                .child(
-                    text("2026年11月")
-                        .font_family(sans())
-                        .text_size(10.5)
-                        .text_color(theme().text_muted),
-                )
-                .child(dot(theme().text_disabled))
-                .child(
-                    text("更新 14:31")
-                        .font_family(sans())
-                        .text_size(10.5)
-                        .text_color(theme().text_muted),
-                )
-                .child(dot(theme().text_disabled))
-                .child(
-                    text("3 バックリンク")
-                        .font_family(sans())
-                        .text_size(10.5)
-                        .text_color(theme().text_muted),
-                ),
-        )
-        .child(
-            div()
-                .mt(14.0)
-                .flex()
-                .flex_row()
-                .gap(6.0)
-                .child(chip("家計"))
-                .child(chip("ledger"))
-                .child(chip("毎月")),
-        );
+        .child(side_section("ライブラリ"))
+        .child(nav_row(
+            "▤",
+            "すべてのページ",
+            Some(pages.len()),
+            false,
+            {
+                let state = state.clone();
+                move || state.open_palette(PaletteMode::QuickOpen)
+            },
+        ))
+        .child(nav_row("↺", "最近", Some(recent.len()), false, {
+            let state = state.clone();
+            move || state.open_palette(PaletteMode::Search)
+        }))
+        .child(nav_row("☆", "お気に入り", Some(3), false, || {}))
+        .child(side_section("ページ"));
 
-    for paragraph in snapshot.before.iter().take(2) {
-        body = body.child(
-            text(paragraph.clone())
-                .mt(24.0)
-                .font_family(sans())
-                .text_size(15.0)
-                .line_height(1.9)
-                .text_color(theme().text),
+    for summary in pages.iter().take(6) {
+        let is_active = summary.id == active_id;
+        column = column.child(page_row(state, summary, is_active));
+    }
+
+    column = column.child(side_section("スニペット"));
+    for summary in &snippets {
+        column = column.child(snippet_row(state, summary));
+    }
+
+    column = column.child(side_section("最近"));
+    for summary in recent.iter().take(4) {
+        column = column.child(
+            div()
+                .px(10.0_f32)
+                .py(5.0_f32)
+                .rounded(5.0_f32)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(8.0_f32)
+                .hover(|style| style.bg(theme().surface_muted))
+                .on_click({
+                    let state = state.clone();
+                    let summary = summary.clone();
+                    move |_| state.open_summary(&summary)
+                })
+                .child(
+                    ui_text(truncate_chars(&summary.title, 18), 12.0, theme().text_muted).flex_1(),
+                )
+                .child(mono_text(summary.kind_label(), 9.0, theme().text_disabled))
+                .child(ui_text(&summary.updated_label, 10.0, theme().text_disabled)),
         );
     }
 
-    body = body.child(embed(snapshot));
-    body = body
-        .child(div().mt(30.0).child(section_label("今月の残高")))
+    column
+        .child(div().flex_1())
+        .child(div().h(12.0_f32))
         .child(
             div()
-                .mt(10.0)
+                .h(28.0_f32)
+                .w_full()
+                .rounded(6.0_f32)
+                .bg(theme().surface_muted)
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(6.0_f32)
+                .child(ui_text("新規ページ", 12.0, theme().text))
+                .child(kbd("Ctrl+N")),
+        )
+        .child(div().h(7.0_f32))
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .child(ui_text("クイックオープン", 10.0, theme().text_disabled))
+                .child(kbd("Ctrl+P")),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .child(ui_text("検索", 10.0, theme().text_disabled))
+                .child(kbd("Ctrl+K")),
+        )
+}
+
+fn side_section(label: &str) -> Div {
+    div().mt(16.0_f32).mb(5.0_f32).px(10.0_f32).child(section_label(label))
+}
+
+fn nav_row(
+    glyph: &str,
+    label: &str,
+    count: Option<usize>,
+    active: bool,
+    on_click: impl Fn() + 'static,
+) -> Div {
+    let mut row = div()
+        .h(29.0_f32)
+        .px(9.0_f32)
+        .rounded(6.0_f32)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(8.0_f32)
+        .hover(|style| style.bg(theme().surface_muted))
+        .on_click(move |_| on_click())
+        .child(ui_text(
+            glyph,
+            12.0,
+            if active {
+                theme().on_accent
+            } else {
+                theme().text_disabled
+            },
+        ))
+        .child(ui_text(
+            label,
+            13.0,
+            if active {
+                theme().on_accent
+            } else {
+                theme().text
+            },
+        ));
+    if active {
+        row = row.bg(theme().accent);
+    }
+    if let Some(count) = count {
+        row = row.child(div().flex_1()).child(ui_text(
+            count.to_string(),
+            11.0,
+            if active {
+                rgb(0xffffff)
+            } else {
+                theme().text_disabled
+            },
+        ));
+    }
+    row
+}
+
+fn page_row(state: &AppState, summary: &Summary, active: bool) -> Div {
+    let glyph = if active { "◈" } else { "◇" };
+    let state = state.clone();
+    let summary = summary.clone();
+    let click_summary = summary.clone();
+    let mut row = div()
+        .h(29.0_f32)
+        .px(9.0_f32)
+        .rounded(6.0_f32)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(8.0_f32)
+        .hover(|style| style.bg(theme().surface_muted))
+        .on_click(move |_| state.open_summary(&click_summary))
+        .child(ui_text(
+            glyph,
+            12.0,
+            if active {
+                rgb(0xffffff)
+            } else {
+                theme().text_disabled
+            },
+        ))
+        .child(ui_text(
+            truncate_chars(&summary.title, 18),
+            13.0,
+            if active { rgb(0xffffff) } else { theme().text },
+        ));
+    if active {
+        row = row.bg(theme().accent);
+    }
+    row
+}
+
+fn snippet_row(state: &AppState, summary: &Summary) -> Div {
+    let state = state.clone();
+    let summary = summary.clone();
+    let click_summary = summary.clone();
+    div()
+        .h(29.0_f32)
+        .px(9.0_f32)
+        .rounded(6.0_f32)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(8.0_f32)
+        .hover(|style| style.bg(theme().surface_muted))
+        .on_click(move |_| state.open_summary(&click_summary))
+        .child(ui_text("▤", 11.0, theme().text_disabled))
+        .child(ui_text(
+            truncate_chars(&summary.title, 20),
+            13.0,
+            theme().text,
+        ))
+}
+
+// ---------------------------------------------------------------------------
+// Tabs and article column
+// ---------------------------------------------------------------------------
+
+fn editor_column(state: &AppState) -> Div {
+    div()
+        .flex_1()
+        .min_w(0.0_f32)
+        .min_h(0.0_f32)
+        .flex()
+        .flex_col()
+        .bg(theme().page)
+        .child(tabs(state))
+        .child(
+            div()
+                .flex_1()
+                .min_h(0.0_f32)
+                .overflow_y_scroll()
+                .child(article_scroll(state)),
+        )
+}
+
+fn tabs(state: &AppState) -> Div {
+    let tabs = state.tabs.get();
+    let active = state.active_index();
+    let mut row = div()
+        .h(36.0_f32)
+        .px(10.0_f32)
+        .flex()
+        .flex_row()
+        .items_end()
+        .bg(theme().surface)
+        .border_b(1.0_f32)
+        .border_color(theme().border);
+    for (index, tab) in tabs.iter().enumerate() {
+        let is_active = index == active;
+        let mut tab_view = div()
+            .h(29.0_f32)
+            .px(10.0_f32)
+            .rounded_t(6.0_f32)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(8.0_f32)
+            .hover(|style| style.bg(theme().surface_muted))
+            .on_click({
+                let state = state.clone();
+                move |_| state.switch_tab(index)
+            })
+            .child(ui_text(
+                &tab.title,
+                12.0,
+                if is_active {
+                    theme().text
+                } else {
+                    theme().text_muted
+                },
+            ))
+            .child(
+                div()
+                    .px(2.0_f32)
+                    .rounded(3.0_f32)
+                    .hover(|style| style.bg(theme().surface_muted))
+                    .on_click({
+                        let state = state.clone();
+                        move |event| {
+                            event.stop_propagation();
+                            state.close_tab(index);
+                        }
+                    })
+                    .child(ui_text("×", 12.0, theme().text_disabled)),
+            );
+        if is_active {
+            tab_view = tab_view
+                .bg(theme().page)
+                .border(1.0_f32)
+                .border_color(theme().border)
+                .mb(-1.0_f32);
+        }
+        row = row.child(tab_view);
+    }
+    row.child(
+        div()
+            .w(26.0_f32)
+            .h(26.0_f32)
+            .mb(4.0_f32)
+            .ml(4.0_f32)
+            .rounded(5.0_f32)
+            .flex()
+            .items_center()
+            .justify_center()
+            .hover(|style| style.bg(theme().surface_muted))
+            .on_click({
+                let state = state.clone();
+                move |_| state.open_palette(PaletteMode::QuickOpen)
+            })
+            .child(ui_text("＋", 15.0, theme().text_disabled)),
+    )
+    .child(div().flex_1())
+    .child(
+        div()
+            .pb(7.0_f32)
+            .pr(2.0_f32)
+            .child(ui_text("Ctrl+W 閉じる", 9.5, theme().text_disabled)),
+    )
+}
+
+fn article_scroll(state: &AppState) -> Div {
+    let tab = state.active_tab();
+    let index = state.active_index();
+    let body = match tab {
+        Some(tab) => match tab.workspace {
+            Some(workspace) => article(state, &workspace),
+            None => placeholder(state, index, &tab),
+        },
+        None => div()
+            .p(40.0_f32)
+            .child(ui_text("タブがありません。", 13.0, theme().text_muted)),
+    };
+    div()
+        .w_full()
+        .flex()
+        .justify_center()
+        .child(div().w_full().max_w(700.0_f32).px(48.0_f32).py(44.0_f32).child(body))
+}
+
+fn placeholder(state: &AppState, index: usize, tab: &Tab) -> Div {
+    let error = tab
+        .error
+        .clone()
+        .unwrap_or_else(|| "このページはまだ読み込まれていません。".to_owned());
+    div()
+        .flex()
+        .flex_col()
+        .child(ui_text("ノート", 11.0, theme().text_disabled))
+        .child(
+            ui_text(&tab.title, 29.0, theme().text)
+                .mt(9.0_f32)
+                .font_weight(FontWeight::BOLD),
+        )
+        .child(
+            div()
+                .mt(20.0_f32)
+                .p(18.0_f32)
+                .rounded(8.0_f32)
+                .bg(theme().surface_muted)
+                .border(1.0_f32)
+                .border_color(theme().border)
+                .child(ui_text("プレースホルダ", 11.0, theme().accent_text))
+                .child(ui_text(error, 12.5, theme().text_muted).mt(6.0_f32))
+                .child(
+                    div()
+                        .mt(12.0_f32)
+                        .h(26.0_f32)
+                        .px(9.0_f32)
+                        .rounded(5.0_f32)
+                        .bg(theme().surface)
+                        .flex()
+                        .items_center()
+                        .hover(|style| style.bg(theme().hover))
+                        .on_click({
+                            let state = state.clone();
+                            move |_| {
+                                state.tabs.update(|tabs| {
+                                    if let Some(tab) = tabs.get_mut(index) {
+                                        tab.error = None;
+                                    }
+                                });
+                                state.ensure_workspace(index);
+                            }
+                        })
+                        .child(ui_text("再読み込み", 11.5, theme().text)),
+                ),
+        )
+}
+
+fn article(state: &AppState, workspace: &Workspace) -> Div {
+    let page = &workspace.page;
+    let info = &workspace.info;
+    let tags = if !info.tags.trim().is_empty() {
+        tag_text(&info.tags)
+    } else {
+        tag_text(&page.tags.join(", "))
+    };
+    let is_home = page.id == HOME_ID || page.title == "家計の記録";
+    let code_blocks = extract_fences(&page.body);
+    let code_lines = code_blocks
+        .iter()
+        .flat_map(|(_, code)| code.lines().map(str::trim).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .child(ui_text("ノート", 11.0, theme().text_muted))
+        .child(
+            ui_text(&page.title, 29.0, theme().text)
+                .mt(9.0_f32)
+                .font_weight(FontWeight::BOLD)
+                .letter_spacing(-0.6_f32),
+        )
+        .child(
+            div()
+                .mt(9.0_f32)
+                .flex()
+                .flex_row()
+                .items_center()
+                .flex_wrap()
+                .gap(7.0_f32)
+                .child(ui_text(
+                    format!("更新 {}", info.updated),
+                    12.0,
+                    theme().text_muted,
+                ))
+                .child(meta_sep())
+                .child(ui_text(
+                    format!("作成 {}", short_date(&info.created)),
+                    12.0,
+                    theme().text_muted,
+                ))
+                .child(meta_sep())
+                .child(ui_text(
+                    format!("{}語", info.word_count),
+                    12.0,
+                    theme().text_muted,
+                ))
+                .child(meta_sep())
+                .child(ui_text(
+                    format!("{} バックリンク", workspace.links.backlinks.len()),
+                    12.0,
+                    theme().text_muted,
+                ))
+                .child(meta_sep())
+                .child(ui_text(
+                    if tags.is_empty() {
+                        "タグなし".to_owned()
+                    } else {
+                        tags
+                    },
+                    12.0,
+                    theme().text_muted,
+                )),
+        );
+
+    let mut lead_index = 0;
+    for paragraph in &workspace.before {
+        if paragraph.trim_start().starts_with('>')
+            || code_lines.iter().any(|code| *code == paragraph.trim())
+        {
+            continue;
+        }
+        let margin = if lead_index == 0 { 24.0 } else { 12.0 };
+        body = body.child(
+            ui_text(paragraph, 15.5, theme().text)
+                .mt(margin)
+                .line_height(LineHeight::Relative(1.68_f32)),
+        );
+        lead_index += 1;
+    }
+
+    for (language, code) in &code_blocks {
+        let lines = code.lines().collect::<Vec<_>>();
+        body = body.child(
+            div()
+                .mt(22.0_f32)
+                .rounded(10.0_f32)
+                .bg(theme().surface_muted)
+                .overflow_hidden()
+                .child(
+                    div()
+                        .px(14.0_f32)
+                        .py(8.0_f32)
+                        .flex()
+                        .justify_between()
+                        .child(mono_text(language, 10.0, theme().text_disabled)),
+                )
+                .child(div().px(14.0_f32).pb(11.0_f32).child(code_block(&lines, language))),
+        );
+    }
+
+    if let Some((quote, cite)) = quote_for(workspace) {
+        body = body.child(
+            div()
+                .mt(22.0_f32)
+                .pl(14.0_f32)
+                .border_l(2.0_f32)
+                .border_color(theme().border)
+                .child(
+                    ui_text(quote, 14.0, theme().text_muted)
+                        .line_height(LineHeight::Relative(1.65_f32)),
+                )
+                .child(ui_text(cite, 10.0, theme().text_disabled).mt(3.0_f32)),
+        );
+    }
+
+    if let Some(snippet) = &workspace.snippet {
+        body = body.child(embed(state, snippet));
+    } else if page.content_type == "snippet" {
+        let language = page
+            .language
+            .clone()
+            .or_else(|| page.format.clone())
+            .unwrap_or_else(|| "text".to_owned());
+        let lines = page.body.lines().collect::<Vec<_>>();
+        body = body.child(
+            div()
+                .mt(22.0_f32)
+                .rounded(10.0_f32)
+                .bg(theme().surface_muted)
+                .child(div().p(14.0_f32).child(code_block(&lines, &language))),
+        );
+    }
+
+    if workspace.snippet.is_some() {
+        body = body.child(balance_section());
+    }
+
+    for paragraph in &workspace.after {
+        if paragraph.trim().is_empty() {
+            continue;
+        }
+        body = body.child(
+            ui_text(paragraph, 15.5, theme().text)
+                .mt(24.0_f32)
+                .line_height(LineHeight::Relative(1.68_f32)),
+        );
+    }
+
+    if is_home && workspace.snippet.is_none() {
+        body = body.child(
+            div()
+                .mt(24.0_f32)
+                .p(16.0_f32)
+                .rounded(8.0_f32)
+                .bg(theme().surface_muted)
+                .child(ui_text(
+                    "このページにはまだ埋め込みジャーナルがありません。",
+                    12.5,
+                    theme().text_muted,
+                )),
+        );
+    }
+
+    body
+}
+
+fn quote_for(workspace: &Workspace) -> Option<(String, String)> {
+    for line in &workspace.before {
+        if let Some(quote) = line.trim_start().strip_prefix('>') {
+            let quote = quote.trim().to_owned();
+            if !quote.is_empty() {
+                return Some((quote, "引用".to_owned()));
+            }
+        }
+    }
+    if workspace.page.id == HOME_ID || workspace.page.title == "家計の記録" {
+        return Some((
+            "固定費は先に把握する。".to_owned(),
+            "2026年の目標".to_owned(),
+        ));
+    }
+    None
+}
+
+fn embed(state: &AppState, snippet: &Content) -> Div {
+    let language = snippet
+        .language
+        .clone()
+        .or_else(|| snippet.format.clone())
+        .unwrap_or_else(|| "text".to_owned());
+    let kinds = snippet
+        .kinds
+        .iter()
+        .filter(|kind| kind.as_str() != "wiki")
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let lines = snippet.body.lines().collect::<Vec<_>>();
+    let meta = if kinds.is_empty() {
+        format!(
+            "{} · {}",
+            snippet.format.clone().unwrap_or_default(),
+            language
+        )
+    } else {
+        format!("{} · {}", snippet.format.clone().unwrap_or_default(), kinds)
+    };
+    let id = snippet.id.clone();
+    let title = snippet.title.clone();
+    div()
+        .mt(24.0_f32)
+        .rounded(10.0_f32)
+        .bg(theme().surface_muted)
+        .overflow_hidden()
+        .hover(|style| style.bg(theme().hover))
+        .on_click({
+            let state = state.clone();
+            move |_| state.open_editor_for(&id, &title)
+        })
+        .child(
+            div()
+                .px(14.0_f32)
+                .pt(11.0_f32)
+                .pb(9.0_f32)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(8.0_f32)
+                .child(
+                    ui_text(&snippet.title, 13.0, theme().text).font_weight(FontWeight::SEMIBOLD),
+                )
+                .child(mono_text(
+                    meta.trim_matches(' ').trim_matches('·'),
+                    10.0,
+                    theme().text_disabled,
+                )),
+        )
+        .child(div().px(14.0_f32).pb(11.0_f32).child(code_block(&lines, &language)))
+        .child(
+            div()
+                .px(14.0_f32)
+                .pb(11.0_f32)
+                .flex()
+                .justify_between()
+                .child(mono_text(
+                    short_id(&snippet.id),
+                    10.0,
+                    theme().text_disabled,
+                ))
+                .child(ui_text(
+                    format!("最終更新 {}", snippet.updated_label),
+                    10.5,
+                    theme().text_disabled,
+                )),
+        )
+}
+
+fn balance_section() -> Div {
+    div()
+        .mt(30.0_f32)
+        .child(
+            div()
+                .pb(7.0_f32)
+                .border_b(1.0_f32)
+                .border_color(theme().border)
+                .flex()
+                .justify_between()
+                .child(ui_text("今月の残高", 13.0, theme().text).font_weight(FontWeight::SEMIBOLD))
+                .child(mono_text("ledger/balance", 11.0, theme().text_disabled)),
+        )
+        .child(
+            div()
+                .pt(13.0_f32)
                 .flex()
                 .flex_row()
                 .items_end()
@@ -691,253 +1953,1627 @@ fn article(snapshot: &Snapshot) -> Div {
                         .flex()
                         .flex_col()
                         .child(
-                            text("¥12,400")
-                                .font_family(sans())
-                                .text_size(34.0)
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme().text),
+                            ui_text("¥12,400", 39.0, theme().text)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .letter_spacing(-1.0_f32),
                         )
-                        .child(
-                            text("2026-11-16 時点")
-                                .mt(4.0)
-                                .font_family(sans())
-                                .text_size(10.5)
-                                .text_color(theme().text_muted),
-                        ),
+                        .child(ui_text("2026-11-16 時点", 12.0, theme().text_muted).mt(6.0_f32)),
                 )
                 .child(
                     div()
+                        .pb(2.0_f32)
                         .flex()
                         .items_center()
-                        .gap(6.0)
+                        .gap(6.0_f32)
                         .child(dot(theme().success))
-                        .child(
-                            text("ledger/balance")
-                                .font_family(mono())
-                                .text_size(10.0)
-                                .text_color(theme().text_muted),
-                        ),
+                        .child(ui_text("接続中", 11.0, theme().text_muted)),
                 ),
         )
-        .child(div().mt(30.0).child(section_label("このページを参照")))
-        .child(
-            div()
-                .mt(10.0)
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .gap(6.0)
-                .child(chip("2026年の目標"))
-                .child(chip("レシート処理"))
-                .child(chip("固定費の見直し")),
-        )
-        .child(div().h(56.0));
-
-    div()
-        .flex_1()
-        .h_full()
-        .overflow_y_scroll()
-        .child(div().w_full().flex().justify_center().child(body))
 }
 
-fn rail() -> Div {
+// ---------------------------------------------------------------------------
+// Outline
+// ---------------------------------------------------------------------------
+
+fn outline_column(state: &AppState) -> Div {
+    let outline = state
+        .active_workspace()
+        .map(|workspace| workspace.outline)
+        .unwrap_or_default();
+    let mut items = outline
+        .iter()
+        .filter(|item| item.level >= 2)
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        items = outline.iter().collect();
+    }
+    let mut nav = div().flex().flex_col().gap(1.0_f32);
+    for (index, item) in items.iter().enumerate() {
+        let active = index == 0;
+        nav = nav.child(
+            div()
+                .py(5.0_f32)
+                .pl(9.0_f32)
+                .pr(6.0_f32)
+                .border_l(2.0_f32)
+                .border_color(if active {
+                    theme().accent
+                } else {
+                    Color::TRANSPARENT
+                })
+                .rounded(4.0_f32)
+                .hover(|style| style.bg(theme().surface_muted))
+                .child(ui_text(
+                    truncate_chars(&item.title, 18),
+                    if item.level >= 3 { 11.5 } else { 12.0 },
+                    if active {
+                        theme().text
+                    } else {
+                        theme().text_muted
+                    },
+                )),
+        );
+    }
+    if items.is_empty() {
+        nav = nav.child(
+            ui_text("本文に目次はありません。", 11.0, theme().text_disabled)
+                .px(9.0_f32)
+                .py(5.0_f32),
+        );
+    }
     div()
-        .w(240.0)
+        .w(176.0_f32)
         .h_full()
-        .p(18.0)
-        .bg(theme().page)
-        .border_l(1.0)
+        .px(14.0_f32)
+        .py(22.0_f32)
+        .border_l(1.0_f32)
         .border_color(theme().border)
         .flex()
         .flex_col()
-        .child(section_label("目次"))
+        .justify_center()
+        .child(div().mb(9.0_f32).child(section_label("Outline")))
+        .child(nav)
+}
+
+// ---------------------------------------------------------------------------
+// Inspector
+// ---------------------------------------------------------------------------
+
+fn inspector_column(state: &AppState) -> Option<Div> {
+    if !state.inspector_visible.get() {
+        return None;
+    }
+    let mode = state.inspector.get();
+    let mut column = div()
+        .w(340.0_f32)
+        .h_full()
+        .min_h(0.0_f32)
+        .px(20.0_f32)
+        .py(18.0_f32)
+        .bg(theme().surface)
+        .border_l(1.0_f32)
+        .border_color(theme().border)
+        .flex()
+        .flex_col()
+        .overflow_y_scroll()
         .child(
             div()
-                .mt(10.0)
-                .pl(10.0)
-                .py(4.0)
-                .border_l(2.0)
-                .border_color(theme().accent)
-                .child(
-                    text("今月の支出")
-                        .font_family(sans())
-                        .text_size(12.0)
-                        .text_color(theme().text),
-                ),
-        )
-        .child(
-            div()
-                .pl(10.0)
-                .py(4.0)
-                .border_l(2.0)
-                .border_color(Color::TRANSPARENT)
-                .child(
-                    text("埋め込みジャーナル")
-                        .font_family(sans())
-                        .text_size(12.0)
-                        .text_color(theme().text_muted),
-                ),
-        )
-        .child(
-            div()
-                .pl(10.0)
-                .py(4.0)
-                .border_l(2.0)
-                .border_color(Color::TRANSPARENT)
-                .child(
-                    text("残高")
-                        .font_family(sans())
-                        .text_size(12.0)
-                        .text_color(theme().text_muted),
-                ),
-        )
-        .child(div().h(1.0).my(18.0).bg(theme().border))
-        .child(section_label("接続"))
-        .child(
-            div()
-                .mt(10.0)
+                .p(2.0_f32)
+                .rounded(7.0_f32)
+                .bg(theme().surface_muted)
                 .flex()
-                .flex_col()
-                .gap(9.0)
-                .child(provider("ledger/balance"))
-                .child(provider("wiki/backlinks"))
-                .child(provider("wiki/outline"))
-                .child(provider("wiki/transclude")),
+                .flex_row()
+                .gap(2.0_f32)
+                .child(segment_button(
+                    state,
+                    "リンク",
+                    "Ctrl+1",
+                    Inspector::Links,
+                    mode,
+                ))
+                .child(segment_button(
+                    state,
+                    "情報",
+                    "Ctrl+2",
+                    Inspector::Info,
+                    mode,
+                )),
         )
-        .child(div().h(1.0).my(18.0).bg(theme().border))
-        .child(section_label("エディタ"))
+        .child(div().h(18.0_f32));
+
+    let content = match mode {
+        Inspector::Links => inspector_links(state),
+        Inspector::Info => inspector_info(state),
+    };
+    column = column.child(content);
+    Some(column)
+}
+
+fn segment_button(
+    state: &AppState,
+    label: &str,
+    shortcut: &str,
+    value: Inspector,
+    current: Inspector,
+) -> Div {
+    let active = value == current;
+    div()
+        .flex_1()
+        .h(24.0_f32)
+        .rounded(5.0_f32)
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(4.0_f32)
+        .bg(if active {
+            theme().pressed
+        } else {
+            Color::TRANSPARENT
+        })
+        .hover(|style| style.bg(theme().pressed))
+        .on_click({
+            let state = state.clone();
+            move |_| state.inspector.set(value)
+        })
+        .child(ui_text(
+            label,
+            11.0,
+            if active {
+                theme().text
+            } else {
+                theme().text_muted
+            },
+        ))
+        .child(ui_text(
+            shortcut,
+            8.5,
+            if active {
+                theme().text_muted
+            } else {
+                theme().text_disabled
+            },
+        ))
+}
+
+fn inspector_links(state: &AppState) -> Div {
+    let workspace = state.active_workspace();
+    let Some(workspace) = workspace else {
+        return div().child(section_label("リンク")).child(
+            ui_text(
+                "ページを開くとリンクが表示されます。",
+                11.5,
+                theme().text_disabled,
+            )
+            .mt(8.0_f32),
+        );
+    };
+    let two_hop = &workspace.links.two_hop;
+    let total = two_hop.len();
+    let groups = ordered_groups(&workspace);
+    let preview = groups
+        .iter()
+        .take(3)
+        .filter_map(|(_, items)| items.first().cloned())
+        .collect::<Vec<_>>();
+    let shown = preview.len();
+    let selected = state.next_selected.get().min(shown.saturating_sub(1));
+    let mut content = div().flex().flex_col().child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(4.0_f32)
+            .child(section_label("次に読む"))
+            .child(ui_text(
+                format!("{shown} / {total}"),
+                10.0,
+                theme().text_disabled,
+            )),
+    );
+
+    if shown == 0 {
+        content = content.child(
+            ui_text(
+                "2-hop のリンクはまだありません。",
+                11.5,
+                theme().text_disabled,
+            )
+            .mt(8.0_f32),
+        );
+    } else {
+        let mut suggestions = div().mt(8.0_f32).flex().flex_col().gap(3.0_f32);
+        for (index, hop) in preview.iter().enumerate() {
+            suggestions = suggestions.child(suggestion(state, hop, index == selected, index));
+        }
+        content = content.child(suggestions);
+    }
+
+    content = content
         .child(
             div()
-                .mt(10.0)
+                .mt(4.0_f32)
+                .flex()
+                .items_center()
+                .gap(6.0_f32)
+                .hover(|style| style.bg(theme().surface_muted))
+                .on_click({
+                    let state = state.clone();
+                    move |_| state.shelf_pinned.set(true)
+                })
+                .child(ui_text("2-hop をすべて見る", 11.0, theme().accent_text))
+                .child(kbd("Ctrl+Alt+L")),
+        )
+        .child(
+            div()
+                .mt(7.0_f32)
+                .flex()
+                .justify_between()
+                .child(ui_text("↑ ↓ 選択", 9.0, theme().text_disabled))
+                .child(ui_text("↵ 開く", 9.0, theme().text_disabled))
+                .child(ui_text("Ctrl+Enter 新規タブ", 9.0, theme().text_disabled)),
+        )
+        .child(divider())
+        .child(
+            div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .justify_between()
-                .child(
-                    text("Neovide")
-                        .font_family(sans())
-                        .text_size(11.5)
-                        .text_color(theme().text_muted),
-                )
-                .child(
-                    text("外部")
-                        .font_family(sans())
-                        .text_size(9.5)
-                        .text_color(theme().text_disabled),
-                ),
-        )
-        .child(div().flex_1())
+                .gap(4.0_f32)
+                .child(section_label("関連スニペット"))
+                .child(ui_text(
+                    workspace.related.len().to_string(),
+                    10.0,
+                    theme().text_disabled,
+                )),
+        );
+
+    let mut related = div().mt(4.0_f32).flex().flex_col();
+    for summary in workspace.related.iter().take(6) {
+        related = related.child(link_row(state, summary, &summary.updated_label));
+    }
+    if workspace.related.is_empty() {
+        related = related.child(ui_text(
+            "関連スニペットはありません。",
+            11.0,
+            theme().text_disabled,
+        ));
+    }
+    content = content.child(related).child(divider()).child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(4.0_f32)
+            .child(section_label("リンク"))
+            .child(ui_text(
+                (workspace.links.outgoing.len() + workspace.links.backlinks.len()).to_string(),
+                10.0,
+                theme().text_disabled,
+            )),
+    );
+
+    let mut groups = div().mt(4.0_f32).flex().flex_col();
+    groups = groups.child(div().mt(6.0_f32).mb(2.0_f32).child(ui_text(
+        format!("発リンク {}", workspace.links.outgoing.len()),
+        10.0,
+        theme().text_disabled,
+    )));
+    for summary in workspace.links.outgoing.iter().take(8) {
+        groups = groups.child(link_row(state, summary, "›"));
+    }
+    if workspace.links.outgoing.is_empty() {
+        groups = groups.child(ui_text(
+            "発リンクはありません。",
+            11.0,
+            theme().text_disabled,
+        ));
+    }
+    groups = groups.child(div().mt(8.0_f32).mb(2.0_f32).child(ui_text(
+        format!("バックリンク {}", workspace.links.backlinks.len()),
+        10.0,
+        theme().text_disabled,
+    )));
+    for summary in workspace.links.backlinks.iter().take(8) {
+        groups = groups.child(link_row(state, summary, "›"));
+    }
+    if workspace.links.backlinks.is_empty() {
+        groups = groups.child(ui_text(
+            "バックリンクはありません。",
+            11.0,
+            theme().text_disabled,
+        ));
+    }
+    content.child(groups)
+}
+
+fn suggestion(state: &AppState, hop: &TwoHop, selected: bool, index: usize) -> Div {
+    let mut row = div()
+        .rounded(6.0_f32)
+        .px(12.0_f32)
+        .py(10.0_f32)
+        .flex()
+        .flex_col()
+        .hover(|style| style.bg(theme().surface_muted))
+        .on_click({
+            let state = state.clone();
+            let target = hop.target.clone();
+            move |_| {
+                state.next_selected.set(index);
+                state.open_summary(&target);
+            }
+        })
         .child(
             div()
                 .flex()
+                .flex_row()
                 .items_center()
-                .gap(6.0)
-                .child(dot(theme().success))
-                .child(
-                    text("競合なし")
-                        .font_family(sans())
-                        .text_size(10.0)
-                        .text_color(theme().text_muted),
-                ),
+                .gap(5.0_f32)
+                .child(ui_text(
+                    format!("{} から", hop.via.title),
+                    9.5,
+                    theme().text_muted,
+                ))
+                .child(chip("2-hop", theme().text_disabled)),
         )
+        .child(
+            ui_text(&hop.target.title, 12.5, theme().text)
+                .mt(3.0_f32)
+                .font_weight(FontWeight::SEMIBOLD),
+        )
+        .child(
+            ui_text(
+                truncate_chars(&hop.target.excerpt, 64),
+                10.5,
+                theme().text_muted,
+            )
+            .mt(3.0_f32)
+            .line_height(LineHeight::Relative(1.45_f32)),
+        )
+        .child(ui_text(next_reason(hop), 9.5, theme().text_disabled).mt(4.0_f32));
+    if selected {
+        row = row.bg(theme().surface_muted);
+    }
+    row
 }
 
-fn provider(name: &str) -> Div {
+fn next_reason(hop: &TwoHop) -> String {
+    if hop.target.refs > 0 {
+        format!("{} か所から参照", hop.target.refs)
+    } else if !hop.reason.is_empty() && hop.reason != hop.target.excerpt {
+        truncate_chars(&hop.reason, 72)
+    } else {
+        format!("共通タグ: {}", hop.target.kind_label())
+    }
+}
+
+/// Group two-hop links by the page they were reached through. The outgoing order
+/// is the reading order of the host page, so it decides the group order too.
+fn ordered_groups(workspace: &Workspace) -> Vec<(Summary, Vec<TwoHop>)> {
+    let mut groups: Vec<(Summary, Vec<TwoHop>)> = Vec::new();
+    for hop in &workspace.links.two_hop {
+        if let Some((_, items)) = groups.iter_mut().find(|(via, _)| via.id == hop.via.id) {
+            items.push(hop.clone());
+        } else {
+            groups.push((hop.via.clone(), vec![hop.clone()]));
+        }
+    }
+    let mut ordered = Vec::new();
+    for via in &workspace.links.outgoing {
+        if let Some(position) = groups.iter().position(|(candidate, _)| candidate.id == via.id) {
+            ordered.push(groups.remove(position));
+        }
+    }
+    ordered.extend(groups);
+    ordered
+}
+
+fn link_row(state: &AppState, summary: &Summary, arrow: &str) -> Div {
+    let state = state.clone();
+    let summary = summary.clone();
+    let click_summary = summary.clone();
+    let arrow = arrow.to_owned();
     div()
+        .py(4.0_f32)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(8.0_f32)
+        .border_b(1.0_f32)
+        .border_color(rgb(0x2f2f31))
+        .hover(|style| style.bg(theme().surface_muted))
+        .on_click(move |_| state.open_summary(&click_summary))
+        .child(ui_text(truncate_chars(&summary.title, 30), 11.5, theme().text_muted).flex_1())
+        .child(ui_text(arrow, 11.0, theme().text_disabled))
+}
+
+fn divider() -> Div {
+    div().my(16.0_f32).h(1.0_f32).bg(theme().border)
+}
+
+fn inspector_info(state: &AppState) -> Div {
+    let workspace = state.active_workspace();
+    let editor = state.editor.get();
+    let source = state.source.get();
+    let Some(workspace) = workspace else {
+        return div().child(section_label("ページ情報")).child(
+            ui_text(
+                "ページを開くと情報が表示されます。",
+                11.5,
+                theme().text_disabled,
+            )
+            .mt(8.0_f32),
+        );
+    };
+    let info = &workspace.info;
+    let tags = if info.tags.trim().is_empty() {
+        workspace.page.tags.join(", ")
+    } else {
+        info.tags.clone()
+    };
+    let editor_status = if let Some(error) = &editor.error {
+        format!("エラー: {error}")
+    } else if editor.attached {
+        format!("{} を編集中", workspace.page.title)
+    } else {
+        "未接続（Ctrl+E で起動）".to_owned()
+    };
+
+    let mut content = div()
+        .flex()
+        .flex_col()
+        .child(section_label("ページ情報"))
+        .child(info_row("作成", &short_date(&info.created)))
+        .child(info_row("更新", &info.updated))
+        .child(info_row("語数", &info.word_count.to_string()))
+        .child(info_row(
+            "タグ",
+            if tags.is_empty() { "なし" } else { &tags },
+        ))
+        .child(info_row(
+            "種類",
+            if workspace.page.content_type.is_empty() {
+                "page"
+            } else {
+                &workspace.page.content_type
+            },
+        ))
+        .child(divider())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(4.0_f32)
+                .child(section_label("接続"))
+                .child(ui_text("4", 10.0, theme().text_disabled)),
+        )
+        .child(
+            div()
+                .mt(6.0_f32)
+                .flex()
+                .items_center()
+                .gap(7.0_f32)
+                .child(dot(theme().success))
+                .child(ui_text("4 providers 接続中", 12.0, theme().text_muted)),
+        )
+        .child(
+            ui_text(
+                "ledger/balance · wiki/backlinks · wiki/outline · wiki/transclude",
+                10.5,
+                theme().text_disabled,
+            )
+            .mt(6.0_f32)
+            .line_height(LineHeight::Relative(1.55_f32)),
+        )
+        .child(divider())
+        .child(section_label("エディタ"))
+        .child(info_row("Neovide", &editor_status))
+        .child(
+            ui_text(
+                if let Some(warning) = &editor.warning {
+                    format!("タブを切り替えると追従します。注意: {warning}")
+                } else {
+                    "タブを切り替えると、Neovide も同じ Content に追従します。".to_owned()
+                },
+                10.5,
+                theme().text_disabled,
+            )
+            .mt(6.0_f32)
+            .line_height(LineHeight::Relative(1.55_f32)),
+        )
+        .child(divider())
+        .child(section_label("状態"))
+        .child(
+            div()
+                .mt(6.0_f32)
+                .flex()
+                .items_center()
+                .gap(7.0_f32)
+                .child(dot(if source == Source::Fallback {
+                    rgb(0xe0af68)
+                } else {
+                    theme().success
+                }))
+                .child(ui_text(
+                    if source == Source::Fallback {
+                        "フォールバック · 未接続"
+                    } else {
+                        "保存済み · 同期済み"
+                    },
+                    12.0,
+                    theme().text_muted,
+                )),
+        )
+        .child(
+            ui_text(
+                if source == Source::Fallback {
+                    format!(
+                        "サーバーに接続できないため、内蔵 fixture を表示しています。\n{}",
+                        state.boot_error.clone().unwrap_or_default()
+                    )
+                } else {
+                    format!("競合なし\n{}", state.socket)
+                },
+                10.5,
+                theme().text_disabled,
+            )
+            .mt(6.0_f32)
+            .line_height(LineHeight::Relative(1.5_f32)),
+        );
+    if let Some(error) = &editor.error {
+        content = content.child(
+            ui_text(error, 10.5, rgb(0xff453a))
+                .mt(8.0_f32)
+                .line_height(LineHeight::Relative(1.45_f32)),
+        );
+    }
+    content
+}
+
+fn info_row(label: &str, value: &str) -> Div {
+    div()
+        .py(5.0_f32)
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
+        .gap(12.0_f32)
+        .child(ui_text(label, 12.0, theme().text_muted))
+        .child(ui_text(value, 12.0, theme().text))
+}
+
+// ---------------------------------------------------------------------------
+// Two-hop shelf
+// ---------------------------------------------------------------------------
+
+fn shelf(state: &AppState) -> Div {
+    let pinned = state.shelf_pinned;
+    let hovered = state.shelf_hover;
+    let count_state = state.clone();
+    let body_state = state.clone();
+    div()
+        .absolute()
+        .left(236.0_f32)
+        .right(0.0_f32)
+        .bottom(0.0_f32)
+        .h(SHELF_HEIGHT)
+        .z_index(20_f32)
+        .bg(theme().surface)
+        .border_t(1.0_f32)
+        .border_color(theme().border)
+        .shadow(BoxShadow {
+            offset_x: 0.0,
+            offset_y: -16.0,
+            blur: 40.0,
+            spread: 0.0,
+            color: rgba(0x00000057),
+            inset: false,
+        })
+        .transition(Transition::ms(240).cubic_bezier(0.2, 0.8, 0.2, 1.0))
+        .dyn_style(move |style| {
+            let open = pinned.get() || hovered.get();
+            style.translate_y(if open {
+                0.0
+            } else {
+                SHELF_HEIGHT - SHELF_HANDLE
+            })
+        })
+        .on_hover(move |over| hovered.set(over))
         .child(
             div()
+                .h(SHELF_HANDLE)
+                .px(20.0_f32)
                 .flex()
+                .flex_row()
                 .items_center()
-                .gap(7.0)
-                .child(dot(theme().success))
+                .gap(9.0_f32)
+                .on_click(move |_| pinned.update(|pinned| *pinned = !*pinned))
                 .child(
-                    text(name.to_owned())
-                        .font_family(mono())
-                        .text_size(9.5)
-                        .text_color(theme().text_muted),
-                ),
+                    ui_text("2-hop リンク", 11.0, theme().text).font_weight(FontWeight::SEMIBOLD),
+                )
+                .child(dyn_view(move || {
+                    let total = count_state
+                        .active_workspace()
+                        .map(|workspace| workspace.links.two_hop.len())
+                        .unwrap_or(0);
+                    div()
+                        .min_w(17.0_f32)
+                        .h(16.0_f32)
+                        .px(4.0_f32)
+                        .rounded(4.0_f32)
+                        .bg(theme().surface_muted)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(ui_text(total.to_string(), 9.0, theme().text_muted))
+                }))
+                .child(ui_text("すべて見る", 11.0, theme().text_muted))
+                .child(div().flex_1())
+                .child(ui_text("ホバーで表示 ·", 9.5, theme().text_disabled))
+                .child(kbd("Ctrl+Alt+L"))
+                .child(dyn_view(move || {
+                    let open = pinned.get() || hovered.get();
+                    ui_text(if open { "▾" } else { "▴" }, 11.0, theme().text_disabled)
+                })),
         )
         .child(
-            text("接続中")
-                .font_family(sans())
-                .text_size(9.0)
-                .text_color(theme().text_disabled),
+            div()
+                .h(SHELF_HEIGHT - SHELF_HANDLE)
+                .px(20.0_f32)
+                .pt(8.0_f32)
+                .pb(14.0_f32)
+                .overflow_y_scroll()
+                .child(dyn_view(move || shelf_body(&body_state))),
         )
 }
 
-fn status_bar() -> Div {
+fn shelf_body(state: &AppState) -> Div {
+    let workspace = state.active_workspace();
+    let groups = workspace
+        .as_ref()
+        .map(ordered_groups)
+        .unwrap_or_default();
+    if groups.is_empty() {
+        return div().child(ui_text(
+            "このページから 2-hop で辿れるリンクはありません。",
+            12.0,
+            theme().text_disabled,
+        ));
+    }
+    let mut columns = div().flex().flex_col().gap(16.0_f32);
+    for chunk in groups.chunks(3) {
+        let mut row = div().flex().flex_row().gap(24.0_f32);
+        for (via, items) in chunk {
+            let mut group = div().flex_1().min_w(0.0_f32).flex().flex_col().child(
+                div()
+                    .mb(3.0_f32)
+                    .px(7.0_f32)
+                    .flex()
+                    .justify_between()
+                    .child(ui_text(
+                        format!("{} から", via.title),
+                        10.0,
+                        theme().text_muted,
+                    ))
+                    .child(ui_text(
+                        items.len().to_string(),
+                        10.0,
+                        theme().text_disabled,
+                    )),
+            );
+            for hop in items {
+                group = group.child(hop_row(state, hop, items.len()));
+            }
+            row = row.child(group);
+        }
+        columns = columns.child(row);
+    }
+    columns
+}
+
+fn hop_row(state: &AppState, hop: &TwoHop, group_count: usize) -> Div {
+    let state = state.clone();
+    let target = hop.target.clone();
+    let count = if target.refs > 0 {
+        target.refs
+    } else {
+        group_count
+    };
+    let kind_tag = target.kind_label();
     div()
-        .h(26.0)
-        .px(20.0)
+        .rounded(6.0_f32)
+        .px(8.0_f32)
+        .py(7.0_f32)
+        .flex()
+        .flex_col()
+        .hover(|style| style.bg(theme().surface_muted))
+        .on_click(move |_| state.open_summary(&target))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(6.0_f32)
+                .child(
+                    ui_text(truncate_chars(&hop.target.title, 22), 11.5, theme().text)
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
+                .child(mono_text(kind_tag, 8.5, theme().text_disabled)),
+        )
+        .child(
+            ui_text(
+                truncate_chars(&hop.target.excerpt, 78),
+                10.0,
+                theme().text_muted,
+            )
+            .mt(2.0_f32)
+            .line_height(LineHeight::Relative(1.4_f32)),
+        )
+        .child(
+            ui_text(
+                format!(
+                    "更新 {} · {} 参照 · {}",
+                    hop.target.updated_label,
+                    count,
+                    hop.target.kind_label()
+                ),
+                9.0,
+                theme().text_disabled,
+            )
+            .mt(3.0_f32),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// Palette (non-modal: no backdrop)
+// ---------------------------------------------------------------------------
+
+fn palette(state: &AppState) -> Show {
+    let show_state = state.clone();
+    show(move || show_state.palette.get().is_some(), {
+        let state = state.clone();
+        move || palette_card(&state)
+    })
+}
+
+fn palette_card(state: &AppState) -> Div {
+    let input = node_ref();
+    request_frame(move |_| input.focus());
+    let mode = state.palette.get().unwrap_or(PaletteMode::Search);
+    let header_state = state.clone();
+    let results_state = state.clone();
+    div()
+        .absolute()
+        .top(58.0_f32)
+        .left(320.0_f32)
+        .w(620.0_f32)
+        .z_index(40_f32)
+        .rounded(10.0_f32)
+        .bg(theme().surface)
+        .border(1.0_f32)
+        .border_color(theme().border)
+        .shadow_lg()
+        .p(8.0_f32)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(7.0_f32)
+                .px(8.0_f32)
+                .child(ui_text(
+                    if mode == PaletteMode::Search {
+                        "◎"
+                    } else {
+                        "›"
+                    },
+                    14.0,
+                    theme().text_muted,
+                ))
+                .child(
+                    text_input()
+                        .value(state.query)
+                        .placeholder(if mode == PaletteMode::Search {
+                            "検索 — タイトル・本文・タグ"
+                        } else {
+                            "クイックオープン — ページ名"
+                        })
+                        .font_family(sans())
+                        .text_size(12.5_f32)
+                        .text_color(theme().text)
+                        .w_full()
+                        .h(28.0_f32)
+                        .px(6.0_f32)
+                        .node_ref(input)
+                        .on_input({
+                            let state = state.clone();
+                            move |text| state.on_query(text)
+                        })
+                        .on_submit({
+                            let state = state.clone();
+                            move |_| {
+                                if let Some(first) =
+                                    state.results.get_untracked().into_iter().next()
+                                {
+                                    state.open_summary(&first);
+                                }
+                            }
+                        })
+                        .on_key_down({
+                            let state = state.clone();
+                            move |event| {
+                                if event.key == Key::Named(NamedKey::Escape) {
+                                    event.prevent_default();
+                                    state.close_palette();
+                                }
+                            }
+                        }),
+                )
+                .child(kbd("Esc")),
+        )
+        .child(div().px(10.0_f32).pt(6.0_f32).pb(4.0_f32).child(dyn_view(move || {
+            let mode = header_state.palette.get().unwrap_or(PaletteMode::Search);
+            let label = if mode == PaletteMode::Search {
+                "検索"
+            } else {
+                "クイックオープン"
+            };
+            ui_text(label, 9.5, theme().text_disabled)
+        })))
+        .child(dyn_view(move || {
+            let results = results_state.results.get();
+            let error = results_state.palette_error.get();
+            let mut list = div().flex().flex_col();
+            if let Some(error) = error {
+                list = list.child(ui_text(error, 10.5, rgb(0xe0af68)).px(10.0_f32).py(6.0_f32));
+            }
+            if results.is_empty() {
+                list = list.child(
+                    ui_text("一致する項目はありません。", 12.0, theme().text_disabled)
+                        .px(10.0_f32)
+                        .py(8.0_f32),
+                );
+            }
+            for summary in results.iter().take(8) {
+                list = list.child(
+                    div()
+                        .px(10.0_f32)
+                        .py(7.0_f32)
+                        .rounded(6.0_f32)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(9.0_f32)
+                        .hover(|style| style.bg(theme().surface_muted))
+                        .on_click({
+                            let state = results_state.clone();
+                            let summary = summary.clone();
+                            move |_| state.open_summary(&summary)
+                        })
+                        .child(
+                            ui_text(truncate_chars(&summary.title, 32), 12.5, theme().text)
+                                .flex_1(),
+                        )
+                        .child(mono_text(summary.kind_label(), 9.0, theme().text_disabled))
+                        .child(ui_text(&summary.updated_label, 10.0, theme().text_disabled)),
+                );
+            }
+            list
+        }))
+        .child(
+            div()
+                .px(10.0_f32)
+                .pt(5.0_f32)
+                .flex()
+                .justify_between()
+                .child(ui_text("Enter 開く", 9.0, theme().text_disabled))
+                .child(ui_text("Esc 閉じる", 9.0, theme().text_disabled))
+                .child(ui_text(
+                    "Ctrl+K 検索 · Ctrl+P クイックオープン",
+                    9.0,
+                    theme().text_disabled,
+                )),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// Status bar
+// ---------------------------------------------------------------------------
+
+fn status_bar(state: &AppState) -> Div {
+    let editor = state.editor.get();
+    let source = state.source.get();
+    let title = state
+        .active_tab()
+        .map(|tab| tab.title)
+        .unwrap_or_else(|| "Wiki".to_owned());
+    let error = editor.error.clone();
+    div()
+        .h(26.0_f32)
+        .px(20.0_f32)
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
         .bg(theme().surface)
-        .border_t(1.0)
+        .border_t(1.0_f32)
         .border_color(theme().border)
         .child(
             div()
                 .flex()
-                .items_center()
-                .gap(7.0)
-                .child(dot(theme().success))
-                .child(
-                    text("保存済み  ·  同期済み")
-                        .font_family(sans())
-                        .text_size(9.5)
-                        .text_color(theme().text_muted),
-                ),
-        )
-        .child(
-            text("4 providers  ·  家計の記録")
-                .font_family(sans())
-                .text_size(9.5)
-                .text_color(theme().text_disabled),
-        )
-}
-
-fn layout(snapshot: &Snapshot) -> Div {
-    div()
-        .w_full()
-        .h_full()
-        .flex()
-        .flex_col()
-        .bg(theme().page)
-        .text_color(theme().text)
-        .child(header(snapshot))
-        .child(
-            div()
-                .flex()
                 .flex_row()
-                .flex_1()
-                .min_h(0.0)
-                .child(sidebar(snapshot))
-                .child(article(snapshot))
-                .child(rail()),
+                .items_center()
+                .gap(7.0_f32)
+                .child(dot(if source == Source::Fallback {
+                    rgb(0xe0af68)
+                } else {
+                    theme().success
+                }))
+                .child(ui_text(
+                    if source == Source::Fallback {
+                        "内蔵 fixture  ·  サーバー未接続"
+                    } else {
+                        "保存済み  ·  同期済み"
+                    },
+                    9.5,
+                    theme().text_muted,
+                ))
+                .child(if let Some(error) = error {
+                    ui_text(truncate_chars(&error, 70), 9.5, rgb(0xff453a))
+                } else {
+                    ui_text("", 9.5, theme().text_disabled)
+                }),
         )
-        .child(status_bar())
+        .child(ui_text(
+            format!("4 providers  ·  {title}  ·  {}", editor.detail),
+            9.5,
+            theme().text_disabled,
+        ))
 }
 
-fn open_in_nvim(id: &str) {
-    let server =
-        std::env::var("WIKI_NVIM_SERVER").unwrap_or_else(|_| "target/nvim.sock".to_owned());
-    let result = std::process::Command::new("nvim")
-        .args([
-            "--server",
-            &server,
-            "--remote-send",
-            &format!(":WikiOpen {id}<CR>"),
-        ])
-        .status();
-    if let Err(error) = result {
-        eprintln!("wiki-gui: could not open Neovim at {server}: {error}");
+// ---------------------------------------------------------------------------
+// Markdown helpers used by the reading surface
+// ---------------------------------------------------------------------------
+
+/// Non-embed fenced code blocks in a page body, with their info string and text.
+fn extract_fences(body: &str) -> Vec<(String, String)> {
+    let mut blocks = Vec::new();
+    let mut current: Option<(String, Vec<String>)> = None;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if let Some((language, lines)) = current.as_mut() {
+            if trimmed.starts_with("```") {
+                blocks.push((language.clone(), lines.join("\n")));
+                current = None;
+            } else {
+                lines.push(line.to_owned());
+            }
+            continue;
+        }
+        if trimmed.starts_with("```") && !trimmed.starts_with("!```") {
+            let info = trimmed.trim_start_matches('`').trim();
+            let language = info.split('|').next().unwrap_or("text").trim().to_owned();
+            current = Some((language, Vec::new()));
+        }
+    }
+    blocks
+}
+
+fn excerpt(body: &str) -> String {
+    excerpt_of(body)
+}
+
+// ---------------------------------------------------------------------------
+// Built-in fixture (only used when the server is unavailable)
+// ---------------------------------------------------------------------------
+
+fn fixture_summaries() -> Vec<Summary> {
+    let mut items = Vec::new();
+    let mut page = |id: &str, title: &str, kind: &str, updated: &str, excerpt: &str| {
+        items.push(Summary {
+            id: id.to_owned(),
+            content_type: "page".to_owned(),
+            title: title.to_owned(),
+            format: None,
+            language: None,
+            kinds: vec!["wiki".to_owned(), kind.to_owned()],
+            rev: 1,
+            updated_label: updated.to_owned(),
+            excerpt: excerpt.to_owned(),
+            refs: 0,
+        });
+    };
+    page(
+        "p-home",
+        "家計の記録",
+        "ledger",
+        "14:31",
+        "毎月の支出を hledger のジャーナルで管理している。",
+    );
+    page(
+        "p-goals",
+        "2026年の目標",
+        "ledger",
+        "昨日",
+        "家計の記録を毎週見直す。",
+    );
+    page(
+        "p-receipts",
+        "レシート処理",
+        "ledger",
+        "11/20",
+        "レシートは週末にまとめて処理する。",
+    );
+    page(
+        "p-fixed",
+        "固定費の見直し",
+        "ledger",
+        "11/19",
+        "毎月の固定費を一覧にする。",
+    );
+    page(
+        "p-review",
+        "月次レビュー",
+        "ledger",
+        "11/20",
+        "1か月の支出を振り返り、翌月の予算を決める。",
+    );
+    page(
+        "p-reading",
+        "読書ノート",
+        "note",
+        "昨日",
+        "読んだ本の要点を残す。",
+    );
+    page(
+        "p-rust",
+        "Rustのメモ",
+        "code",
+        "11/20",
+        "所有権と借用のメモ。",
+    );
+    page(
+        "p-credit",
+        "クレジットカード",
+        "ledger",
+        "11/19",
+        "引き落とし日と未払いを確認する。",
+    );
+    page(
+        "p-emoney",
+        "電子マネー",
+        "ledger",
+        "11/17",
+        "チャージと残高の記録。",
+    );
+    page(
+        "p-returns",
+        "返品・交換",
+        "ledger",
+        "11/10",
+        "レシートの保管と期限。",
+    );
+    page(
+        "p-electricity",
+        "電気代",
+        "ledger",
+        "11/16",
+        "前月との差が大きい月を振り返る。",
+    );
+    page(
+        "p-gas",
+        "ガス代",
+        "ledger",
+        "11/16",
+        "使用量の変化を確認する。",
+    );
+    page("p-rent", "家賃", "ledger", "10/28", "更新時期と契約条件。");
+    page(
+        "p-phone",
+        "通信費",
+        "ledger",
+        "11/05",
+        "プラン見直しの候補。",
+    );
+    page(
+        "p-sub",
+        "サブスク",
+        "ledger",
+        "11/14",
+        "利用状況と解約候補。",
+    );
+    page(
+        "p-savings",
+        "貯金の目標",
+        "ledger",
+        "10/30",
+        "先取りで残す額を決める。",
+    );
+    page(
+        "p-household",
+        "家計簿の付け方",
+        "ledger",
+        "11/18",
+        "固定費を先に一覧にする。変動費は前月と比べる。",
+    );
+    page(
+        "p-diary",
+        "日記 11/22",
+        "diary",
+        "11/22",
+        "今日の出来事を短く残す。",
+    );
+
+    let mut snippet = |id: &str,
+                       title: &str,
+                       format: &str,
+                       language: &str,
+                       kinds: &[&str],
+                       updated: &str,
+                       excerpt: &str| {
+        items.push(Summary {
+            id: id.to_owned(),
+            content_type: "snippet".to_owned(),
+            title: title.to_owned(),
+            format: Some(format.to_owned()),
+            language: Some(language.to_owned()),
+            kinds: std::iter::once("wiki".to_owned())
+                .chain(kinds.iter().map(|kind| (*kind).to_owned()))
+                .collect(),
+            rev: 1,
+            updated_label: updated.to_owned(),
+            excerpt: excerpt.to_owned(),
+            refs: 0,
+        });
+    };
+    snippet(
+        JOURNAL_ID,
+        "買い物ジャーナル",
+        "hledger",
+        "ledger",
+        &["ledger", "free"],
+        "14:31",
+        "2026-11-16 * 買い物",
+    );
+    snippet(
+        BUDGET_ID,
+        "予算クエリ",
+        "hledger",
+        "ledger",
+        &["ledger"],
+        "11/18",
+        "2026-11-01 * 予算",
+    );
+    snippet(
+        MONTHLY_ID,
+        "月次サマリ",
+        "hledger",
+        "ledger",
+        &["ledger"],
+        "10/31",
+        "2026-10-31 * 集計",
+    );
+    items
+}
+
+fn fixture_summary(id: &str) -> Option<Summary> {
+    fixture_summaries()
+        .into_iter()
+        .find(|summary| summary.id == id)
+}
+
+fn fixture_workspace(id: &str, title: &str) -> Option<Workspace> {
+    match title {
+        "家計の記録" => Some(fixture_home()),
+        "読書ノート" => Some(fixture_reading()),
+        "Rustのメモ" => Some(fixture_rust()),
+        _ => fixture_summary(id)
+            .or_else(|| {
+                fixture_summaries()
+                    .into_iter()
+                    .find(|summary| summary.title == title)
+            })
+            .map(|summary| generic_workspace(&summary)),
     }
 }
+
+fn fixture_page(id: &str, title: &str, kind: &str, tags: &[&str], body: &str) -> Content {
+    Content {
+        id: id.to_owned(),
+        content_type: "page".to_owned(),
+        title: title.to_owned(),
+        body: body.to_owned(),
+        format: None,
+        language: None,
+        kinds: vec!["wiki".to_owned(), kind.to_owned()],
+        tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+        aliases: Vec::new(),
+        rev: 1,
+        created: "2026-10-02".to_owned(),
+        updated_at: 202611221431,
+        updated_label: "14:31".to_owned(),
+    }
+}
+
+fn fixture_snippet(id: &str, title: &str, body: &str) -> Content {
+    Content {
+        id: id.to_owned(),
+        content_type: "snippet".to_owned(),
+        title: title.to_owned(),
+        body: body.to_owned(),
+        format: Some("hledger".to_owned()),
+        language: Some("ledger".to_owned()),
+        kinds: vec!["wiki".to_owned(), "ledger".to_owned(), "free".to_owned()],
+        tags: Vec::new(),
+        aliases: Vec::new(),
+        rev: 1,
+        created: "2026-10-02".to_owned(),
+        updated_at: 202611221431,
+        updated_label: "14:31".to_owned(),
+    }
+}
+
+fn fixture_home() -> Workspace {
+    let page = fixture_page(
+        "p-home",
+        "家計の記録",
+        "ledger",
+        &["家計", "ledger", "毎月"],
+        "# 家計の記録\n\n毎月の支出を hledger のジャーナルで管理している。\n\n## 買い物ジャーナル\n\n!```hledger|ledger,free||JOURNAL_ID\n```\n\n## 今月の残高\n\n固定費の見直しは月1回、日曜日にまとめて行う。\n",
+    );
+    let snippet = fixture_snippet(
+        JOURNAL_ID,
+        "買い物ジャーナル",
+        "2026-11-16 * 買い物\n    支出:食費   1,200 JPY\n    資産:現金  -1,200 JPY\n\n2026-11-17 * 電車\n    支出:交通     420 JPY\n    資産:現金    -420 JPY\n\n; 11月分\n",
+    );
+    let goals = fixture_summary("p-goals").unwrap();
+    let receipts = fixture_summary("p-receipts").unwrap();
+    let fixed = fixture_summary("p-fixed").unwrap();
+    let target =
+        |id: &str, title: &str, kind: &str, updated: &str, excerpt: &str, refs: usize| {
+            let mut summary = fixture_summary(id).unwrap();
+            summary.title = title.to_owned();
+            summary.kinds = vec!["wiki".to_owned(), kind.to_owned()];
+            summary.updated_label = updated.to_owned();
+            summary.excerpt = excerpt.to_owned();
+            summary.refs = refs;
+            summary
+        };
+    let mut two_hop = Vec::new();
+    let mut hop = |via: &Summary, target: Summary, reason: &str| {
+        two_hop.push(TwoHop {
+            via: via.clone(),
+            target,
+            reason: reason.to_owned(),
+        });
+    };
+    hop(
+        &goals,
+        target(
+            "p-household",
+            "家計簿の付け方",
+            "ledger",
+            "11/18",
+            "固定費を先に一覧にする。変動費は前月と比べる。",
+            3,
+        ),
+        "共通タグ: 家計",
+    );
+    hop(
+        &goals,
+        target(
+            "p-review",
+            "毎月のレビュー",
+            "ledger",
+            "11/20",
+            "1か月の支出を振り返り、翌月の予算を決める。",
+            2,
+        ),
+        "共通タグ: 家計",
+    );
+    hop(
+        &receipts,
+        target(
+            "p-credit",
+            "クレジットカード",
+            "ledger",
+            "11/19",
+            "引き落とし日と未払いを確認する。",
+            3,
+        ),
+        "3 か所から参照",
+    );
+    hop(
+        &fixed,
+        target(
+            "p-electricity",
+            "電気代",
+            "ledger",
+            "11/16",
+            "前月との差が大きい月を振り返る。",
+            4,
+        ),
+        "共通タグ: 固定費",
+    );
+    let two_hop_all = {
+        // The shelf shows all of them; the inspector and fixture summary above only use the
+        // first three. Keep the design's twelve rows available for the open shelf.
+        let extra = [
+            (
+                &goals,
+                target(
+                    "p-fixed-inner",
+                    "固定費の内訳",
+                    "ledger",
+                    "11/12",
+                    "家賃・電気・通信の内訳をまとめる。",
+                    1,
+                ),
+            ),
+            (
+                &goals,
+                target(
+                    "p-savings",
+                    "貯金の目標",
+                    "ledger",
+                    "10/30",
+                    "先取りで残す額を決める。",
+                    0,
+                ),
+            ),
+            (
+                &receipts,
+                target(
+                    "p-emoney",
+                    "電子マネー",
+                    "ledger",
+                    "11/17",
+                    "チャージと残高の記録。",
+                    2,
+                ),
+            ),
+            (
+                &receipts,
+                target(
+                    "p-returns",
+                    "返品・交換",
+                    "ledger",
+                    "11/10",
+                    "レシートの保管と期限。",
+                    1,
+                ),
+            ),
+            (
+                &fixed,
+                target(
+                    "p-gas",
+                    "ガス代",
+                    "ledger",
+                    "11/16",
+                    "使用量の変化を確認する。",
+                    2,
+                ),
+            ),
+            (
+                &fixed,
+                target(
+                    "p-rent",
+                    "家賃",
+                    "ledger",
+                    "10/28",
+                    "更新時期と契約条件。",
+                    1,
+                ),
+            ),
+            (
+                &fixed,
+                target(
+                    "p-phone",
+                    "通信費",
+                    "ledger",
+                    "11/05",
+                    "プラン見直しの候補。",
+                    2,
+                ),
+            ),
+            (
+                &fixed,
+                target(
+                    "p-sub",
+                    "サブスク",
+                    "ledger",
+                    "11/14",
+                    "利用状況と解約候補。",
+                    3,
+                ),
+            ),
+        ];
+        for (via, target) in extra {
+            two_hop.push(TwoHop {
+                via: via.clone(),
+                target,
+                reason: "2-hop".to_owned(),
+            });
+        }
+        two_hop
+    };
+    let related = vec![
+        fixture_summary(BUDGET_ID).unwrap(),
+        fixture_summary(MONTHLY_ID).unwrap(),
+    ];
+    Workspace {
+        page,
+        before: vec!["毎月の支出を hledger のジャーナルで管理している。".to_owned()],
+        after: vec!["固定費の見直しは月1回、日曜日にまとめて行う。".to_owned()],
+        snippet: Some(snippet),
+        outline: vec![
+            OutlineItem {
+                level: 1,
+                title: "家計の記録".to_owned(),
+                line: 1,
+            },
+            OutlineItem {
+                level: 2,
+                title: "買い物ジャーナル".to_owned(),
+                line: 5,
+            },
+            OutlineItem {
+                level: 2,
+                title: "今月の残高".to_owned(),
+                line: 10,
+            },
+            OutlineItem {
+                level: 2,
+                title: "固定費の見直し".to_owned(),
+                line: 14,
+            },
+        ],
+        links: Links {
+            outgoing: vec![goals.clone(), receipts.clone(), fixed.clone()],
+            backlinks: vec![goals, receipts, fixed],
+            two_hop: two_hop_all,
+        },
+        related,
+        recent: fixture_recent(),
+        info: PageInfo {
+            created: "2026-10-02".to_owned(),
+            updated: "14:31".to_owned(),
+            word_count: 642,
+            tags: "家計, ledger, 毎月".to_owned(),
+        },
+    }
+}
+
+fn fixture_reading() -> Workspace {
+    let page = fixture_page(
+        READING_ID,
+        "読書ノート",
+        "note",
+        &["note", "読書"],
+        "# 読書ノート\n\n読んだ本の要点を残す。\n\n## 最近の本\n\n- [[p-goals|2026年の目標]]\n- [[p-rust|Rustのメモ]]\n",
+    );
+    publish_reading(page)
+}
+
+fn publish_reading(mut page: Content) -> Workspace {
+    page.updated_label = "昨日".to_owned();
+    let goals = fixture_summary("p-goals").unwrap();
+    let rust = fixture_summary(RUST_ID).unwrap();
+    Workspace {
+        page: page.clone(),
+        before: vec!["読んだ本の要点を残す。".to_owned()],
+        after: Vec::new(),
+        snippet: None,
+        outline: vec![
+            OutlineItem {
+                level: 1,
+                title: "読書ノート".to_owned(),
+                line: 1,
+            },
+            OutlineItem {
+                level: 2,
+                title: "最近の本".to_owned(),
+                line: 5,
+            },
+        ],
+        links: Links {
+            outgoing: vec![goals.clone(), rust],
+            backlinks: vec![goals],
+            two_hop: Vec::new(),
+        },
+        related: Vec::new(),
+        recent: fixture_recent(),
+        info: PageInfo {
+            created: "2026-10-12".to_owned(),
+            updated: "昨日".to_owned(),
+            word_count: 128,
+            tags: "note, 読書".to_owned(),
+        },
+    }
+}
+
+fn fixture_rust() -> Workspace {
+    let mut page = fixture_page(
+        RUST_ID,
+        "Rustのメモ",
+        "code",
+        &["code", "Rust"],
+        "# Rustのメモ\n\n所有権と借用のメモ。\n\n```rust\nfn main() {\n    let s = String::from(\"hello\");\n    println!(\"{s}\");\n}\n```\n\n- [[p-reading|読書ノート]]\n",
+    );
+    page.updated_label = "11/20".to_owned();
+    let reading = fixture_summary(READING_ID).unwrap();
+    Workspace {
+        page: page.clone(),
+        before: vec!["所有権と借用のメモ。".to_owned()],
+        after: Vec::new(),
+        snippet: None,
+        outline: vec![OutlineItem {
+            level: 1,
+            title: "Rustのメモ".to_owned(),
+            line: 1,
+        }],
+        links: Links {
+            outgoing: vec![reading.clone()],
+            backlinks: vec![reading],
+            two_hop: Vec::new(),
+        },
+        related: Vec::new(),
+        recent: fixture_recent(),
+        info: PageInfo {
+            created: "2026-10-15".to_owned(),
+            updated: "11/20".to_owned(),
+            word_count: 96,
+            tags: "code, Rust".to_owned(),
+        },
+    }
+}
+
+fn generic_workspace(summary: &Summary) -> Workspace {
+    let page = Content {
+        id: summary.id.clone(),
+        content_type: summary.content_type.clone(),
+        title: summary.title.clone(),
+        body: format!("# {}\n\n{}\n", summary.title, summary.excerpt),
+        format: summary.format.clone(),
+        language: summary.language.clone(),
+        kinds: summary.kinds.clone(),
+        tags: Vec::new(),
+        aliases: Vec::new(),
+        rev: summary.rev,
+        created: "2026-10-20".to_owned(),
+        updated_at: 0,
+        updated_label: summary.updated_label.clone(),
+    };
+    Workspace {
+        page,
+        before: vec![summary.excerpt.clone()],
+        after: Vec::new(),
+        snippet: None,
+        outline: vec![OutlineItem {
+            level: 1,
+            title: summary.title.clone(),
+            line: 1,
+        }],
+        links: Links::default(),
+        related: Vec::new(),
+        recent: fixture_recent(),
+        info: PageInfo {
+            created: "2026-10-20".to_owned(),
+            updated: summary.updated_label.clone(),
+            word_count: summary.excerpt.split_whitespace().count(),
+            tags: summary.kind_label(),
+        },
+    }
+}
+
+fn fixture_recent() -> Vec<Summary> {
+    let ids = ["p-home", "p-reading", "p-rust", "p-diary"];
+    ids.iter().filter_map(|id| fixture_summary(id)).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -946,20 +3582,23 @@ fn main() {
     } else {
         None
     };
+    let snapshot = snapshot_path.is_some();
 
     let _ = fonts();
     set_theme(app_theme());
-    let snapshot = load();
+    let state = boot(snapshot);
 
     if let Some(out) = snapshot_path {
-        anti_webui::app::headless::render_png(out, 1440, 900, 1.0, move || layout(&snapshot))
-            .unwrap();
+        anti_webui::app::headless::render_png(out, WINDOW_WIDTH, WINDOW_HEIGHT, 1.0, move || {
+            layout(&state)
+        })
+        .unwrap();
         return;
     }
 
     App::new()
         .title("Harmion Wiki")
-        .size(1440, 900)
-        .run(move || layout(&snapshot))
+        .size(WINDOW_WIDTH as i32, WINDOW_HEIGHT as i32)
+        .run(move || layout(&state))
         .unwrap();
 }

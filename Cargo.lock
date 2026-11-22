@@ -1702,7 +1702,7 @@ name = "harmion-wiki-gui"
 version = "0.1.0"
 dependencies = [
  "anti-webui",
- "harmion-wiki-core",
+ "serde",
  "serde_json",
 ]
 
