@@ -19,6 +19,41 @@ use std::{
 
 const COMPLETION_CACHE_TTL: i64 = 60_000_000;
 const COMPLETION_CACHE_MAX: usize = 128;
+/// Unauthenticated `connect-start` requests are cheap to send and create a
+/// durable pending row. Keep a per-process budget so a local page or process
+/// cannot fill the 32 pending slots and lock the owner out of the connect flow.
+const CONNECT_START_BURST: u32 = 60;
+const CONNECT_START_WINDOW_MICROS: i64 = 60_000_000;
+
+struct StartBudget {
+    window: i64,
+    count: u32,
+}
+
+fn start_budget() -> &'static Mutex<StartBudget> {
+    static BUDGET: OnceLock<Mutex<StartBudget>> = OnceLock::new();
+    BUDGET.get_or_init(|| {
+        Mutex::new(StartBudget {
+            window: 0,
+            count: 0,
+        })
+    })
+}
+
+fn allow_connect_start(now: i64) -> bool {
+    let Ok(mut budget) = start_budget().lock() else {
+        return false;
+    };
+    if now < budget.window || now - budget.window >= CONNECT_START_WINDOW_MICROS {
+        budget.window = now;
+        budget.count = 0;
+    }
+    if budget.count >= CONNECT_START_BURST {
+        return false;
+    }
+    budget.count += 1;
+    true
+}
 
 struct CachedCompletion {
     verifier: String,
@@ -76,6 +111,9 @@ pub(crate) async fn handle_public<S: Store + Send + 'static>(
 ) -> Result<Json, Error> {
     match operation {
         "connect-start" => {
+            if !allow_connect_start(SystemHost.now_micros()) {
+                return Err(Error::Capacity);
+            }
             let offer = decode_offer(&body)?;
             let state = offer.state.clone();
             let started = store

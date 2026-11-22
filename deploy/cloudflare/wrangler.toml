@@ -8,7 +8,12 @@ routes = [{ pattern = "hub.satler.dev", custom_domain = true }]
 
 [assets]
 directory = "./public"
+# The Worker serves the document at `/` so it can attach the security headers;
+# Workers Assets ignores `_headers` files. Assets stay on the Assets layer.
+binding = "ASSETS"
 run_worker_first = [
+  "/",
+  "/index.html",
   "/state",
   "/ready",
   "/peer/*",

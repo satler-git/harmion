@@ -26,10 +26,10 @@ def check(node, directory):
     node.start(extra_options=("--oauth-listen", "127.0.0.1:0"))
     ui = directory / "ui"
     root = directory / "admin-ca.pem"
-    root.write_bytes(subprocess.check_output([ADMIN, "provision", ui], timeout=15))
+    root.write_bytes(subprocess.check_output([ADMIN, "provision", "--ui-dir", ui], timeout=15))
     assert (ui / "web-tls.json").stat().st_mode & 0o077 == 0
     daemon = subprocess.Popen(
-        [ADMIN, "run", node.path, ui, "--approval", "stdio"],
+        [ADMIN, "run", node.path, "--ui-dir", ui, "--approval", "stdio"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,

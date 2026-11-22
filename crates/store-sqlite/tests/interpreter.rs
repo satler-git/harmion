@@ -222,6 +222,59 @@ fn registration_needs_provide_and_owner_approval_and_names_are_unique() {
 }
 
 #[test]
+fn approved_manifest_change_requires_reapproval() {
+    let mut t = Test::new();
+    let provider = t.issue(provide_only());
+    let registration = registry::register(
+        &mut t.store,
+        &mut t.host,
+        &provider,
+        manifest("ledger/balance"),
+    )
+    .unwrap();
+    registry::approve(
+        &mut t.store,
+        &mut t.host,
+        &t.admin.clone(),
+        registration.provider,
+        false,
+    )
+    .unwrap();
+
+    // Re-registering the exact same definition stays approved and keeps the id.
+    let same = registry::register(
+        &mut t.store,
+        &mut t.host,
+        &provider,
+        manifest("ledger/balance"),
+    )
+    .unwrap();
+    assert_eq!(same.provider, registration.provider);
+    assert_eq!(same.status, ProviderStatus::Approved);
+
+    // A changed default query widens what callers are told to send; the owner
+    // approved the previous contract, so this must go back to pending.
+    let mut changed = manifest("ledger/balance");
+    changed.default_query = Some(DefaultQuery {
+        kinds: vec!["wiki".into()],
+    });
+    let updated = registry::register(&mut t.store, &mut t.host, &provider, changed).unwrap();
+    assert_eq!(updated.provider, registration.provider);
+    assert_eq!(updated.status, ProviderStatus::Pending);
+
+    // The status must persist, not only be reflected in the returned value.
+    t.restart();
+    let stored = registry::list(&mut t.store, &t.admin.clone(), t.host.now).unwrap();
+    assert!(stored.iter().any(|registration| {
+        registration.provider == updated.provider && registration.status == ProviderStatus::Pending
+    }));
+    assert!(matches!(
+        registry::authorize_attach(&mut t.store, &provider, t.host.now, updated.provider),
+        Err(Error::InterpreterNotApproved)
+    ));
+}
+
+#[test]
 fn call_materializes_the_caller_selected_snapshot_and_checks_read() {
     let mut t = Test::new();
     let provider = t.issue(provide_only());

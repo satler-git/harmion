@@ -207,8 +207,9 @@ pub fn decode_offer(bytes: &[u8]) -> Result<ConnectionOffer, CodecError> {
     if bytes.len() > MAX_OFFER_BYTES {
         return Err(CodecError::TooLarge);
     }
+    let value = crate::decode_app_json_strict(bytes)?;
     let offer: ConnectionOffer =
-        serde_json::from_slice(bytes).map_err(|_| CodecError::InvalidJson)?;
+        serde_json::from_value(value).map_err(|_| CodecError::InvalidJson)?;
     validate_offer(&offer)?;
     Ok(offer)
 }

@@ -736,8 +736,10 @@ async fn provider_connect<S: Store + Send + 'static>(
     let mut form = Form::parse(request.uri().query().unwrap_or("").as_bytes())?;
     let ticket = form.take("ticket")?;
     form.finish()?;
-    let ticket = state.consume_provider_ticket(&ticket, SystemHost.now_micros())?;
+    // Validate the upgrade before spending the single-use ticket: a malformed
+    // request must not be able to burn an app's 30-second capability.
     let key = crate::interpreter::validate_upgrade(request.headers()).map_err(|_| invalid())?;
+    let ticket = state.consume_provider_ticket(&ticket, SystemHost.now_micros())?;
     let upgrade = hyper::upgrade::on(&mut *request);
     let interpreter = store.interpreter.clone();
     tokio::spawn(async move {
@@ -846,10 +848,10 @@ const CONNECT_PAGE: &str = r#"<!doctype html>
   try {
     const encoded = location.hash.slice(1);
     history.replaceState(null, "", location.pathname);
-    let encoded = encoded.replace(/-/g, "+").replace(/_/g, "/");
-    while (encoded.length % 4) encoded += "=";
+    let normalized = encoded.replace(/-/g, "+").replace(/_/g, "/");
+    while (normalized.length % 4) normalized += "=";
     const request = JSON.parse(new TextDecoder().decode(
-      Uint8Array.from(atob(encoded), c => c.charCodeAt(0))
+      Uint8Array.from(atob(normalized), c => c.charCodeAt(0))
     ));
     if (!/^[a-f0-9]{64}$/.test(request.connection_id) || !/^[a-f0-9]{64}$/.test(request.request_secret)) throw new Error();
     for (let attempt = 0; attempt < 300; attempt++) {

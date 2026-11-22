@@ -14,6 +14,23 @@ fn registration(name: &str) -> ProviderRegistration {
 }
 
 #[test]
+fn reserved_serde_json_markers_are_rejected_not_reinterpreted() {
+    // `serde_json::from_value` re-classifies an object with this first key as a
+    // number, which would make the stored schema differ from the validated
+    // bytes. The typed interpreter decoders reject the marker instead.
+    let marker = r#"{"$serde_json::private::Number":"123"}"#;
+    let registration = format!(
+        r#"{{"name":"ledger/balance","contract_version":1,"input_schema":{marker},"output_schema":{{}}}}"#
+    );
+    assert!(decode_registration(registration.as_bytes()).is_err());
+    let call = format!(r#"{{"provider":"ledger/balance","input":{marker},"contents":[]}}"#);
+    assert!(decode_call_request(call.as_bytes()).is_err());
+
+    let normal = r#"{"name":"ledger/balance","contract_version":1,"input_schema":{"type":"object"},"output_schema":{}}"#;
+    assert!(decode_registration(normal.as_bytes()).is_ok());
+}
+
+#[test]
 fn registration_and_call_requests_are_strict_and_bounded() {
     let bytes = serde_json::to_vec(&registration("ledger/balance")).unwrap();
     assert_eq!(

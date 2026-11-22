@@ -23,9 +23,9 @@ class AdminWeb:
     def __init__(self, node, directory):
         ui = directory / "ui"
         root = directory / "admin-ca.pem"
-        root.write_bytes(subprocess.check_output([ADMIN, "provision", ui], timeout=15))
+        root.write_bytes(subprocess.check_output([ADMIN, "provision", "--ui-dir", ui], timeout=15))
         self.process = subprocess.Popen(
-            [str(ADMIN), "run", node.path, ui, "--approval", "stdio"],
+            [str(ADMIN), "run", node.path, "--ui-dir", ui, "--approval", "stdio"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,

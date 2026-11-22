@@ -380,6 +380,42 @@ pub fn enroll_initial(
     Ok(credential)
 }
 
+/// Mark a restored node as requiring offline owner re-enrollment.
+///
+/// Restore intentionally copies Content history only: owner credentials,
+/// policy, audit and membership are a new security domain. Setting
+/// `enforce=true` with no active credential makes every owner-required
+/// operation fail closed until the owner runs `harmiond owner-enroll` on the
+/// stopped node, instead of silently falling back to `admin.secret` alone.
+pub fn require_rebootstrap(tx: &mut dyn Transaction, now: i64) -> Result<(), Error> {
+    if !tx.owner_credentials()?.is_empty() {
+        return Err(Error::AlreadyBootstrapped);
+    }
+    tx.put_owner_policy(&OwnerPolicy {
+        enforce: true,
+        recovery_hash: None,
+        updated_at: now,
+    })?;
+    append_audit(
+        tx,
+        OwnerAudit {
+            seq: 0,
+            at: now,
+            actor: "restore".to_owned(),
+            operation: "owner-enroll-required".to_owned(),
+            target: None,
+            args_hash: protocol::args_hash(&[]),
+            credential: None,
+            challenge: None,
+            session: None,
+            result: "restored".to_owned(),
+            prev_hash: [0; 32],
+            entry_hash: [0; 32],
+        },
+    )?;
+    Ok(())
+}
+
 /// Add a backup owner credential. The caller has already verified an existing
 /// owner assertion for this request.
 pub fn enroll(

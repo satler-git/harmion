@@ -34,6 +34,29 @@ const ADMIN_PATHS = [
   "/registration-code",
 ];
 
+// Workers Assets ignores `_headers`, and `/` is behind Cloudflare Access, so
+// the Worker serves the document itself and attaches the same headers as the
+// native admin server (apps/admin/src/server.rs). API and peer responses are
+// JSON/binary and do not need a document CSP.
+const DOCUMENT_PATHS = new Set(["/", "/index.html"]);
+const DOCUMENT_HEADERS = {
+  "content-security-policy":
+    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+  "permissions-policy": "camera=(self), microphone=(), geolocation=()",
+  "cache-control": "no-store",
+};
+
+async function documentResponse(request, env) {
+  const asset = await env.ASSETS.fetch(new URL("/index.html", request.url));
+  const headers = new Headers(asset.headers);
+  for (const [name, value] of Object.entries(DOCUMENT_HEADERS)) {
+    headers.set(name, value);
+  }
+  return new Response(asset.body, { status: asset.status, headers });
+}
+
 function bodyLimit(path) {
   if (BODY_LIMITS.has(path)) return BODY_LIMITS.get(path);
   if (path.startsWith("/admin/") || ADMIN_PATHS.includes(path)) {
@@ -118,6 +141,10 @@ async function identityFingerprint(env) {
 
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
+    if (request.method === "GET" && DOCUMENT_PATHS.has(url.pathname)) {
+      return documentResponse(request, env);
+    }
     // A changed NODE_ID intentionally gets a fresh Durable Object instead of
     // failing forever with IdentityMismatch on the previous node's storage.
     return env.NODE.get(env.NODE.idFromName(`node:${env.NODE_ID ?? "unconfigured"}`)).fetch(

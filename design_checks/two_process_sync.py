@@ -16,8 +16,10 @@ CLI = ROOT / "target/debug/harmion"
 RELAY_URL = None
 
 
-def command(*args, ok=True):
-    result = subprocess.run([str(a) for a in args], capture_output=True, text=True, timeout=45)
+def command(*args, ok=True, env=None):
+    result = subprocess.run(
+        [str(a) for a in args], capture_output=True, text=True, timeout=45, env=env
+    )
     if not ok:
         assert result.returncode != 0, result.stdout
         return result
@@ -71,8 +73,8 @@ class Node:
                     process.wait(10)
                 process.stdout.close()
 
-    def cli(self, *args, ok=True):
-        return command(CLI, "--node", self.path, *args, ok=ok)
+    def cli(self, *args, ok=True, env=None):
+        return command(CLI, "--node", self.path, *args, ok=ok, env=env)
 
     def write(self, operation, *prefix, body=None, versions=()):
         self.counter += 1

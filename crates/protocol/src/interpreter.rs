@@ -3,7 +3,7 @@
 //! The registry is local to one node. A Provider receives only the invocation
 //! input that the calling application selected; it never receives an edit token
 //! or permission to read Harmion itself.
-use crate::{CodecError, EditToken, decode_app_json, hex};
+use crate::{CodecError, EditToken, decode_app_json, decode_app_json_strict, hex};
 use harmion_domain::{AttributeValue, Content, ContentId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::{Value as Json, json};
@@ -295,7 +295,7 @@ pub fn decode_registration(bytes: &[u8]) -> Result<ProviderRegistration, CodecEr
     if bytes.len() > MAX_REGISTRATION_BYTES {
         return Err(CodecError::TooLarge);
     }
-    let value = decode_app_json(bytes)?;
+    let value = decode_app_json_strict(bytes)?;
     let registration: ProviderRegistration =
         serde_json::from_value(value).map_err(|_| CodecError::InvalidJson)?;
     validate_registration(&registration)?;
@@ -306,7 +306,7 @@ pub fn decode_call_request(bytes: &[u8]) -> Result<CallRequest, CodecError> {
     if bytes.len() > MAX_CALL_REQUEST_BYTES {
         return Err(CodecError::TooLarge);
     }
-    let value = decode_app_json(bytes)?;
+    let value = decode_app_json_strict(bytes)?;
     let json: CallRequestJson =
         serde_json::from_value(value).map_err(|_| CodecError::InvalidJson)?;
     let timeout_ms = json.timeout_ms.unwrap_or(DEFAULT_CALL_TIMEOUT_MS);

@@ -527,7 +527,9 @@ pub(crate) fn approval_summary(
         }
         "/export" => {
             let request: Export = serde_json::from_slice(body).ok()?;
-            format!("全データを {} へExport", request.directory)
+            // `directory` is owner-supplied but may be influenced by a stolen
+            // admin session; keep the terminal prompt on one line.
+            format!("全データを {} へExport", one_line(&request.directory))
         }
         _ => return None,
     };
@@ -538,6 +540,51 @@ pub(crate) fn approval_summary(
             .take(2000)
             .collect(),
     )
+}
+
+/// Terminal approval text for an integrated connection request. The request
+/// body only carries an opaque connection id, so fetch the pending request and
+/// show the app name, callback, origin, existing client binding and grants that
+/// are actually about to be approved.
+pub(crate) async fn connection_approval_summary(client: &Client, body: &[u8]) -> Option<String> {
+    let request: ConnectionApproval = serde_json::from_slice(body).ok()?;
+    let listing = client.call("connect-list", &[]).await.ok()?;
+    let connection = listing["connections"]
+        .as_array()?
+        .iter()
+        .find(|connection| {
+            connection["connection_id"].as_str() == Some(request.connection_id.as_str())
+        })?;
+    let grants = serde_json::to_string(&connection["grants"]).ok()?;
+    let client_id = connection["client_id"]
+        .as_str()
+        .map_or_else(|| "(新規)".to_owned(), one_line);
+    Some(format!(
+        "接続要求を{}: アプリ {} / redirect {} / web_origin {} / client {} / grants {}\nconnection_id={}",
+        if request.allow { "承認" } else { "拒否" },
+        one_line(connection["name"].as_str().unwrap_or("-")),
+        one_line(connection["redirect_uri"].as_str().unwrap_or("-")),
+        one_line(connection["web_origin"].as_str().unwrap_or("(未指定)")),
+        client_id,
+        one_line(&grants),
+        request.connection_id,
+    ))
+}
+
+/// Collapse control characters so request-controlled strings cannot forge extra
+/// lines in the terminal approval prompt.
+fn one_line(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(240)
+        .collect()
 }
 
 async fn node_operation(

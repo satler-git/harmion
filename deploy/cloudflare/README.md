@@ -23,7 +23,11 @@ nix develop --command bash deploy/cloudflare/build.sh
 Nix dev shell and the wasm target. Re-run the command above after changing Rust
 or the admin UI, then deploy.
 
-Outputs `src/pkg/` (wasm + bindings) and `public/` (the Svelte admin UI).
+Outputs `src/pkg/` (wasm + bindings) and `public/` (the Svelte admin UI). The
+Worker serves `/` and `/index.html` itself and adds the CSP and other security
+headers; Workers Assets ignores `_headers` files, and `/` is behind Cloudflare
+Access, so the headers are attached in `src/worker.js` rather than by the
+Assets layer.
 
 ## Configure
 

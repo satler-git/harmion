@@ -37,6 +37,13 @@ fn db(e: rusqlite::Error) -> Error {
     Error::Storage(e.to_string())
 }
 
+fn wall_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_micros() as i64)
+        .unwrap_or(0)
+}
+
 /// Consistent online SQLite snapshot for the node backup path.
 ///
 /// `VACUUM INTO` reads under SQLite locking and writes a standalone database;
@@ -617,6 +624,7 @@ impl SqliteStore {
         verify_identity(&tx, identity)?;
         let mut source = SqlTransaction { sql: &tx, identity };
         let high = source.accepted_high()?;
+        let restored_at = wall_micros();
         self.transaction(|destination| {
             if destination.accepted_high()? != 0 {
                 return Err(Error::InvalidRequest);
@@ -628,6 +636,10 @@ impl SqliteStore {
                 let records: Vec<_> = entries.into_iter().map(|entry| entry.record).collect();
                 harmion_node::storage::accept_records(destination, &records)?;
             }
+            // Owner policy, credentials, audit and membership do not cross the
+            // restore boundary. Enforce the owner boundary with no credential so
+            // R2 fails closed until offline `owner-enroll` re-establishes a key.
+            harmion_node::owner::require_rebootstrap(destination, restored_at)?;
             Ok(())
         })
     }

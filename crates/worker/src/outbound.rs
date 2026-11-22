@@ -408,13 +408,12 @@ mod fetch_transport {
             )
             .await?;
             if status != 200 {
-                if let Ok(frame) = Frame::decode(&body) {
-                    let _ = verify_frame(&frame, &server_key);
-                    if let Body::ChallengeError { error, .. } = &frame.body
-                        && error.code == ErrorCode::Capacity
-                    {
-                        return Err(OutboundError::Transport("peer capacity".into()));
-                    }
+                if let Ok(frame) = Frame::decode(&body)
+                    && verify_frame(&frame, &server_key).is_ok()
+                    && let Body::ChallengeError { error, .. } = &frame.body
+                    && error.code == ErrorCode::Capacity
+                {
+                    return Err(OutboundError::Transport("peer capacity".into()));
                 }
                 return Err(invalid("challenge status"));
             }

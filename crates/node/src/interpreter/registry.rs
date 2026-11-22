@@ -65,6 +65,8 @@ pub(crate) fn register_in_tx(
     let existing = tx.interpreter_registration_by_app_name(app, &registration.name)?;
     let registration = match existing {
         Some(mut existing) => {
+            let definition_changed = existing.manifest != manifest
+                || existing.contract_version != registration.contract_version;
             existing.manifest = manifest;
             existing.name = registration.name;
             existing.contract_version = registration.contract_version;
@@ -73,18 +75,19 @@ pub(crate) fn register_in_tx(
                 existing.approved_at = None;
                 existing.created_at = now;
             }
+            // The owner approves a concrete definition (schema and default
+            // query). A replacement must be reviewed again instead of keeping
+            // the old approval while new callers see the new contract.
+            if definition_changed && !preapproved && existing.status == ProviderStatus::Approved {
+                existing.status = ProviderStatus::Pending;
+                existing.approved_at = None;
+            }
             if preapproved {
                 existing.status = ProviderStatus::Approved;
                 existing.approved_at = Some(now);
             }
             tx.update_interpreter_registration(&existing)?;
-            if existing.status == ProviderStatus::Approved {
-                tx.set_interpreter_status(
-                    existing.provider,
-                    ProviderStatus::Approved,
-                    existing.approved_at,
-                )?;
-            }
+            tx.set_interpreter_status(existing.provider, existing.status, existing.approved_at)?;
             existing
         }
         None => {

@@ -347,7 +347,23 @@ async fn dispatch(state: &State, request: Request<Incoming>) -> Result<Response<
         tracing::info!("admin session ended");
         return Ok(json(StatusCode::OK, serde_json::json!({})));
     }
-    if let Some(summary) = api::approval_summary(&path, &body, &state.confirmations)
+    if path == "/connect-approve" {
+        // Unlike the body-derived summaries, this one needs a read from the
+        // node. If it cannot be produced, deny instead of executing R2 without
+        // a terminal prompt.
+        let Some(summary) = api::connection_approval_summary(&state.client, &body).await else {
+            tracing::warn!(
+                route = %path,
+                reason = "approval_summary_unavailable",
+                "R2 request denied"
+            );
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        };
+        if !state.confirmer.confirm(&path, summary).await {
+            tracing::warn!(route = %path, reason = "owner_approval_denied", "R2 request denied");
+            return Err(StatusCode::FORBIDDEN);
+        }
+    } else if let Some(summary) = api::approval_summary(&path, &body, &state.confirmations)
         && !state.confirmer.confirm(&path, summary).await
     {
         tracing::warn!(route = %path, reason = "owner_approval_denied", "R2 request denied");

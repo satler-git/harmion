@@ -9,7 +9,7 @@ pub mod membership;
 pub mod metrics;
 pub mod owner;
 pub mod websocket;
-pub use json::decode_app_json;
+pub use json::{decode_app_json, decode_app_json_strict};
 mod discovery;
 pub mod export;
 pub use app_view::{

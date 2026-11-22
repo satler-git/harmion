@@ -1,10 +1,11 @@
 use harmion_domain::*;
 use harmion_node::{
     Error,
-    access::{Filter, Grants},
+    access::{App, Credential, Filter, Grants},
     replication,
     storage::{Identity, Store, accept_records, read_graph},
 };
+use harmion_protocol::AppId;
 use harmion_protocol::query::{
     AttributePredicate as Predicate, Condition, OrderOperator, OrderedValue,
 };
@@ -633,6 +634,64 @@ fn replication_pages_stop_at_the_byte_budget_and_resume_at_the_next_record() {
             .unwrap(),
         records
     );
+}
+
+#[test]
+fn restore_requires_owner_rebootstrap_and_r2_fails_closed() {
+    let dir = Directory::new();
+    let mut source = dir.store(1);
+    save(&mut source, &[root()]);
+
+    let mut restored = dir.store(2);
+    restored
+        .restore_backup(dir.path("1.db"), identity(1))
+        .unwrap();
+
+    let policy = restored.transaction(|tx| tx.owner_policy()).unwrap();
+    assert!(policy.enforce);
+    assert!(policy.recovery_hash.is_none());
+    assert!(
+        restored
+            .transaction(|tx| tx.owner_credentials())
+            .unwrap()
+            .is_empty()
+    );
+    let audit = restored
+        .transaction(|tx| tx.owner_audit_entries(8))
+        .unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|entry| entry.operation == "owner-enroll-required")
+    );
+
+    // A restored node keeps a full administrator credential (bootstrap_admin),
+    // but R2 must still require the missing owner key.
+    let credential = Credential::from_bytes([9; 32]);
+    restored
+        .transaction(|tx| {
+            tx.insert_app(&App {
+                id: AppId([7; 32]),
+                verifier: credential.verifier(),
+                expires_at: i64::MAX,
+                revoked: false,
+                grants: Grants::administrator(),
+            })
+        })
+        .unwrap();
+    assert!(matches!(
+        restored.transaction(|tx| harmion_node::owner::authorize(
+            tx,
+            &credential,
+            "change-grants",
+            &[],
+            None,
+            None,
+            "test",
+            1,
+        )),
+        Err(Error::OwnerAssertionRequired)
+    ));
 }
 
 #[test]
