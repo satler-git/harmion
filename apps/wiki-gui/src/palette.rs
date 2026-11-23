@@ -30,7 +30,6 @@ fn palette_card_inner(state: &AppState) -> Div {
     let input = node_ref();
     request_frame(move |_| input.focus());
     let mode = state.palette.get().unwrap_or(PaletteMode::Search);
-    let header_state = state.clone();
     let results_state = state.clone();
     div()
         .w(560.0_f32)
@@ -124,22 +123,6 @@ fn palette_card_inner(state: &AppState) -> Div {
                         }),
                 )
                 .child(kbd("Esc")),
-        )
-        .child(
-            div()
-                .px(10.0_f32)
-                .pt(6.0_f32)
-                .pb(4.0_f32)
-                .child(dyn_view(move || {
-                    let mode = header_state.palette.get().unwrap_or(PaletteMode::Search);
-                    let label = match mode {
-                        PaletteMode::Search => "検索",
-                        PaletteMode::Rename => "タイトルを変更",
-                        PaletteMode::Tags => "タグを変更",
-                        PaletteMode::QuickOpen => "クイックオープン",
-                    };
-                    ui_text(label, 9.5, theme().text_disabled)
-                })),
         )
         .child(dyn_view(move || {
             let results = results_state.results.get();

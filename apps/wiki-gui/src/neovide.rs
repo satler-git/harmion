@@ -171,7 +171,7 @@ impl Manager {
                 thread::sleep(Duration::from_millis(50));
             }
         }
-        if self.has_wiki_window() || has_editor_window() {
+        if self.has_wiki_window() {
             return Ok(());
         }
         // No window yet: attach one to the server. `--fork` keeps the GUI responsive.
