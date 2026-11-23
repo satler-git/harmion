@@ -76,7 +76,9 @@ Last updated: 2026-11-23
   the integrated connect flow also needs a redirect/listener and credential store.
 - SQLite FTS5/trigram search with NFKC normalization and tag queries; the
   export tree can be re-imported without duplicate Content.
-- Reads are still a startup snapshot; live subscription catch-up is pending.
+- Reads are still a startup snapshot; the GUI keeps an offline cache of
+  summaries/workspaces and falls back to it when the server is down. Live
+  subscription catch-up is pending.
 - **No app-level kind/delete conflict resolution**; those are owner/admin only.
 - **Interpreter streaming v1 is implemented**: >64 items, chunked input,
   128 MiB explicit limit, cancellation and tests. Output streaming remains out

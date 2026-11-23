@@ -81,3 +81,7 @@ Tokens are stored in `<node>/credentials.json` with mode 0600 and refreshed
 before expiry. Add every kind produced by a `!` fence to the write grant, e.g.
 `--write-kind wiki,snippet,ledger,free`. Reads are a startup snapshot; live
 subscription catch-up is still pending.
+
+The GUI writes a 0600 cache under the normal `~/.cache/harmion-wiki/`. If the
+server is stopped, it opens that cache and labels the window
+`オフラインキャッシュ` instead of silently showing demo data.

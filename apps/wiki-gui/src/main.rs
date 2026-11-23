@@ -14,7 +14,8 @@ mod highlight;
 mod neovide;
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
@@ -23,7 +24,7 @@ use std::time::Duration;
 
 use anti_webui::prelude::*;
 use harmion_wiki_core::parse_interpreter_calls;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const DEFAULT_SOCKET: &str = "/tmp/harmion-wiki-m0.sock";
@@ -118,7 +119,7 @@ fn app_theme() -> Theme {
 // Wire model (mirrors apps/wiki-server/src/model.rs)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Summary {
     id: String,
     #[serde(rename = "type")]
@@ -159,7 +160,7 @@ impl Summary {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Content {
     id: String,
     #[serde(rename = "type")]
@@ -205,7 +206,7 @@ impl From<&Content> for Summary {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct OutlineItem {
     #[serde(default)]
     level: u8,
@@ -214,7 +215,7 @@ struct OutlineItem {
     line: usize,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct TwoHop {
     via: Summary,
     target: Summary,
@@ -222,14 +223,14 @@ struct TwoHop {
     reason: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct EmbedView {
     #[serde(default)]
     before: Vec<String>,
     snippet: Content,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct Links {
     #[serde(default)]
     outgoing: Vec<Summary>,
@@ -239,7 +240,7 @@ struct Links {
     two_hop: Vec<TwoHop>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct PageInfo {
     #[serde(default)]
     created: String,
@@ -251,7 +252,7 @@ struct PageInfo {
     tags: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Workspace {
     page: Content,
     #[serde(default)]
@@ -274,6 +275,12 @@ struct Workspace {
     info: PageInfo,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct CacheFile {
+    summaries: Vec<Summary>,
+    workspaces: BTreeMap<String, Workspace>,
+}
+
 #[derive(Clone, Debug)]
 struct Tab {
     id: Option<String>,
@@ -286,6 +293,7 @@ struct Tab {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Source {
     Server,
+    Offline,
     Fallback,
 }
 
@@ -319,6 +327,7 @@ struct AppState {
     socket: String,
     summaries: Signal<Vec<Summary>>,
     providers: Signal<Vec<String>>,
+    cache: Rc<RefCell<CacheFile>>,
     tag_filter: Signal<Option<String>>,
     tabs: Signal<Vec<Tab>>,
     active: Signal<usize>,
@@ -372,6 +381,13 @@ impl AppState {
         }
         let result = match (&tab.id, self.source.get_untracked()) {
             (None, _) => Err("このページの Content ID はまだ解決できていません。".to_owned()),
+            (Some(id), Source::Offline) => self
+                .cache
+                .borrow()
+                .workspaces
+                .get(id)
+                .cloned()
+                .ok_or_else(|| "オフラインキャッシュにこのページがありません。".to_owned()),
             (Some(id), Source::Fallback) => fixture_workspace(id, &tab.title)
                 .ok_or_else(|| "フォールバックにこのページのデータがありません。".to_owned()),
             (Some(id), Source::Server) => rpc("workspace", json!({ "id": id }))
@@ -385,6 +401,13 @@ impl AppState {
             if let Some(tab) = tabs.get_mut(index) {
                 match result {
                     Ok(workspace) => {
+                        if matches!(self.source.get_untracked(), Source::Server) {
+                            self.cache
+                                .borrow_mut()
+                                .workspaces
+                                .insert(workspace.page.id.clone(), workspace.clone());
+                            let _ = write_cache(&self.cache.borrow());
+                        }
                         tab.title = workspace.page.title.clone();
                         tab.kind = workspace.page.content_type.clone();
                         tab.workspace = Some(workspace);
@@ -469,14 +492,22 @@ impl AppState {
     }
 
     fn rename_active(&self, title: &str) {
-        let Some(workspace) = self.active_workspace() else { return };
+        let Some(workspace) = self.active_workspace() else {
+            return;
+        };
         let id = workspace.page.id.clone();
         let rev = workspace.page.rev;
-        match rpc("update_meta", json!({ "id": id, "rev": rev, "title": title.trim() })) {
+        match rpc(
+            "update_meta",
+            json!({ "id": id, "rev": rev, "title": title.trim() }),
+        ) {
             Ok(value) => match serde_json::from_value::<Content>(value) {
                 Ok(content) => {
                     self.tabs.update(|tabs| {
-                        if let Some(tab) = tabs.iter_mut().find(|tab| tab.id.as_deref() == Some(id.as_str())) {
+                        if let Some(tab) = tabs
+                            .iter_mut()
+                            .find(|tab| tab.id.as_deref() == Some(id.as_str()))
+                        {
                             tab.title = content.title.clone();
                             if let Some(workspace) = tab.workspace.as_mut() {
                                 workspace.page = content.clone();
@@ -494,12 +525,16 @@ impl AppState {
                 }
                 Err(error) => self.palette_error.set(Some(format!("解釈に失敗: {error}"))),
             },
-            Err(error) => self.palette_error.set(Some(format!("変更できません: {error}"))),
+            Err(error) => self
+                .palette_error
+                .set(Some(format!("変更できません: {error}"))),
         }
     }
 
     fn set_tags(&self, tags: &str) {
-        let Some(workspace) = self.active_workspace() else { return };
+        let Some(workspace) = self.active_workspace() else {
+            return;
+        };
         let id = workspace.page.id.clone();
         let rev = workspace.page.rev;
         let values = tags
@@ -508,11 +543,17 @@ impl AppState {
             .filter(|tag| !tag.is_empty())
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        match rpc("update_meta", json!({ "id": id, "rev": rev, "tags": values })) {
+        match rpc(
+            "update_meta",
+            json!({ "id": id, "rev": rev, "tags": values }),
+        ) {
             Ok(value) => match serde_json::from_value::<Content>(value) {
                 Ok(content) => {
                     self.tabs.update(|tabs| {
-                        if let Some(tab) = tabs.iter_mut().find(|tab| tab.id.as_deref() == Some(id.as_str())) {
+                        if let Some(tab) = tabs
+                            .iter_mut()
+                            .find(|tab| tab.id.as_deref() == Some(id.as_str()))
+                        {
                             if let Some(workspace) = tab.workspace.as_mut() {
                                 workspace.page = content.clone();
                                 workspace.info.tags = content.tags.join(", ");
@@ -529,7 +570,9 @@ impl AppState {
                 }
                 Err(error) => self.palette_error.set(Some(format!("解釈に失敗: {error}"))),
             },
-            Err(error) => self.palette_error.set(Some(format!("変更できません: {error}"))),
+            Err(error) => self
+                .palette_error
+                .set(Some(format!("変更できません: {error}"))),
         }
     }
 
@@ -640,10 +683,7 @@ impl AppState {
     fn open_palette(&self, mode: PaletteMode) {
         self.palette.set(Some(mode));
         let prefill = match mode {
-            PaletteMode::Rename => self
-                .active_tab()
-                .map(|tab| tab.title)
-                .unwrap_or_default(),
+            PaletteMode::Rename => self.active_tab().map(|tab| tab.title).unwrap_or_default(),
             PaletteMode::Tags => self
                 .active_workspace()
                 .map(|workspace| workspace.page.tags.join(", "))
@@ -867,6 +907,14 @@ impl AppState {
     }
 }
 
+fn source_label(source: Source) -> &'static str {
+    match source {
+        Source::Server => "サーバー",
+        Source::Offline => "オフラインキャッシュ",
+        Source::Fallback => "内蔵 fixture",
+    }
+}
+
 fn summary_kind(summary: &Summary) -> String {
     if let Some(kind) = summary.kinds.iter().find(|kind| kind.as_str() != "wiki") {
         return kind.clone();
@@ -957,6 +1005,37 @@ fn load_providers() -> Vec<String> {
     }
 }
 
+fn cache_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| !path.to_string_lossy().contains("/target/nix-"))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join("harmion-wiki").join("cache.json")
+}
+
+fn load_cache() -> Option<CacheFile> {
+    let raw = fs::read_to_string(cache_path()).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_cache(cache: &CacheFile) -> std::io::Result<()> {
+    let path = cache_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let raw = serde_json::to_vec_pretty(cache).map_err(std::io::Error::other)?;
+    fs::write(&path, raw)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
 fn load_summaries() -> Result<Vec<Summary>, String> {
     let value = rpc("list", json!({}))?;
     let items = value
@@ -968,14 +1047,22 @@ fn load_summaries() -> Result<Vec<Summary>, String> {
 
 fn boot(snapshot: bool) -> AppState {
     let socket = socket_path();
+    let mut cached = load_cache().unwrap_or_default();
     let (summaries, source, boot_error) = match load_summaries() {
         Ok(summaries) => {
             eprintln!("wiki-gui: loaded list from {socket}");
+            cached.summaries = summaries.clone();
+            let _ = write_cache(&cached);
             (summaries, Source::Server, None)
         }
         Err(error) => {
-            eprintln!("wiki-gui: server unavailable ({error}); using built-in fixture");
-            (fixture_summaries(), Source::Fallback, Some(error))
+            if !cached.summaries.is_empty() {
+                eprintln!("wiki-gui: server unavailable ({error}); using offline cache");
+                (cached.summaries.clone(), Source::Offline, Some(error))
+            } else {
+                eprintln!("wiki-gui: server unavailable ({error}); using built-in fixture");
+                (fixture_summaries(), Source::Fallback, Some(error))
+            }
         }
     };
 
@@ -1003,6 +1090,7 @@ fn boot(snapshot: bool) -> AppState {
         socket,
         summaries: signal(summaries),
         providers: signal(load_providers()),
+        cache: Rc::new(RefCell::new(cached)),
         tag_filter: signal(None),
         tabs: signal(tabs),
         active: signal(0),
@@ -1326,7 +1414,7 @@ fn toolbar(state: &AppState) -> Div {
         .map(|tab| tab.title.clone())
         .unwrap_or_else(|| "Wiki".to_owned());
     let editor = state.editor.get();
-    let fallback = state.source.get() == Source::Fallback;
+    let fallback = state.source.get() != Source::Server;
 
     let mut left = div()
         .flex()
@@ -1353,7 +1441,11 @@ fn toolbar(state: &AppState) -> Div {
                 .py(2.0_f32)
                 .rounded(4.0_f32)
                 .bg(rgb(0x3a2a12))
-                .child(ui_text("fixture", 9.0, rgb(0xe0af68))),
+                .child(ui_text(
+                    source_label(state.source.get()),
+                    9.0,
+                    rgb(0xe0af68),
+                )),
         );
     }
 
@@ -3164,7 +3256,11 @@ fn inspector_info(state: &AppState) -> Div {
                 .items_center()
                 .gap(4.0_f32)
                 .child(section_label("接続"))
-                .child(ui_text(format!("{}", state.providers.get().len()), 10.0, theme().text_disabled)),
+                .child(ui_text(
+                    format!("{}", state.providers.get().len()),
+                    10.0,
+                    theme().text_disabled,
+                )),
         )
         .child(
             div()
@@ -3172,9 +3268,17 @@ fn inspector_info(state: &AppState) -> Div {
                 .flex()
                 .items_center()
                 .gap(7.0_f32)
-                .child(dot(if state.providers.get().is_empty() { theme().text_disabled } else { theme().success }))
+                .child(dot(if state.providers.get().is_empty() {
+                    theme().text_disabled
+                } else {
+                    theme().success
+                }))
                 .child(ui_text(
-                    if state.providers.get().is_empty() { "provider 状態は未取得" } else { "ローカル provider を検出" },
+                    if state.providers.get().is_empty() {
+                        "provider 状態は未取得"
+                    } else {
+                        "ローカル provider を検出"
+                    },
                     12.0,
                     theme().text_muted,
                 )),
@@ -3216,14 +3320,14 @@ fn inspector_info(state: &AppState) -> Div {
                 .flex()
                 .items_center()
                 .gap(7.0_f32)
-                .child(dot(if source == Source::Fallback {
+                .child(dot(if source != Source::Server {
                     rgb(0xe0af68)
                 } else {
                     theme().success
                 }))
                 .child(ui_text(
-                    if source == Source::Fallback {
-                        "フォールバック · 未接続"
+                    if source != Source::Server {
+                        source_label(source)
                     } else {
                         "閲覧ビュー · 保存は Neovim"
                     },
@@ -3233,7 +3337,7 @@ fn inspector_info(state: &AppState) -> Div {
         )
         .child(
             ui_text(
-                if source == Source::Fallback {
+                if source != Source::Server {
                     format!(
                         "サーバーに接続できないため、内蔵 fixture を表示しています。\n{}",
                         state.boot_error.clone().unwrap_or_default()
@@ -3721,14 +3825,14 @@ fn status_bar(state: &AppState) -> Div {
                 .flex_row()
                 .items_center()
                 .gap(7.0_f32)
-                .child(dot(if source == Source::Fallback {
+                .child(dot(if source != Source::Server {
                     rgb(0xe0af68)
                 } else {
                     theme().success
                 }))
                 .child(ui_text(
-                    if source == Source::Fallback {
-                        "内蔵 fixture  ·  サーバー未接続"
+                    if source != Source::Server {
+                        source_label(source)
                     } else {
                         "閲覧のみ  ·  保存は Neovim"
                     },
