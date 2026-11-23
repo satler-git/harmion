@@ -37,7 +37,7 @@ Last updated: 2026-11-23
 - Dev-only `--node DIR` snapshot using `harmion-client::Client::from_directory`
   (admin secret). `save` is body-only and refuses if the node body changed since
   the snapshot; create/convert/delete still return 501.
-- 63 + 3 tests pass (unit + socket integration); client 7
+- 64 + 3 tests pass (unit + socket integration); client 7
 
 ### `apps/wiki-lsp`
 
@@ -69,11 +69,9 @@ Last updated: 2026-11-23
 
 ## Platform gaps / honest limits
 
-- **App API writes are partial.** The dev `--node` adapter can save the body
-  after a fresh GET and refuses if the body changed since the snapshot, but
-  create/convert/delete return 501. Production OAuth is blocked on refresh:
-  access tokens live ~10 minutes, and `harmion-client` has no refresh helper;
-  the integrated connect flow also needs a redirect/listener and credential store.
+- The `--node` adapter performs real create/edit/convert/delete with a
+  body-diff guard; integrated connect, refresh-token rotation and the 0600
+  credential store are implemented.
 - SQLite FTS5/trigram search with NFKC normalization and tag queries; the
   export tree can be re-imported without duplicate Content.
 - GUI keeps a 0600 offline cache, long-polls the `watch` endpoint, reconnects,
