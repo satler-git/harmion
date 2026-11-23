@@ -37,7 +37,7 @@ Last updated: 2026-11-23
 - Dev-only `--node DIR` snapshot using `harmion-client::Client::from_directory`
   (admin secret). `save` is body-only and refuses if the node body changed since
   the snapshot; create/convert/delete still return 501.
-- 46 + 2 tests pass (unit + integration); client 7
+- 50 + 2 tests pass (unit + integration); client 7
 
 ### `apps/wiki-lsp`
 
@@ -76,6 +76,8 @@ Last updated: 2026-11-23
   the integrated connect flow also needs a redirect/listener and credential store.
 - SQLite FTS5/trigram search with NFKC normalization and tag queries; the
   export tree can be re-imported without duplicate Content.
+- GUI keeps a 0600 offline cache, polls every 2s, reconnects, and supports
+  revision-checked delete and a Neovim conflict diff.
 - Reads are still a startup snapshot; the GUI polls every 2s, reconnects
 automatically, and keeps an offline cache of summaries/workspaces. The
 WebSocket subscription path is still pending.
