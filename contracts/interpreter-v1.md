@@ -261,7 +261,10 @@ OAuth originでは、access tokenで同じticketを再発行できる。
   "challenge": "PKCE S256 challenge 43文字",
   "state": "アプリが生成したstate",
   "grants": {"read": {"type":"all"}, "call": true, "provide": true, "provide_names": ["ledger/balance"]},
-  "provider": {"name": "ledger/balance", "contract_version": 1, "input_schema": {}, "output_schema": {}, "default_query": {"kinds": ["ledger"]}},
+  "providers": [
+    {"name": "ledger/balance", "contract_version": 1, "input_schema": {}, "output_schema": {}, "default_query": {"kinds": ["ledger"]}},
+    {"name": "wiki/outline", "contract_version": 1, "input_schema": {}, "output_schema": {}, "default_query": {"kinds": ["wiki"]}}
+  ],
   "provider_replace": false
 }
 ```
