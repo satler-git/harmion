@@ -72,6 +72,7 @@ pub struct State {
     backend: Backend,
     search: RefCell<Option<crate::search::SearchIndex>>,
     watch: Arc<(Mutex<u64>, Condvar)>,
+    conflicts: RefCell<BTreeMap<String, Value>>,
 }
 
 impl State {
@@ -85,6 +86,7 @@ impl State {
                 backend: Backend::Memory,
                 search: RefCell::new(None),
                 watch: Arc::new((Mutex::new(0), Condvar::new())),
+                conflicts: RefCell::new(BTreeMap::new()),
             });
         };
         if path.exists() {
@@ -96,6 +98,7 @@ impl State {
                 backend: Backend::Json { path },
                 search: RefCell::new(None),
                 watch: Arc::new((Mutex::new(0), Condvar::new())),
+                conflicts: RefCell::new(BTreeMap::new()),
             });
         }
         let contents = fixtures();
@@ -105,7 +108,8 @@ impl State {
             contents,
             backend: Backend::Json { path },
             search: RefCell::new(None),
-        watch: Arc::new((Mutex::new(0), Condvar::new())),
+            watch: Arc::new((Mutex::new(0), Condvar::new())),
+            conflicts: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -119,6 +123,7 @@ impl State {
             backend: Backend::Node(node),
             search: RefCell::new(None),
             watch: Arc::new((Mutex::new(0), Condvar::new())),
+            conflicts: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -129,6 +134,7 @@ impl State {
             backend: Backend::Memory,
             search: RefCell::new(None),
             watch: Arc::new((Mutex::new(0), Condvar::new())),
+            conflicts: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -326,9 +332,7 @@ impl State {
         let (generation, changed) = &*self.watch;
         let mut current = generation.lock().expect("watch lock");
         while *current == since {
-            let (next, wait) = changed
-                .wait_timeout(current, timeout)
-                .expect("watch lock");
+            let (next, wait) = changed.wait_timeout(current, timeout).expect("watch lock");
             current = next;
             if wait.timed_out() {
                 break;
@@ -637,24 +641,34 @@ impl State {
         })
     }
 
+    fn set_conflict(&self, id: &str, value: Value) {
+        self.conflicts.borrow_mut().insert(id.to_owned(), value);
+    }
+
+    fn clear_conflict(&self, id: &str) {
+        self.conflicts.borrow_mut().remove(id);
+    }
+
     pub fn save(&mut self, id: &str, rev: u64, body: String) -> RpcResult<Content> {
         self.ensure_writable("save")?;
         let current = self.open(id)?;
         if current.rev != rev {
-            return Err(RpcError::conflict("revision conflict").with_data(json!({
+            let conflict = json!({
                 "type": "revision_conflict",
                 "id": id,
-                "field": {"type": "body"},
                 "provided_rev": rev,
                 "current_rev": current.rev,
                 "current_updated_label": current.updated_label,
-                "conflicts": [{
+                "fields": [{
                     "field": {"type": "body"},
-                    "current_rev": current.rev,
+                    "current": current.body,
+                    "provided": body,
                 }],
-                "resolution": "reload the Content with `open`, merge manually, then retry with current_rev",
-                "note": "local revision conflict placeholder; no 3-way merge ancestor is exposed",
-            })));
+                "resolution": "review each field, merge manually, then save with current_rev",
+                "ancestor_available": false,
+            });
+            self.set_conflict(id, conflict.clone());
+            return Err(RpcError::conflict("revision conflict").with_data(conflict));
         }
         let mut content = current;
         let previous_body = content.body.clone();
@@ -671,6 +685,7 @@ impl State {
             contents.insert(id.to_owned(), content.clone());
             Ok(())
         })?;
+        self.clear_conflict(id);
         Ok(saved)
     }
 
@@ -686,15 +701,44 @@ impl State {
         let mut content = self.open(id)?;
         if let Some(rev) = rev {
             if content.rev != rev {
-                return Err(RpcError::conflict("revision conflict").with_data(json!({
+                let fields = [
+                    title.as_ref().map(|provided| {
+                        json!({
+                            "field": {"type": "title"},
+                            "current": content.title,
+                            "provided": provided,
+                        })
+                    }),
+                    tags.as_ref().map(|provided| {
+                        json!({
+                            "field": {"type": "tags"},
+                            "current": content.tags,
+                            "provided": provided,
+                        })
+                    }),
+                    aliases.as_ref().map(|provided| {
+                        json!({
+                            "field": {"type": "aliases"},
+                            "current": content.aliases,
+                            "provided": provided,
+                        })
+                    }),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+                let conflict = json!({
                     "type": "revision_conflict",
                     "id": id,
-                    "field": {"type": "metadata"},
                     "provided_rev": rev,
                     "current_rev": content.rev,
                     "current_updated_label": content.updated_label,
-                    "resolution": "reload the Content and retry with the current rev",
-                })));
+                    "fields": fields,
+                    "resolution": "review the changed fields, merge manually, then retry with current_rev",
+                    "ancestor_available": false,
+                });
+                self.set_conflict(id, conflict.clone());
+                return Err(RpcError::conflict("revision conflict").with_data(conflict));
             }
         }
         if let Backend::Node(node) = &mut self.backend {
@@ -724,6 +768,7 @@ impl State {
             contents.insert(id.to_owned(), content.clone());
             Ok(())
         })?;
+        self.clear_conflict(id);
         Ok(saved)
     }
 
@@ -796,6 +841,7 @@ impl State {
             contents.remove(id);
             Ok(())
         })?;
+        self.clear_conflict(id);
         Ok(content)
     }
 
@@ -818,19 +864,27 @@ impl State {
     }
 
     pub fn conflicts(&self, id: &str) -> RpcResult<Value> {
+        if let Some(conflict) = self.conflicts.borrow().get(id) {
+            return Ok(conflict.clone());
+        }
         let content = self
             .contents
             .get(id)
             .ok_or_else(|| RpcError::not_found(format!("content {id:?} not found")))?;
         Ok(json!({
             "id": id,
-            "type": "conflict-placeholder",
+            "type": "content_snapshot",
             "rev": content.rev,
             "current_updated_label": content.updated_label,
-            "supported": false,
+            "supported": true,
             "deletion_conflict": false,
-            "fields": [],
-            "note": "the local server tracks revisions per Content only; use 2-way diff and save with the current rev",
+            "fields": [
+                {"field": {"type": "body"}, "current": content.body},
+                {"field": {"type": "title"}, "current": content.title},
+                {"field": {"type": "tags"}, "current": content.tags},
+                {"field": {"type": "aliases"}, "current": content.aliases},
+            ],
+            "note": "no conflict is pending; these are the current field values",
         }))
     }
 
@@ -847,7 +901,12 @@ impl State {
             Backend::Node(node)
                 if matches!(
                     method,
-                    "save" | "create_page" | "create_snippet" | "convert_fence" | "delete"
+                    "save"
+                        | "create_page"
+                        | "create_snippet"
+                        | "convert_fence"
+                        | "delete"
+                        | "update_meta"
                 ) =>
             {
                 Ok(())
@@ -1836,9 +1895,10 @@ mod tests {
     fn conflicts_is_a_placeholder_with_current_rev() {
         let state = sample_state();
         let value = state.conflicts("p-test").unwrap();
-        assert_eq!(value["supported"], false);
+        assert_eq!(value["supported"], true);
         assert_eq!(value["rev"], 1);
-        assert_eq!(value["type"], "conflict-placeholder");
+        assert_eq!(value["type"], "content_snapshot");
+        assert_eq!(value["fields"].as_array().unwrap().len(), 4);
         assert_eq!(state.conflicts("missing").unwrap_err().code, 404);
     }
 
@@ -1849,7 +1909,6 @@ mod tests {
         assert!(state.transclude("p-test", 3).is_ok());
     }
 
-    #[test]
     #[test]
     fn watch_generation_advances_on_mutation() {
         let mut state = State::load(None).unwrap();
@@ -1869,7 +1928,11 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         state
             .mutate(|contents| {
-                contents.get_mut("p-home").unwrap().tags.push("watch".to_owned());
+                contents
+                    .get_mut("p-home")
+                    .unwrap()
+                    .tags
+                    .push("watch".to_owned());
                 Ok(())
             })
             .unwrap();
@@ -1892,6 +1955,50 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn save_conflict_exposes_field_candidates() {
+        let mut state = State::load(None).unwrap();
+        let current = state.open("p-home").unwrap();
+        let error = state
+            .save("p-home", current.rev.saturating_sub(1), "mine\n".to_owned())
+            .unwrap_err();
+        assert_eq!(error.code, 409);
+        let conflict = state.conflicts("p-home").unwrap();
+        assert_eq!(conflict["type"], "revision_conflict");
+        let field = &conflict["fields"][0];
+        assert_eq!(field["field"]["type"], "body");
+        assert_eq!(field["provided"], "mine\n");
+        assert_eq!(field["current"], current.body);
+        state
+            .save("p-home", current.rev, "merged\n".to_owned())
+            .unwrap();
+        assert_eq!(
+            state.conflicts("p-home").unwrap()["type"],
+            "content_snapshot"
+        );
+    }
+
+    #[test]
+    fn metadata_conflict_reports_title_and_tags() {
+        let mut state = State::load(None).unwrap();
+        let current = state.open("p-home").unwrap();
+        let error = state
+            .update_meta(
+                "p-home",
+                Some(current.rev.saturating_sub(1)),
+                Some("mine".to_owned()),
+                Some(vec!["mine".to_owned()]),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, 409);
+        let conflict = state.conflicts("p-home").unwrap();
+        let fields = conflict["fields"].as_array().unwrap();
+        assert!(fields.iter().any(|field| field["field"]["type"] == "title"));
+        assert!(fields.iter().any(|field| field["field"]["type"] == "tags"));
+        assert_eq!(fields[0]["provided"], "mine");
+    }
+
     fn status_counts_all_content_types() {
         let state = sample_state();
         let status = state.status();

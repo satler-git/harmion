@@ -126,6 +126,7 @@ local function record_conflict(buf, id)
     return
   end
   vim.api.nvim_buf_set_var(buf, "wiki_conflict_body", current.body)
+  vim.api.nvim_buf_set_var(buf, "wiki_conflict_rev", current.rev)
   vim.schedule(function()
     if vim.api.nvim_buf_is_valid(buf) then
       vim.bo[buf].modified = true
@@ -328,6 +329,35 @@ vim.api.nvim_create_user_command("WikiConflict", function()
   vim.cmd("vert diffsplit " .. vim.fn.fnameescape(local_path))
   vim.cmd("windo diffthis")
   vim.cmd("windo setlocal filetype=markdown")
+  local ok, conflict = pcall(run, { "conflicts", id })
+  if ok and conflict.fields then
+    local names = {}
+    for _, field in ipairs(conflict.fields) do
+      table.insert(names, field.field.type)
+    end
+    if #names > 0 then
+      vim.notify("wiki: conflicting fields — " .. table.concat(names, ", ") .. " · :WikiResolve で現在revへ保存", vim.log.levels.WARN)
+    end
+  end
+end, {})
+
+vim.api.nvim_create_user_command("WikiResolve", function()
+  local id = current_id()
+  local current = run({ "open", id })
+  local body = lines_to_body(0)
+  local argv = { "save", id, "--rev", tostring(current.rev) }
+  if vim.b.wiki_type == "page" then
+    table.insert(argv, "--auto-convert")
+  end
+  local ok, saved = pcall(run, argv, body)
+  if not ok then
+    vim.notify("wiki: resolve failed: " .. tostring(saved), vim.log.levels.ERROR)
+    return
+  end
+  local saved_page = saved.page or saved
+  vim.api.nvim_buf_set_var(0, "wiki_rev", saved_page.rev)
+  vim.bo.modified = false
+  vim.notify("wiki: merged into the current revision " .. saved_page.rev, vim.log.levels.INFO)
 end, {})
 
 vim.api.nvim_create_user_command("WikiLspStart", lsp_start, {})

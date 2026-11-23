@@ -144,3 +144,12 @@ Neovim receives absolute `WIKI_SERVER_CMD`, `WIKI_LSP_CMD`, `WIKI_SOCKET`, and
 the dedicated server socket. The plugin honors those env values, sets
 `titlestring = "Harmion Wiki — <title>"`, and the GUI focuses that titled
 Neovide window only after an explicit edit request.
+
+## Field conflict candidates
+
+`save` and `update_meta` conflicts now record transient field candidates:
+body/title/tags/aliases with `current`, `provided`, and both revisions. The
+`conflicts` RPC returns them; Neovim's `:WikiConflict` shows the body diff and
+names the conflicting fields, and `:WikiResolve` saves the manually merged
+buffer with the current revision. This is still a 2-way merge (no common
+ancestor) and the candidates are intentionally not persisted across restart.

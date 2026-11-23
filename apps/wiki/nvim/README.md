@@ -25,7 +25,8 @@ if it fails, the plugin keeps editing and saving through JSON-RPC.
 | `:WikiTitle <title>` | Rename the current Content |
 | `:WikiTags a,b` | Replace tags |
 | `:WikiDelete!` | Delete the current Content (revision-checked) |
-| `:WikiConflict` | Diff the buffer against the server body after a 409 |
+| `:WikiConflict` | Diff the body and list conflicting fields after a 409 |
+| `:WikiResolve` | Save the merged buffer against the current server revision |
 | `:WikiSave` | `:write` through the server |
 | `:WikiList` | Quickfix list of pages and snippets |
 | `:WikiSearch <query>` | Quickfix search |
