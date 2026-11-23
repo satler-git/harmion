@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, errorMessage, fieldValue, writes } from './api.svelte';
   import type { Candidate, Edit, MergePlan, MergeRequest } from './types';
+  import Confirm from './Confirm.svelte';
   let {
     content,
     token,
@@ -19,7 +20,8 @@
     baseText = $state('');
   let busy = $state(false),
     error = $state(''),
-    editable = $state(false);
+    editable = $state(false),
+    confirming = $state(false);
   let pairRevision = 0;
   function reset() {
     pairRevision++;
@@ -27,6 +29,7 @@
     editable = false;
     baseText = '';
     error = '';
+    confirming = false;
   }
   function input(base: string | null = null): MergeRequest {
     return {
@@ -71,7 +74,8 @@
     }
   }
   async function submit() {
-    if (!confirm('表示中の本文で、選択した2候補を解決しますか？')) return;
+    if (!confirming) return;
+    confirming = false;
     await save({
       type: 'body',
       text,
@@ -81,15 +85,24 @@
 </script>
 
 <div class="merge">
-  <h3>本文を編集・マージ</h3>
+  <div class="merge-head">
+    <div>
+      <h3>本文を編集・マージ</h3>
+      <p class="muted small">
+        2つの候補を比較してマージ案を作るか、どちらかの候補をそのまま編集できます。
+      </p>
+    </div>
+  </div>
   <div class="actions">
     <label>
-      左の候補<select bind:value={left} onchange={reset}>
+      左の候補
+      <select bind:value={left} onchange={reset}>
         {#each candidates as _, i}<option value={i}>候補 {i + 1}</option>{/each}
       </select>
     </label>
     <label>
-      右の候補<select bind:value={right} onchange={reset}>
+      右の候補
+      <select bind:value={right} onchange={reset}>
         {#each candidates as _, i}<option value={i}>候補 {i + 1}</option>{/each}
       </select>
     </label>
@@ -108,7 +121,7 @@
         editable = true;
       }}
     >
-      手動で編集
+      左の候補を手動で編集
     </button>
   </div>
   {#if error}<p role="alert" class="error">{error}</p>{/if}
@@ -141,6 +154,33 @@
       bind:value={text}
       spellcheck="false"></textarea>
     <p class="muted small">この操作が置き換えるのは選択した候補です。新たに届いた版は残ります。</p>
-    <button class="primary" disabled={writes.busy} onclick={submit}>確認した本文を保存</button>
+    <button class="primary" disabled={writes.busy} onclick={() => (confirming = true)}>
+      確認した本文を保存
+    </button>
+    {#if confirming}
+      <Confirm
+        title="本文を保存して競合を解決"
+        busy={writes.busy}
+        confirmLabel="本文を保存"
+        onsubmit={submit}
+        oncancel={() => (confirming = false)}
+      >
+        <p>候補 {left + 1} と候補 {right + 1} を、次の本文で置き換えます。</p>
+        <pre class="body-text merge-preview">{text}</pre>
+      </Confirm>
+    {/if}
   {/if}
 </div>
+
+<style>
+  .merge-head h3 {
+    margin: 0 0 0.2rem;
+  }
+  .merge-head p {
+    margin: 0;
+  }
+  .merge-preview {
+    max-height: 14rem;
+    margin: 0.5rem 0;
+  }
+</style>

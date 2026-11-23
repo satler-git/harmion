@@ -123,6 +123,11 @@ export interface WorkerPeer {
   pin: { signing_key: string; provenance: string } | null;
   binding: WorkerPeerBinding;
 }
+export interface ApprovalStatus {
+  mode: 'terminal' | 'stdio' | 'session' | 'deny';
+  terminal_required: boolean;
+  terminal_available: boolean;
+}
 export interface Overview {
   identity: Registration;
   permissions: Grants | null;
@@ -140,6 +145,7 @@ export interface Overview {
   configured?: boolean;
   peers?: WorkerPeer[];
   sync_status?: unknown;
+  approval?: ApprovalStatus | null;
 }
 export interface PeerPreview {
   ticket: string;
@@ -177,11 +183,15 @@ export interface InterpreterProvider {
 export interface InterpreterList {
   providers: InterpreterProvider[];
 }
-export interface InterpreterDescription extends InterpreterProvider {
+/** One Provider manifest offered by an integrated connection request. */
+export interface ProviderManifest {
+  name: string;
+  contract_version: number;
   input_schema: unknown;
   output_schema: unknown;
   default_query: { kinds: string[] } | null;
 }
+export interface InterpreterDescription extends InterpreterProvider, ProviderManifest {}
 
 export type ConnectionStatus = 'pending' | 'approved' | 'denied' | 'completed' | 'expired';
 export interface ConnectionRequest {
@@ -192,16 +202,17 @@ export interface ConnectionRequest {
   client_id: string | null;
   status: ConnectionStatus;
   grants: Grants;
-  provider: {
-    name: string;
-    contract_version: number;
-    input_schema: unknown;
-    output_schema: unknown;
-    default_query: { kinds: string[] } | null;
-  } | null;
+  /** Legacy singular field; equals the first entry of `providers`. */
+  provider: ProviderManifest | null;
+  /** Every manifest requested by this connection, in offer order. */
+  providers?: ProviderManifest[];
+  /** Names of `providers`, retained for clients that predate the array. */
+  provider_names?: string[];
   provider_replace: boolean;
   app_id: string | null;
+  /** Legacy singular field; equals the first entry of `provider_ids`. */
   provider_id: string | null;
+  provider_ids?: string[];
   created_at: string;
   expires_at: string;
   approved_at: string | null;

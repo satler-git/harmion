@@ -559,13 +559,28 @@ pub(crate) async fn connection_approval_summary(client: &Client, body: &[u8]) ->
     let client_id = connection["client_id"]
         .as_str()
         .map_or_else(|| "(新規)".to_owned(), one_line);
+    let provider_names = connection["provider_names"]
+        .as_array()
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(one_line)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|names| !names.is_empty())
+        .unwrap_or_else(|| "(なし)".to_owned());
+    let replace = connection["provider_replace"].as_bool().unwrap_or(false);
     Some(format!(
-        "接続要求を{}: アプリ {} / redirect {} / web_origin {} / client {} / grants {}\nconnection_id={}",
+        "接続要求を{}: アプリ {} / redirect {} / web_origin {} / client {} / providers {} / provider_replace {} / grants {}\nconnection_id={}",
         if request.allow { "承認" } else { "拒否" },
         one_line(connection["name"].as_str().unwrap_or("-")),
         one_line(connection["redirect_uri"].as_str().unwrap_or("-")),
         one_line(connection["web_origin"].as_str().unwrap_or("(未指定)")),
         client_id,
+        provider_names,
+        replace,
         one_line(&grants),
         request.connection_id,
     ))

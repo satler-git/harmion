@@ -373,3 +373,69 @@ fn decode<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Error> {
     }
     serde_json::from_slice(body).map_err(|_| harmion_node::Error::InvalidRequest.into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use harmion_node::access::Grants;
+    use harmion_protocol::connect::{ConnectionId, ConnectionStatus};
+    use harmion_protocol::interpreter::{DefaultQuery, ProviderRegistration};
+
+    fn registration(name: &str) -> ProviderRegistration {
+        ProviderRegistration {
+            name: name.into(),
+            contract_version: 1,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({"type": "object"}),
+            default_query: Some(DefaultQuery {
+                kinds: vec!["ledger".into()],
+            }),
+        }
+    }
+
+    #[test]
+    fn connection_json_lists_every_provider_and_keeps_the_legacy_first() {
+        let providers = vec![registration("ledger/balance"), registration("wiki/outline")];
+        let request = node_connect::ConnectionRequest {
+            id: ConnectionId([1; 32]),
+            secret_verifier: [0; 32],
+            name: "Multi provider app".into(),
+            redirect: "http://127.0.0.1:43123/callback".into(),
+            web_origin: Some("http://127.0.0.1:43123".into()),
+            client: None,
+            challenge: [2; 32],
+            state: "state".into(),
+            grants: Grants {
+                call: true,
+                provide: true,
+                provide_names: ["ledger/balance", "wiki/outline"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                ..Default::default()
+            },
+            provider_manifest: Some(serde_json::to_vec(&providers).unwrap()),
+            provider_replace: true,
+            status: ConnectionStatus::Pending,
+            created_at: 10,
+            expires_at: 20,
+            approved_at: None,
+            completed_at: None,
+            app: None,
+            provider_id: None,
+            provider_ids: Vec::new(),
+        };
+        let value = connection_json(&request).unwrap();
+        assert_eq!(value["provider"]["name"], "ledger/balance");
+        assert_eq!(value["providers"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            value["provider_names"],
+            json!(["ledger/balance", "wiki/outline"])
+        );
+        assert_eq!(
+            value["grants"]["provide_names"],
+            json!(["ledger/balance", "wiki/outline"])
+        );
+        assert_eq!(value["provider_replace"], true);
+    }
+}

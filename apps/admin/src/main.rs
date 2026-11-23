@@ -46,7 +46,8 @@ enum Command {
         /// State directory. Defaults to ~/.local/share/harmion/admin-ui.
         #[arg(long = "ui-dir", value_name = "DIR")]
         ui_dir: Option<String>,
-        /// R2 approval source. Terminal is the safe default.
+        /// R2 approval source. Terminal is the safe default. Session skips the
+        /// terminal prompt and relies on the browser session (less secure).
         #[arg(long, value_enum, default_value = "terminal")]
         approval: ApprovalMode,
         /// OpenSSH public key whose private half is held by ssh-agent, or a

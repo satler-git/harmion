@@ -371,7 +371,18 @@ async fn dispatch(state: &State, request: Request<Incoming>) -> Result<Response<
     }
     let (enforce, signer) = state.enforcement();
     let caller = api::Caller::new(&state.client, signer, enforce, session.unwrap_or([0; 32]));
-    let result = api::dispatch(&caller, &state.node, &state.confirmations, &path, &body).await?;
+    let mut result =
+        api::dispatch(&caller, &state.node, &state.confirmations, &path, &body).await?;
+    if path == "/overview" {
+        // Expose the out-of-band approval mode so the connection screen can
+        // explain whether a terminal prompt is expected before the owner acts.
+        let status = state.confirmer.status();
+        result["approval"] = serde_json::json!({
+            "mode": status.mode,
+            "terminal_required": status.terminal_required,
+            "terminal_available": status.terminal_available,
+        });
+    }
     Ok(json(StatusCode::OK, result))
 }
 

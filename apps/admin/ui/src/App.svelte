@@ -31,8 +31,8 @@
     { id: 'peers', label: 'Peer', icon: '⌘' },
     { id: 'apps', label: 'アプリ', icon: '▦' },
     { id: 'interpreters', label: 'Interpreter', icon: '⚙' },
-    { id: 'connections', label: '接続', icon: '⇄' },
-    { id: 'export', label: 'Export', icon: '↗' },
+    { id: 'connections', label: '接続要求', icon: '⇄' },
+    { id: 'export', label: 'エクスポート', icon: '↗' },
   ];
   let page = $state<Page>('overview'),
     overview = $state<Overview | null>(null),
@@ -180,7 +180,7 @@
           {accessError ||
             'harmion-admin の起動時に表示された単回リンクを開いてください。リンクが使用済み・期限切れの場合は管理アプリを再起動してください。'}
         </p>
-        <pre>harmion-admin run NODE_DIR UI_DIR</pre>
+        <pre>harmion-admin run NODE_DIR</pre>
         <p class="muted small">リンクは2分、所有者セッションは30分有効です。</p>
       {/if}
     </section>
@@ -209,11 +209,38 @@
       <header>
         <span>WORKSPACE <b>/</b> {visibleLinks.find((link) => link.id === page)?.label}</span>
         <div class="actions">
-          <span class="badge">{readOnly ? '読み取り専用' : '所有者'}</span>{#if !worker}<span
-              class="muted small"
+          <span class="badge">{readOnly ? '読み取り専用' : '所有者'}</span>
+          {#if overview?.approval}
+            <span
+              class="badge {overview.approval.mode === 'session'
+                ? 'badge-warn'
+                : overview.approval.mode === 'deny' ||
+                    (overview.approval.terminal_required && !overview.approval.terminal_available)
+                  ? 'badge-danger'
+                  : 'badge-info'}"
+              title={overview.approval.mode === 'session'
+                ? 'R2 はブラウザ確認だけで実行されます（--approval=session）'
+                : overview.approval.mode === 'deny'
+                  ? 'R2 は拒否する設定です（--approval=deny）'
+                  : overview.approval.terminal_required && !overview.approval.terminal_available
+                    ? '起動端末が TTY でないため、R2 は実行できません'
+                    : 'R2 は起動したターミナルで y を押して承認します'}
             >
-              残り約 {remaining} 分
-            </span>{/if}<button class="quiet" onclick={() => endSession()}>終了</button>
+              {overview.approval.mode === 'session'
+                ? '端末確認なし'
+                : overview.approval.mode === 'deny'
+                  ? 'R2 拒否'
+                  : overview.approval.terminal_required && !overview.approval.terminal_available
+                    ? '端末確認不可'
+                    : '端末確認あり'}
+            </span>
+          {/if}
+          {#if !worker}<span class="muted small">残り約 {remaining} 分</span>{/if}<button
+            class="quiet"
+            onclick={() => endSession()}
+          >
+            終了
+          </button>
         </div>
       </header>
       {#if !readOnly && writes.pending}<div class="save-banner" role="status">
@@ -248,7 +275,9 @@
         {#if !readOnly}
           <div class:hidden={page !== 'apps'}><Apps {overview} /></div>
           <div class:hidden={page !== 'interpreters'}><Interpreters /></div>
-          <div class:hidden={page !== 'connections'}><Connections /></div>
+          <div class:hidden={page !== 'connections'}>
+            <Connections approval={overview?.approval ?? null} />
+          </div>
           <div class:hidden={page !== 'export'}><Export /></div>
         {/if}
       </main>

@@ -23,8 +23,30 @@ pub enum ApprovalMode {
     Terminal,
     /// Read approvals from stdin under a supervisor (tests, automation).
     Stdio,
+    /// Skip the out-of-band prompt and rely on the browser session. Less secure:
+    /// a stolen admin session can complete R2 without an additional check.
+    Session,
     /// Deny every R2 operation.
     Deny,
+}
+
+impl ApprovalMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Stdio => "stdio",
+            Self::Session => "session",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+pub struct Status {
+    pub mode: &'static str,
+    /// True when this mode expects an out-of-band prompt at all.
+    pub terminal_required: bool,
+    /// True when the prompt channel is actually available.
+    pub terminal_available: bool,
 }
 
 struct Request {
@@ -44,6 +66,7 @@ impl Confirmer {
     pub fn start(mode: ApprovalMode) -> Self {
         let poisoned = Arc::new(AtomicBool::new(false));
         if mode == ApprovalMode::Deny
+            || mode == ApprovalMode::Session
             || (mode == ApprovalMode::Terminal && !std::io::stdin().is_terminal())
         {
             return Self {
@@ -81,7 +104,17 @@ impl Confirmer {
     }
 
     /// Returns false on deny, timeout, a closed launcher, or a poisoned prompt.
+    /// In `session` mode the browser session is the only check, so this returns
+    /// true without waiting for stdin.
     pub async fn confirm(&self, operation: &str, summary: String) -> bool {
+        if self.mode == ApprovalMode::Session {
+            tracing::warn!(
+                operation,
+                reason = "session_only_approval",
+                "owner approval completed without an out-of-band prompt"
+            );
+            return true;
+        }
         if self.poisoned.load(Ordering::Relaxed) {
             tracing::warn!(
                 operation,
@@ -132,16 +165,25 @@ impl Confirmer {
         }
     }
 
+    pub fn status(&self) -> Status {
+        Status {
+            mode: self.mode.as_str(),
+            terminal_required: matches!(self.mode, ApprovalMode::Terminal | ApprovalMode::Stdio),
+            terminal_available: self.sender.is_some(),
+        }
+    }
+
     pub fn unavailable(&self) -> Option<&'static str> {
-        if self.sender.is_some() {
+        if self.mode == ApprovalMode::Session || self.sender.is_some() {
             return None;
         }
         Some(match self.mode {
             ApprovalMode::Terminal => {
                 "R2には起動端末のTTYが必要です。--approval=stdioは監督下でのみ使ってください"
             }
-            ApprovalMode::Deny => "R2は--approval=denyで拒否されています",
             ApprovalMode::Stdio => "承認チャネルが開始できませんでした",
+            ApprovalMode::Session => "端末承認なしで実行します（--approval=session）",
+            ApprovalMode::Deny => "R2は--approval=denyで拒否されています",
         })
     }
 }
@@ -155,5 +197,15 @@ mod tests {
         let confirmer = Confirmer::start(ApprovalMode::Deny);
         assert!(!confirmer.confirm("/test", "test summary".into()).await);
         assert!(confirmer.unavailable().is_some());
+        assert!(!confirmer.status().terminal_required);
+    }
+
+    #[tokio::test]
+    async fn session_mode_approves_without_a_prompt() {
+        let confirmer = Confirmer::start(ApprovalMode::Session);
+        assert!(confirmer.confirm("/test", "test summary".into()).await);
+        assert!(confirmer.unavailable().is_none());
+        assert_eq!(confirmer.status().mode, "session");
+        assert!(!confirmer.status().terminal_required);
     }
 }

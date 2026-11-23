@@ -1,8 +1,11 @@
 <script lang="ts">
   import { api, errorMessage } from '../lib/api.svelte';
-  import type { AppPreview, Overview, Grants, Filter } from '../lib/types';
+  import type { AppPreview, Overview, Filter } from '../lib/types';
   import Confirm from '../lib/Confirm.svelte';
   import Clipboard from '../lib/Clipboard.svelte';
+  import Grants from '../lib/Grants.svelte';
+  import { formatDateTime } from '../lib/format';
+
   let { overview }: { overview: Overview | null } = $props();
   let input = $state(''),
     preview = $state<AppPreview | null>(null),
@@ -19,26 +22,11 @@
     callGrant = $state(false),
     provideGrant = $state(false),
     provideNames = $state(''),
-    revoke = $state(true),
+    revoke = $state(false),
     changing = $state(false);
-  function scopes(grants: Grants) {
-    function filter(value: Filter | null) {
-      return value === null ? 'なし' : value.type === 'all' ? '全 Content' : value.kinds.join('、');
-    }
-    return [
-      { label: '読み取り', value: filter(grants.read) },
-      { label: '書き込み', value: filter(grants.write) },
-      { label: 'Interpreter 呼び出し', value: grants.call ? 'あり' : 'なし' },
-      {
-        label: 'Interpreter 提供',
-        value: grants.provide
-          ? grants.provide_names?.length
-            ? grants.provide_names.join('、')
-            : 'あり'
-          : 'なし',
-      },
-    ];
-  }
+
+  const oauthEnabled = $derived(overview?.capabilities.oauth ?? false);
+
   async function review() {
     busy = true;
     error = '';
@@ -85,46 +73,54 @@
       busy = false;
     }
   }
+  function filter(mode: string, kinds: string): Filter | null {
+    return mode === 'none'
+      ? null
+      : mode === 'all'
+        ? { type: 'all' }
+        : {
+            type: 'kinds',
+            kinds: [
+              ...new Set(
+                kinds
+                  .split(/[,\n]/)
+                  .map((kind) => kind.trim())
+                  .filter(Boolean),
+              ),
+            ],
+          };
+  }
+  function names(): string[] {
+    return [
+      ...new Set(
+        provideNames
+          .split(/[,\n]/)
+          .map((name) => name.trim())
+          .filter(Boolean),
+      ),
+    ];
+  }
   async function change() {
     busy = true;
     error = '';
-    const filter = (mode: string, kinds: string): Filter | null =>
-      mode === 'none'
-        ? null
-        : mode === 'all'
-          ? { type: 'all' }
-          : {
-              type: 'kinds',
-              kinds: [
-                ...new Set(
-                  kinds
-                    .split(/[,\n]/)
-                    .map((k) => k.trim())
-                    .filter(Boolean),
-                ),
-              ],
-            };
     try {
       await api('/change-grants', {
-        app_id: appId,
+        app_id: appId.trim(),
         revoked: revoke,
         grants: {
           read: filter(readMode, readKinds),
           write: filter(writeMode, writeKinds),
           call: callGrant,
           provide: provideGrant,
-          provide_names: provideGrant
-            ? provideNames
-                .split(/[,\n]/)
-                .map((name) => name.trim())
-                .filter(Boolean)
-            : [],
+          provide_names: provideGrant ? names() : [],
           manage_apps: false,
           manage_nodes: false,
         },
       });
       changing = false;
-      message = 'アプリの権限を変更しました。';
+      message = revoke
+        ? 'アプリを失効させ、指定した権限を反映しました。'
+        : 'アプリの権限を置き換えました。';
     } catch (e) {
       error = errorMessage(e);
     } finally {
@@ -138,28 +134,38 @@
     <p class="eyebrow">APPLICATION ACCESS</p>
     <h1>アプリ</h1>
     <p class="muted">
-      アプリから渡された接続要求を、1行で貼り付けて確認します。初回接続とProvider登録は「接続」画面で1回の承認にまとめられます。
+      新しいアプリの初回接続は「接続要求」画面で行います。この画面は、アプリから渡された登録・認可コードの
+      確認と、既存アプリの権限変更・失効に使います。
     </p>
   </div>
 </div>
-{#if !overview?.capabilities.oauth}<p class="warning">
+
+{#if !oauthEnabled}
+  <p class="warning">
     このノードの OAuth は無効です。ノードの OAuth 設定を有効にしてからアプリを接続してください。
-  </p>{/if}
-{#if error}<p class="error" role="alert">{error}</p>{/if}{#if message}<p
-    class="success"
-    role="status"
-  >
-    {message}
-  </p>{/if}
+  </p>
+{/if}
+{#if error}<p class="error" role="alert">{error}</p>{/if}
+{#if message}<p class="success" role="status">{message}</p>{/if}
+
 <section class="panel">
-  <h2>アプリの接続要求</h2>
+  <div class="section-head">
+    <div>
+      <h2>登録・認可コードを確認</h2>
+      <p class="muted small">
+        アプリが表示したコードを貼り付けます。認可要求では、要求元アプリと権限を確認してから
+        認可画面を開きます。
+      </p>
+    </div>
+  </div>
   <form
     onsubmit={(event) => {
       event.preventDefault();
       void review();
     }}
   >
-    <label for="app-request">認可コードまたは登録コード</label><input
+    <label for="app-request">認可コードまたは登録コード</label>
+    <input
       id="app-request"
       bind:value={input}
       oninput={() => {
@@ -172,12 +178,13 @@
       required
     />
     <p class="muted">
-      アプリの認可画面に表示されたコードをコピーしてください。要求された権限は次の画面で確認できます。
+      コードはアプリの認可画面からコピーしてください。要求された権限は次の確認画面に表示されます。
     </p>
-    <button class="primary" disabled={busy || !overview?.capabilities.oauth}>
+    <button class="primary" disabled={busy || !oauthEnabled}>
       {busy ? '確認中…' : '要求を確認'}
     </button>
   </form>
+
   {#if preview}
     <Confirm
       title={preview.type === 'registration' ? 'アプリを登録しますか？' : 'アプリへの権限を確認'}
@@ -193,140 +200,181 @@
         <dd class="mono">
           {preview.type === 'registration' ? preview.redirect_uri : preview.preview.redirect_uri}
         </dd>
-        {#if preview.type === 'authorization'}<dt>Client ID</dt>
+        {#if preview.type === 'authorization'}
+          <dt>Client ID</dt>
           <dd class="mono">{preview.preview.client_id}</dd>
-          {#each scopes(preview.preview.grants) as scope}<dt>{scope.label}</dt>
-            <dd>{scope.value}</dd>{/each}
           <dt>要求の有効期限</dt>
-          <dd>
-            {new Date(Number(BigInt(preview.preview.expires_at) / 1000n)).toLocaleString('ja-JP')}
-          </dd>
+          <dd>{formatDateTime(preview.preview.expires_at)}</dd>
         {/if}
       </dl>
+      {#if preview.type === 'authorization'}
+        <h4>要求された権限</h4>
+        <Grants grants={preview.preview.grants} dense />
+      {/if}
       <p>
         {preview.type === 'registration'
-          ? '登録した後にアプリが認可を要求します。'
-          : '自分が開始したアプリの要求であることを確認してください。'}
+          ? '登録した後にアプリが認可を要求します。登録情報は要求元アプリへ渡してください。'
+          : '自分が開始したアプリの要求であることを確認してください。認可画面で許可すると、登録されたコールバックへ認可コードを返します。'}
       </p>
     </Confirm>
   {/if}
-  {#if registered}<label for="registered">要求元アプリへ渡す登録情報</label><textarea
-      id="registered"
-      class="code-input"
-      value={registered}
-      readonly></textarea><Clipboard text={registered} label="登録情報をコピー" />{/if}
-  {#if consent}<a class="button primary" href={consent} target="_blank" rel="noopener noreferrer">
+
+  {#if registered}
+    <label for="registered">要求元アプリへ渡す登録情報</label>
+    <textarea id="registered" class="code-input" value={registered} readonly></textarea>
+    <Clipboard text={registered} label="登録情報をコピー" />
+  {/if}
+
+  {#if consent}
+    <a class="button primary" href={consent} target="_blank" rel="noopener noreferrer">
       Harmion の認可画面を開く ↗
     </a>
     <p class="muted small">
-      認可画面で許可すると、登録されたコールバックへ認可コードを返します。
-    </p>{/if}
+      認可画面で許可すると、登録されたコールバックへ認可コードを返します。この画面は要求を
+      準備しただけで、まだ権限は付与されていません。
+    </p>
+  {/if}
 </section>
+
 <section class="panel">
-  <h2>アプリの権限を縮小・失効</h2>
+  <div class="section-head">
+    <div>
+      <h2>既存アプリの権限を変更・失効</h2>
+      <p class="muted small">
+        指定した権限でアプリの grant を置き換えます。現在の権限は自動では引き継がれません。 OAuth
+        アプリでは権限の拡大は拒否され、縮小と失効だけが反映されます。
+      </p>
+    </div>
+  </div>
   <form
     onsubmit={(event) => {
       event.preventDefault();
       changing = true;
     }}
   >
-    <label for="app-id">Client ID / App ID</label><input
+    <label for="app-id">Client ID / App ID</label>
+    <input
       id="app-id"
       bind:value={appId}
       oninput={() => (changing = false)}
       pattern={'[a-fA-F0-9]{64}'}
+      placeholder="64桁の hex"
       required
     />
     <div class="two-columns">
       {#each ['read', 'write'] as op}
         <div>
           <label for={op + '-mode'}>{op === 'read' ? '読み取り' : '書き込み'}</label>
-          {#if op === 'read'}<select
-              id="read-mode"
-              bind:value={readMode}
-              onchange={() => (changing = false)}
-            >
-              <option value="none">なし</option><option value="all">全 Content</option><option
-                value="kinds"
-              >
-                指定 kind
-              </option>
+          {#if op === 'read'}
+            <select id="read-mode" bind:value={readMode} onchange={() => (changing = false)}>
+              <option value="none">なし</option>
+              <option value="all">全 Content</option>
+              <option value="kinds">指定 Kind</option>
             </select>
-            {#if readMode === 'kinds'}<label for="read-kinds">Kind 名（カンマ区切り）</label><input
-                id="read-kinds"
-                bind:value={readKinds}
-                oninput={() => (changing = false)}
-              />{/if}
-          {:else}<select id="write-mode" bind:value={writeMode} onchange={() => (changing = false)}>
-              <option value="none">なし</option><option value="all">全 Content</option><option
-                value="kinds"
-              >
-                指定 kind
-              </option>
+            {#if readMode === 'kinds'}
+              <label for="read-kinds">Kind 名（カンマ区切り）</label>
+              <input id="read-kinds" bind:value={readKinds} oninput={() => (changing = false)} />
+            {/if}
+          {:else}
+            <select id="write-mode" bind:value={writeMode} onchange={() => (changing = false)}>
+              <option value="none">なし</option>
+              <option value="all">全 Content</option>
+              <option value="kinds">指定 Kind</option>
             </select>
-            {#if writeMode === 'kinds'}<label for="write-kinds">
-                Kind 名（カンマ区切り）
-              </label><input
-                id="write-kinds"
-                bind:value={writeKinds}
-                oninput={() => (changing = false)}
-              />{/if}
+            {#if writeMode === 'kinds'}
+              <label for="write-kinds">Kind 名（カンマ区切り）</label>
+              <input id="write-kinds" bind:value={writeKinds} oninput={() => (changing = false)} />
+            {/if}
           {/if}
         </div>
       {/each}
     </div>
     <label class="check">
-      <input
-        type="checkbox"
-        bind:checked={callGrant}
-        onchange={() => (changing = false)}
-      />Interpreter を呼び出せる
+      <input type="checkbox" bind:checked={callGrant} onchange={() => (changing = false)} />
+      Interpreter を呼び出せる
     </label>
     <label class="check">
-      <input
-        type="checkbox"
-        bind:checked={provideGrant}
-        onchange={() => (changing = false)}
-      />Interpreter を提供できる
+      <input type="checkbox" bind:checked={provideGrant} onchange={() => (changing = false)} />
+      Interpreter を提供できる
     </label>
     {#if provideGrant}
       <label>
-        提供を許可する Provider 名（カンマ区切り。空なら全名前）
+        提供を許可する Provider 名（カンマ区切り）
         <input
           bind:value={provideNames}
           oninput={() => (changing = false)}
           placeholder="ledger/balance, docs/search"
         />
       </label>
+      <p class="muted small">
+        空にすると「すべての Provider 名」を意味します。OAuth アプリでは既存より広い権限への
+        変更は拒否されるため、通常は現在の名前を明示してください。
+      </p>
     {/if}
     <label class="check">
-      <input
-        type="checkbox"
-        bind:checked={revoke}
-        onchange={() => (changing = false)}
-      />アプリを失効させる
+      <input type="checkbox" bind:checked={revoke} onchange={() => (changing = false)} />
+      アプリを失効させる（発行済みトークンも無効になります）
     </label>
+    {#if revoke}
+      <p class="warning small">
+        失効は取り消せません。アプリを再び使うには、新しい接続または登録が必要です。
+      </p>
+    {/if}
     <p class="muted small">
-      OAuth の権限拡大には新しい認可要求が必要です。既存の名前付き提供を維持する場合は、同じ
-      Provider 名を入力してください。空にすると全名前への拡大になり、拒否されます。
+      読み取り・書き込み・Interpreter 権限をまとめて置き換えます。管理用アプリ自身を指定すると
+      管理画面が使えなくなる可能性があるため、対象の Client ID を確認してください。
     </p>
-    <button disabled={busy}>変更内容を確認</button>
+    <button disabled={busy} class={revoke ? 'danger' : 'primary'}> 変更内容を確認 </button>
   </form>
-  {#if changing}<Confirm
-      title="アプリの権限を変更"
+
+  {#if changing}
+    <Confirm
+      title={revoke ? 'アプリを失効' : 'アプリの権限を置き換え'}
       {busy}
+      danger={revoke}
       onsubmit={change}
       oncancel={() => (changing = false)}
     >
       <p class="mono">{appId}</p>
-      <p>{revoke ? 'アプリを失効させます。' : '現在の認可範囲内で権限を変更します。'}</p>
-      <p>
-        読み取り {readMode}{readMode === 'kinds' ? ' · ' + readKinds : ''} / 書き込み {writeMode}{writeMode ===
-        'kinds'
-          ? ' · ' + writeKinds
-          : ''} / Interpreter {callGrant ? '呼び出し可' : '呼び出し不可'} · {provideGrant
-          ? `提供可（${provideNames.trim() || '全名前'}）`
+      <p class="muted small">
+        読み取り {readMode === 'kinds'
+          ? readKinds || '指定なし'
+          : readMode === 'none'
+            ? 'なし'
+            : '全 Content'}
+        / 書き込み {writeMode === 'kinds'
+          ? writeKinds || '指定なし'
+          : writeMode === 'none'
+            ? 'なし'
+            : '全 Content'}
+      </p>
+      <h4>Interpreter</h4>
+      <p class="small">
+        {callGrant ? '呼び出し可' : '呼び出し不可'} · {provideGrant
+          ? `提供可（${names().join('、') || 'すべての名前'}）`
           : '提供不可'}
       </p>
-    </Confirm>{/if}
+      {#if revoke}<p class="warning small">
+          このアプリは失効し、発行済みトークンも無効になります。
+        </p>{/if}
+      {#if provideGrant && names().length === 0}
+        <p class="warning small">
+          Provider 名が空です。すべての名前を許可する要求として扱われます。
+        </p>
+      {/if}
+      <p class="muted small">
+        {revoke
+          ? 'この操作は取り消せません。必要なら新しい接続を作り直してください。'
+          : '現在の権限を置き換えます。意図しない縮小がないか確認してください。'}
+      </p>
+    </Confirm>
+  {/if}
 </section>
+
+<style>
+  .panel h4 {
+    margin: 0.9rem 0 0.4rem;
+    font-size: 0.85rem;
+    color: #b9c6e6;
+  }
+</style>
