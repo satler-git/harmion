@@ -3,7 +3,9 @@
 -- talks to it over a Unix socket and uses wiki://<id> virtual buffers.
 
 local function server_cmd()
-  local cmd = vim.g.wiki_server_cmd or { "wiki-server" }
+  local cmd = vim.g.wiki_server_cmd
+    or (vim.env.WIKI_SERVER_CMD and { vim.env.WIKI_SERVER_CMD })
+    or { "wiki-server" }
   if type(cmd) == "string" then
     return { cmd }
   end

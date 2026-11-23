@@ -307,9 +307,20 @@ fn sanitize_editor_env(command: &mut Command, editor_socket: &Path) {
         }
     }
     command.env("WIKI_NVIM_SERVER", editor_socket);
+    if let Some(server) = server_path() {
+        command.env("WIKI_SERVER_CMD", server);
+    }
     if let Some(lsp) = lsp_path() {
         command.env("WIKI_LSP_CMD", lsp);
     }
+}
+
+fn server_path() -> Option<PathBuf> {
+    if let Some(value) = env::var_os("WIKI_SERVER_CMD") {
+        return Some(PathBuf::from(value));
+    }
+    let sibling = env::current_exe().ok()?.parent()?.join("wiki-server");
+    sibling.exists().then_some(sibling)
 }
 
 fn lsp_path() -> Option<PathBuf> {
@@ -441,6 +452,24 @@ fn niri_windows() -> Result<Vec<serde_json::Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_env_gets_absolute_server_and_socket() {
+        let mut command = Command::new("true");
+        sanitize_editor_env(&mut command, Path::new("/tmp/harmion-wiki-nvim.sock"));
+        let envs = command.get_envs().collect::<std::collections::BTreeMap<_, _>>();
+        if let Some(server) = envs
+            .get(std::ffi::OsStr::new("WIKI_SERVER_CMD"))
+            .and_then(|value| *value)
+        {
+            assert!(Path::new(server).is_absolute());
+        }
+        let socket = envs
+            .get(std::ffi::OsStr::new("WIKI_NVIM_SERVER"))
+            .and_then(|value| *value)
+            .expect("WIKI_NVIM_SERVER");
+        assert_eq!(Path::new(socket), Path::new("/tmp/harmion-wiki-nvim.sock"));
+    }
 
     #[test]
     #[ignore = "opens a real Neovide window"]
