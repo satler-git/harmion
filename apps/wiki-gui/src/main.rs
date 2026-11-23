@@ -1066,8 +1066,7 @@ fn load_summaries() -> Result<Vec<Summary>, String> {
     serde_json::from_value(items).map_err(|error| format!("list の解釈に失敗: {error}"))
 }
 
-fn start_polling(state: &AppState, alive: Arc<AtomicBool>, updates: mpsc::Sender<PollUpdate>) {
-    let _ = state;
+fn start_polling(alive: Arc<AtomicBool>, updates: mpsc::Sender<PollUpdate>) {
     let mut since = 0u64;
     thread::spawn(move || {
         loop {
