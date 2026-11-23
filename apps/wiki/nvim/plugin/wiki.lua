@@ -13,7 +13,7 @@ local function server_cmd()
 end
 
 local function socket()
-  return vim.g.wiki_socket or "/tmp/harmion-wiki-m0.sock"
+  return vim.g.wiki_socket or vim.env.WIKI_SOCKET or "/tmp/harmion-wiki-m0.sock"
 end
 
 local function run(args, stdin)
