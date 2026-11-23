@@ -74,7 +74,9 @@ Last updated: 2026-11-23
   create/convert/delete return 501. Production OAuth is blocked on refresh:
   access tokens live ~10 minutes, and `harmion-client` has no refresh helper;
   the integrated connect flow also needs a redirect/listener and credential store.
-- **No app-visible full-text Search**; local substring search is used.
+- SQLite FTS5/trigram search with NFKC normalization and tag queries; the
+  export tree can be re-imported without duplicate Content.
+- Reads are still a startup snapshot; live subscription catch-up is pending.
 - **No app-level kind/delete conflict resolution**; those are owner/admin only.
 - **Interpreter streaming v1 is implemented**: >64 items, chunked input,
   128 MiB explicit limit, cancellation and tests. Output streaming remains out
