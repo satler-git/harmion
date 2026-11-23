@@ -82,6 +82,7 @@ pub(super) fn toolbar(state: &AppState) -> Div {
                         .items_center()
                         .gap(6.0_f32)
                         .hover(|style| style.bg(theme().surface_muted))
+                        .cursor(CursorIcon::Pointer)
                         .on_click({
                             let state = state.clone();
                             move |_| state.open_palette(PaletteMode::Search)

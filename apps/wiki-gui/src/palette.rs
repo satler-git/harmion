@@ -179,6 +179,7 @@ fn palette_card_inner(state: &AppState) -> Div {
                         .items_center()
                         .gap(9.0_f32)
                         .hover(|style| style.bg(theme().surface_muted))
+                        .cursor(CursorIcon::Pointer)
                         .on_click({
                             let state = results_state.clone();
                             let summary = summary.clone();

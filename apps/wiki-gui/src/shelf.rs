@@ -71,7 +71,6 @@ pub(super) fn shelf(state: &AppState) -> Div {
                         .justify_center()
                         .child(ui_text(total.to_string(), 9.0, theme().text_muted))
                 }))
-                .child(ui_text("すべて見る", 11.0, theme().text_muted))
                 .child(div().flex_1())
                 .child(ui_text("ホバーで表示 ·", 9.5, theme().text_disabled))
                 .child(kbd("Ctrl+Alt+L"))
@@ -84,6 +83,7 @@ pub(super) fn shelf(state: &AppState) -> Div {
                         .items_center()
                         .justify_center()
                         .hover(|style| style.bg(theme().surface_muted))
+                        .cursor(CursorIcon::Pointer)
                         .on_click(move |event| {
                             event.stop_propagation();
                             pinned.set(false);
@@ -164,6 +164,7 @@ fn hop_row(state: &AppState, hop: &TwoHop, group_count: usize) -> Div {
         .flex()
         .flex_col()
         .hover(|style| style.bg(theme().surface_muted))
+        .cursor(CursorIcon::Pointer)
         .on_click(move |_| state.open_summary(&target))
         .child(
             div()
@@ -337,6 +338,7 @@ fn palette_card(state: &AppState) -> Div {
                         .items_center()
                         .gap(9.0_f32)
                         .hover(|style| style.bg(theme().surface_muted))
+                        .cursor(CursorIcon::Pointer)
                         .on_click({
                             let state = results_state.clone();
                             let summary = summary.clone();

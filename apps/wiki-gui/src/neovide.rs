@@ -52,6 +52,10 @@ impl Manager {
         is_socket(&self.socket)
     }
 
+    pub fn has_window(&self) -> bool {
+        self.has_wiki_window() || has_editor_window()
+    }
+
     /// Open `id` in the editor, starting the editor when it is not running yet.
     pub fn open(&mut self, id: &str, title: &str) -> Result<OpenOutcome, String> {
         self.ensure_server()?;

@@ -58,6 +58,7 @@ pub(super) fn icon_button(glyph: &str, tooltip: &str) -> Div {
         .items_center()
         .justify_center()
         .hover(|style| style.bg(theme().surface_muted))
+        .cursor(CursorIcon::Pointer)
         .child(ui_text(glyph, 14.0, theme().text_muted))
         .access({
             let tooltip = tooltip.to_owned();

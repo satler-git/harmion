@@ -311,6 +311,12 @@ enum Source {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarMode {
+    All,
+    Recent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Inspector {
     Links,
     Info,
@@ -359,6 +365,8 @@ struct AppState {
     poll_guard: Rc<PollGuard>,
     updates: Rc<RefCell<mpsc::Receiver<PollUpdate>>>,
     tag_filter: Signal<Option<String>>,
+    sidebar_mode: Signal<SidebarMode>,
+    sidebar_open: Signal<bool>,
     tabs: Signal<Vec<Tab>>,
     active: Signal<usize>,
     inspector: Signal<Inspector>,
@@ -1164,7 +1172,7 @@ fn boot(snapshot: bool) -> AppState {
     let poll_alive = Arc::new(AtomicBool::new(true));
     let poll_guard = Rc::new(PollGuard(poll_alive.clone()));
     let (poll_tx, poll_rx) = mpsc::channel();
-    let attached = manager.borrow().has_server();
+    let attached = manager.borrow().has_server() && manager.borrow().has_window();
     let detail = manager.borrow().status_label();
     let root = node_ref();
     let state = AppState {
@@ -1177,6 +1185,8 @@ fn boot(snapshot: bool) -> AppState {
         poll_guard,
         updates: Rc::new(RefCell::new(poll_rx)),
         tag_filter: signal(None),
+        sidebar_mode: signal(SidebarMode::All),
+        sidebar_open: signal(true),
         tabs: signal(tabs),
         active: signal(0),
         inspector: signal(Inspector::Links),
@@ -1349,10 +1359,20 @@ fn layout(state: &AppState) -> Div {
                 .flex_row()
                 .flex_1()
                 .min_h(0.0_f32)
-                .child(dyn_view({
-                    let state = state.clone();
-                    move || sidebar(&state)
-                }))
+                .child(
+                    div()
+                        .h_full()
+                        .overflow_hidden()
+                        .transition(Transition::ms(180))
+                        .dyn_style({
+                            let state = state.clone();
+                            move |style| style.w(if state.sidebar_open.get() { 236.0 } else { 0.0 })
+                        })
+                        .child(dyn_view({
+                            let state = state.clone();
+                            move || sidebar(&state)
+                        })),
+                )
                 .child(dyn_view({
                     let state = state.clone();
                     move || editor_column(&state)
@@ -1489,13 +1509,14 @@ fn sidebar(state: &AppState) -> Div {
         .to_owned();
     let workspace = state.active_workspace();
     let tag_filter = state.tag_filter.get();
+    let mode = state.sidebar_mode.get();
     let matches_tag = |summary: &Summary| {
         tag_filter.as_ref().is_none_or(|tag| {
             summary.tags.iter().any(|candidate| candidate == tag)
                 || summary.kinds.iter().any(|candidate| candidate == tag)
         })
     };
-    let pages = summaries
+    let mut pages = summaries
         .iter()
         .filter(|summary| summary.is_page() && matches_tag(summary))
         .collect::<Vec<_>>();
@@ -1513,6 +1534,13 @@ fn sidebar(state: &AppState) -> Div {
         .filter(|recent| !recent.is_empty())
         .unwrap_or_else(|| summaries.iter().take(4).cloned().collect());
     recent.sort_by_key(|summary| !summary.is_page());
+    if mode == SidebarMode::Recent {
+        let ids = recent
+            .iter()
+            .map(|summary| summary.id.as_str())
+            .collect::<BTreeSet<_>>();
+        pages.retain(|summary| ids.contains(summary.id.as_str()));
+    }
 
     let mut column = div()
         .w(236.0_f32)
@@ -1545,6 +1573,7 @@ fn sidebar(state: &AppState) -> Div {
                         .items_center()
                         .justify_center()
                         .hover(|style| style.bg(theme().surface_muted))
+                        .cursor(CursorIcon::Pointer)
                         .on_click({
                             let state = state.clone();
                             move |_| state.new_page()
@@ -1556,17 +1585,29 @@ fn sidebar(state: &AppState) -> Div {
         .child(nav_row(
             "▤",
             "すべてのページ",
-            Some(pages.len()),
-            false,
+            Some(summaries.iter().filter(|summary| summary.is_page()).count()),
+            mode == SidebarMode::All,
             {
                 let state = state.clone();
-                move || state.open_palette(PaletteMode::QuickOpen)
+                move || {
+                    state.sidebar_mode.set(SidebarMode::All);
+                    state.tag_filter.set(None);
+                }
             },
         ))
-        .child(nav_row("↺", "最近", Some(recent.len()), false, {
-            let state = state.clone();
-            move || state.open_palette(PaletteMode::Search)
-        }))
+        .child(nav_row(
+            "↺",
+            "最近",
+            Some(recent.len()),
+            mode == SidebarMode::Recent,
+            {
+                let state = state.clone();
+                move || {
+                    state.sidebar_mode.set(SidebarMode::Recent);
+                    state.tag_filter.set(None);
+                }
+            },
+        ))
         .child(side_section("タグ"));
 
     if tags.is_empty() {
@@ -1626,7 +1667,11 @@ fn sidebar(state: &AppState) -> Div {
         column = column.child(tag_row);
     }
 
-    column = column.child(side_section("ページ"));
+    column = column.child(side_section(if mode == SidebarMode::Recent {
+        "最近のページ"
+    } else {
+        "ページ"
+    }));
 
     for summary in &pages {
         let is_active = summary.id == active_id;
@@ -1650,6 +1695,7 @@ fn sidebar(state: &AppState) -> Div {
                 .items_center()
                 .gap(8.0_f32)
                 .hover(|style| style.bg(theme().surface_muted))
+                .cursor(CursorIcon::Pointer)
                 .on_click({
                     let state = state.clone();
                     let summary = summary.clone();
@@ -1677,6 +1723,7 @@ fn sidebar(state: &AppState) -> Div {
                 .justify_center()
                 .gap(6.0_f32)
                 .hover(|style| style.bg(theme().surface_muted))
+                .cursor(CursorIcon::Pointer)
                 .on_click({
                     let state = state.clone();
                     move |_| state.new_page()
@@ -1723,6 +1770,7 @@ fn page_row(state: &AppState, summary: &Summary, active: bool) -> Div {
         .items_center()
         .gap(8.0_f32)
         .hover(|style| style.bg(theme().surface_muted))
+        .cursor(CursorIcon::Pointer)
         .on_click(move |_| state.open_summary(&click_summary))
         .child(ui_text(
             glyph,
@@ -1757,6 +1805,7 @@ fn snippet_row(state: &AppState, summary: &Summary) -> Div {
         .items_center()
         .gap(8.0_f32)
         .hover(|style| style.bg(theme().surface_muted))
+        .cursor(CursorIcon::Pointer)
         .on_click(move |_| state.open_summary(&click_summary))
         .child(ui_text("▤", 11.0, theme().text_disabled))
         .child(ui_text(
@@ -1812,6 +1861,7 @@ fn tabs(state: &AppState) -> Div {
             .items_center()
             .gap(8.0_f32)
             .hover(|style| style.bg(theme().surface_muted))
+            .cursor(CursorIcon::Pointer)
             .on_click({
                 let state = state.clone();
                 move |_| state.switch_tab(index)
@@ -1834,6 +1884,7 @@ fn tabs(state: &AppState) -> Div {
                     .items_center()
                     .justify_center()
                     .hover(|style| style.bg(theme().surface_muted))
+                    .cursor(CursorIcon::Pointer)
                     .on_click({
                         let state = state.clone();
                         move |event| {
@@ -1863,6 +1914,7 @@ fn tabs(state: &AppState) -> Div {
             .items_center()
             .justify_center()
             .hover(|style| style.bg(theme().surface_muted))
+            .cursor(CursorIcon::Pointer)
             .on_click({
                 let state = state.clone();
                 move |_| state.open_palette(PaletteMode::QuickOpen)
@@ -2642,6 +2694,7 @@ fn outline_column(state: &AppState) -> Div {
                 })
                 .rounded(4.0_f32)
                 .hover(|style| style.bg(theme().surface_muted))
+                .cursor(CursorIcon::Pointer)
                 .on_click({
                     let state = state.clone();
                     let line = item.line;
@@ -2865,6 +2918,7 @@ fn inspector_links(state: &AppState) -> Div {
                 .items_center()
                 .gap(6.0_f32)
                 .hover(|style| style.bg(theme().surface_muted))
+                .cursor(CursorIcon::Pointer)
                 .on_click({
                     let state = state.clone();
                     move |_| state.shelf_pinned.set(true)
@@ -2963,6 +3017,7 @@ fn suggestion(state: &AppState, hop: &TwoHop, selected: bool, index: usize) -> D
         .flex()
         .flex_col()
         .hover(|style| style.bg(theme().surface_muted))
+        .cursor(CursorIcon::Pointer)
         .on_click({
             let state = state.clone();
             let target = hop.target.clone();
@@ -3053,6 +3108,7 @@ fn link_row(state: &AppState, summary: &Summary, arrow: &str) -> Div {
         .border_b(1.0_f32)
         .border_color(rgb(0x2f2f31))
         .hover(|style| style.bg(theme().surface_muted))
+        .cursor(CursorIcon::Pointer)
         .on_click(move |_| state.open_summary(&click_summary))
         .child(ui_text(truncate_chars(&summary.title, 30), 11.5, theme().text_muted).flex_1())
         .child(ui_text(arrow, 11.0, theme().text_disabled))
