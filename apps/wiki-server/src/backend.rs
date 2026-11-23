@@ -249,6 +249,74 @@ impl NodeAdapter {
         }
     }
 
+    pub fn update_meta(
+        &mut self,
+        id: &str,
+        expected_body: &str,
+        title: Option<&str>,
+        tags: Option<&[String]>,
+        aliases: Option<&[String]>,
+    ) -> RpcResult<Json> {
+        let content = parse_content_id(id)?;
+        let view = self.get_view(content)?;
+        let current_body = view
+            .pointer("/content/body")
+            .and_then(Json::as_str)
+            .unwrap_or_default();
+        if current_body != expected_body {
+            return Err(RpcError::conflict(
+                "the node Content changed since this snapshot",
+            ));
+        }
+        let token = view
+            .get("edit_token")
+            .and_then(Json::as_str)
+            .ok_or_else(|| RpcError::new(502, "node view has no edit_token"))
+            .and_then(parse_32)?;
+        let mut fields = BTreeMap::new();
+        let mut attribute = |key: &str, value: AttributeValue| {
+            fields.insert(
+                Field::Attribute {
+                    namespace: "wiki".to_owned(),
+                    key: key.to_owned(),
+                },
+                Value::Attribute(value),
+            );
+        };
+        if let Some(title) = title {
+            attribute("title", AttributeValue::String(title.to_owned()));
+        }
+        if let Some(tags) = tags {
+            attribute(
+                "tags",
+                AttributeValue::Array(tags.iter().cloned().map(AttributeValue::String).collect()),
+            );
+        }
+        if let Some(aliases) = aliases {
+            attribute(
+                "aliases",
+                AttributeValue::Array(
+                    aliases
+                        .iter()
+                        .cloned()
+                        .map(AttributeValue::String)
+                        .collect(),
+                ),
+            );
+        }
+        let request = SaveRequest {
+            request_id: RequestId(random_id().map_err(|error| {
+                RpcError::internal(format!("cannot create node request id: {error}"))
+            })?),
+            content_id: ContentId(content),
+            command: Command::Edit {
+                token: EditToken(token),
+                fields,
+            },
+        };
+        self.save_request(&request)
+    }
+
     pub fn write_unsupported(&self, method: &str) -> RpcError {
         RpcError::unsupported(format!("node backend does not implement {method} yet")).with_data(
             json!({

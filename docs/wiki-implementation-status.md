@@ -95,7 +95,7 @@ WebSocket subscription path is still pending.
 - One OAuth connection registers one provider manifest; the other two Wiki
   names need `interpreter-register` or a second connection.
 - Conflict merge is a 2-way diff; no common-ancestor 3-way merge.
-- Node backend `update_meta` remains 501.
+- Node backend `update_meta` uses a body-guarded Edit with wiki attributes.
 
 - Cache/subscription follow-up, offline snapshot and permission-loss handling (FR-19, FR-23).
 - Tag list/filter pages and workspace filters (FR-22, FR-34).

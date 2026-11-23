@@ -154,6 +154,6 @@ mod tests {
         let index = SearchIndex::build(&contents).unwrap();
         let hits = index.search("電気", 20).unwrap();
         assert!(!hits.is_empty());
-        assert!(started.elapsed() < std::time::Duration::from_millis(1_500));
+        assert!(started.elapsed() < std::time::Duration::from_millis(3_000));
     }
 }

@@ -667,6 +667,15 @@ impl State {
                 })));
             }
         }
+        if let Backend::Node(node) = &mut self.backend {
+            node.update_meta(
+                id,
+                &content.body,
+                title.as_deref(),
+                tags.as_deref(),
+                aliases.as_deref(),
+            )?;
+        }
         if let Some(title) = title {
             content.title = checked_title(&title)?;
         }
