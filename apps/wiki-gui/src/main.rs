@@ -4100,11 +4100,13 @@ fn main() {
     let mut snapshot_path = None;
     let mut page = None;
     let mut search = false;
+    let mut edit = false;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--snapshot" => snapshot_path = Some(args.next().expect("--snapshot requires a path")),
             "--page" => page = Some(args.next().expect("--page requires a title")),
             "--search" => search = true,
+            "--edit" => edit = true,
             other => panic!("unknown argument: {other}"),
         }
     }
@@ -4125,6 +4127,9 @@ fn main() {
     }
     if search {
         state.open_palette(PaletteMode::Search);
+    }
+    if edit {
+        state.open_editor();
     }
 
     if let Some(out) = snapshot_path {

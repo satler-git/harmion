@@ -60,6 +60,7 @@ impl Manager {
     pub fn open(&mut self, id: &str, title: &str) -> Result<OpenOutcome, String> {
         self.ensure_server()?;
         self.ensure_window()?;
+        self.wait_for_plugin()?;
 
         let mut remote = Command::new("nvim");
         remote.args([
@@ -161,6 +162,29 @@ impl Manager {
     }
 
     /// Attach a Neovide window to a server that is already listening but has no window.
+    fn wait_for_plugin(&self) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + LAUNCH_TIMEOUT;
+        while std::time::Instant::now() < deadline {
+            let output = Command::new("nvim")
+                .args([
+                    "--server",
+                    &self.socket.display().to_string(),
+                    "--remote-expr",
+                    "exists(\":WikiOpen\")",
+                ])
+                .env_remove("NVIM")
+                .output();
+            if let Ok(output) = output
+                && output.status.success()
+                && String::from_utf8_lossy(&output.stdout).trim() == "2"
+            {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        Err("Wikiプラグインが Neovim に読み込まれませんでした".to_owned())
+    }
+
     fn ensure_window(&self) -> Result<(), String> {
         if self.launched {
             let deadline = std::time::Instant::now() + LAUNCH_TIMEOUT;
@@ -209,8 +233,10 @@ impl Manager {
         args.push("--cmd".to_owned());
         args.push("set termguicolors background=dark".to_owned());
         if let Some(plugin) = plugin_path() {
-            args.push("--cmd".to_owned());
+            args.push("-c".to_owned());
             args.push(format!("set rtp+={}", plugin.display()));
+            args.push("-c".to_owned());
+            args.push("runtime! plugin/wiki.lua".to_owned());
         }
         let mut command = Command::new("neovide");
         command.args(&args);
@@ -242,8 +268,10 @@ impl Manager {
             "set termguicolors background=dark".to_owned(),
         ];
         if let Some(plugin) = plugin {
-            nvim_args.push("--cmd".to_owned());
+            nvim_args.push("-c".to_owned());
             nvim_args.push(format!("set rtp+={}", plugin.display()));
+            nvim_args.push("-c".to_owned());
+            nvim_args.push("runtime! plugin/wiki.lua".to_owned());
         }
         let terminals: [(&str, &[&str]); 4] = [
             ("alacritty", &["-e", "nvim"]),
