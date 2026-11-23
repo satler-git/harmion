@@ -12,6 +12,15 @@
 
 mod highlight;
 mod neovide;
+mod palette;
+mod shelf;
+mod toolbar;
+mod ui;
+
+use palette::palette;
+use shelf::shelf;
+use toolbar::toolbar;
+use ui::{chip, divider, dot, icon_button, kbd, mono_text, nav_row, section_label, ui_text, vdiv};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -356,7 +365,9 @@ struct AppState {
     inspector_visible: Signal<bool>,
     shelf_pinned: Signal<bool>,
     shelf_hover: Signal<bool>,
+    shelf_dismissed: Signal<bool>,
     palette: Signal<Option<PaletteMode>>,
+    palette_selected: Signal<usize>,
     query: Signal<String>,
     results: Signal<Vec<Summary>>,
     palette_error: Signal<Option<String>>,
@@ -449,7 +460,6 @@ impl AppState {
         self.ensure_workspace(index);
         if let Some(tab) = self.active_tab() {
             self.push_history(tab.id);
-            self.follow_editor();
         }
     }
 
@@ -622,8 +632,6 @@ impl AppState {
         self.push_history(Some(id.to_owned()));
         self.palette.set(None);
         self.palette_error.set(None);
-        self.request_root_focus();
-        self.follow_editor();
     }
 
     fn close_tab(&self, index: usize) {
@@ -636,7 +644,6 @@ impl AppState {
         self.tabs.set(tabs);
         self.active.set(new_active);
         self.ensure_workspace(new_active);
-        self.follow_editor();
     }
 
     fn push_history(&self, id: Option<String>) {
@@ -688,7 +695,6 @@ impl AppState {
         {
             self.active.set(tab_index);
             self.ensure_workspace(tab_index);
-            self.follow_editor();
             return;
         }
         let summary = self
@@ -703,6 +709,7 @@ impl AppState {
 
     fn open_palette(&self, mode: PaletteMode) {
         self.palette.set(Some(mode));
+        self.palette_selected.set(0);
         let prefill = match mode {
             PaletteMode::Rename => self.active_tab().map(|tab| tab.title).unwrap_or_default(),
             PaletteMode::Tags => self
@@ -724,6 +731,7 @@ impl AppState {
 
     fn on_query(&self, text: &str) {
         self.query.set(text.to_owned());
+        self.palette_selected.set(0);
         self.refresh_results();
     }
 
@@ -829,7 +837,6 @@ impl AppState {
                 self.set_editor_error(error);
             }
         }
-        self.request_root_focus();
     }
 
     fn set_editor_error(&self, error: String) {
@@ -917,7 +924,7 @@ impl AppState {
     }
 
     fn scroll_to_line(&self, line: usize) {
-        let y = (line.saturating_sub(1) as f32 * 24.0) as i32;
+        let y = (line.saturating_sub(1) as f32 * 27.0) as i32;
         let article = self.article_ref;
         request_frame(move |_| article.scroll_to_after_layout(0, y));
     }
@@ -1176,7 +1183,9 @@ fn boot(snapshot: bool) -> AppState {
         inspector_visible: signal(true),
         shelf_pinned: signal(snapshot),
         shelf_hover: signal(false),
+        shelf_dismissed: signal(false),
         palette: signal(None),
+        palette_selected: signal(0),
         query: signal(String::new()),
         results: signal(Vec::new()),
         palette_error: signal(None),
@@ -1211,49 +1220,6 @@ fn boot(snapshot: bool) -> AppState {
 // ---------------------------------------------------------------------------
 // Small view helpers
 // ---------------------------------------------------------------------------
-
-fn ui_text(label: impl Into<String>, size: f32, color: Color) -> Text {
-    text(label.into())
-        .font_family(sans())
-        .text_size(size)
-        .text_color(color)
-}
-
-fn mono_text(label: impl Into<String>, size: f32, color: Color) -> Text {
-    text(label.into())
-        .font_family(mono())
-        .text_size(size)
-        .text_color(color)
-}
-
-fn dot(color: Color) -> Div {
-    div().w(7.0_f32).h(7.0_f32).rounded(3.5_f32).bg(color)
-}
-
-fn kbd(label: impl Into<String>) -> Div {
-    div()
-        .h(16.0_f32)
-        .px(4.0_f32)
-        .rounded(3.0_f32)
-        .bg(theme().surface_muted)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(ui_text(label, 9.0, theme().text_muted))
-}
-
-fn section_label(label: impl Into<String>) -> Text {
-    ui_text(label, 11.0, theme().text_disabled).font_weight(FontWeight::SEMIBOLD)
-}
-
-fn chip(label: impl Into<String>, color: Color) -> Div {
-    div()
-        .px(6.0_f32)
-        .py(1.0_f32)
-        .rounded(4.0_f32)
-        .bg(theme().surface_muted)
-        .child(mono_text(label, 8.5, color))
-}
 
 fn meta_sep() -> Text {
     ui_text("·", 11.0, theme().text_disabled)
@@ -1423,23 +1389,45 @@ fn handle_key(state: &AppState, event: &KeyboardEvent) {
             return;
         }
     }
-    if ctrl && alt {
-        if event.key.is_char('l') {
+    if state.palette.get_untracked().is_some() {
+        let length = state.results.get_untracked().len();
+        if length > 0 && event.key == Key::Named(NamedKey::ArrowDown) {
             event.prevent_default();
-            state.shelf_pinned.update(|pinned| *pinned = !*pinned);
+            let index = (state.palette_selected.get_untracked() + 1).min(length - 1);
+            state.palette_selected.set(index);
+            return;
+        }
+        if length > 0 && event.key == Key::Named(NamedKey::ArrowUp) {
+            event.prevent_default();
+            let index = state.palette_selected.get_untracked().saturating_sub(1);
+            state.palette_selected.set(index);
+            return;
+        }
+        if event.key == Key::Named(NamedKey::Enter) {
+            event.prevent_default();
+            let index = state
+                .palette_selected
+                .get_untracked()
+                .min(length.saturating_sub(1));
+            if let Some(summary) = state.results.get_untracked().get(index) {
+                state.open_summary(summary);
+            }
             return;
         }
     }
-    if !ctrl {
+    if ctrl && (alt || event.modifiers.shift) && (event.key.is_char('l') || event.key.is_char('L'))
+    {
+        event.prevent_default();
+        if state.shelf_pinned.get_untracked() || state.shelf_hover.get_untracked() {
+            state.shelf_pinned.set(false);
+            state.shelf_dismissed.set(true);
+        } else {
+            state.shelf_dismissed.set(false);
+            state.shelf_pinned.set(true);
+        }
         return;
     }
-    if event.key == Key::Named(NamedKey::Enter) {
-        if state.palette.get_untracked().is_some() {
-            event.prevent_default();
-            if let Some(first) = state.results.get_untracked().into_iter().next() {
-                state.open_summary(&first);
-            }
-        }
+    if !ctrl {
         return;
     }
     if event.key.is_char('k') {
@@ -1486,167 +1474,6 @@ fn handle_key(state: &AppState, event: &KeyboardEvent) {
 // ---------------------------------------------------------------------------
 // Toolbar
 // ---------------------------------------------------------------------------
-
-fn toolbar(state: &AppState) -> Div {
-    let tab = state.active_tab();
-    let title = tab
-        .as_ref()
-        .map(|tab| tab.title.clone())
-        .unwrap_or_else(|| "Wiki".to_owned());
-    let editor = state.editor.get();
-    let fallback = state.source.get() != Source::Server;
-
-    let mut left = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(5.0_f32)
-        .child(icon_button("▤", "サイドバー"))
-        .child(vdiv())
-        .child(icon_button("‹", "戻る Ctrl+[").on_click({
-            let state = state.clone();
-            move |_| state.back()
-        }))
-        .child(icon_button("›", "進む Ctrl+]").on_click({
-            let state = state.clone();
-            move |_| state.forward()
-        }))
-        .child(vdiv())
-        .child(ui_text(&title, 13.0, theme().text).font_weight(FontWeight::SEMIBOLD))
-        .child(ui_text("Wiki", 12.0, theme().text_disabled));
-    if fallback {
-        left = left.child(
-            div()
-                .px(6.0_f32)
-                .py(2.0_f32)
-                .rounded(4.0_f32)
-                .bg(rgb(0x3a2a12))
-                .child(ui_text(
-                    source_label(state.source.get()),
-                    9.0,
-                    rgb(0xe0af68),
-                )),
-        );
-    }
-
-    let editor_label = tab
-        .as_ref()
-        .map(|tab| tab.title.clone())
-        .unwrap_or_else(|| "—".to_owned());
-    let editor_color = if editor.error.is_some() {
-        rgb(0xff453a)
-    } else if editor.attached {
-        theme().success
-    } else {
-        theme().text_disabled
-    };
-
-    div()
-        .h(52.0_f32)
-        .px(14.0_f32)
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .bg(theme().page)
-        .border_b(1.0_f32)
-        .border_color(theme().border)
-        .child(left)
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(6.0_f32)
-                .child(
-                    div()
-                        .w(210.0_f32)
-                        .h(28.0_f32)
-                        .px(8.0_f32)
-                        .rounded(6.0_f32)
-                        .bg(theme().surface_muted)
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(6.0_f32)
-                        .hover(|style| style.bg(theme().hover))
-                        .on_click({
-                            let state = state.clone();
-                            move |_| state.open_palette(PaletteMode::Search)
-                        })
-                        .child(ui_text("◎", 13.0, theme().text_muted))
-                        .child(ui_text("検索", 12.0, theme().text_muted))
-                        .child(div().flex_1())
-                        .child(kbd("Ctrl+K")),
-                )
-                .child(
-                    div()
-                        .h(28.0_f32)
-                        .px(9.0_f32)
-                        .rounded(6.0_f32)
-                        .bg(theme().surface_muted)
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(6.0_f32)
-                        .hover(|style| style.bg(theme().hover))
-                        .on_click({
-                            let state = state.clone();
-                            move |_| state.open_editor()
-                        })
-                        .child(dot(editor_color))
-                        .child(
-                            ui_text("Neovide", 11.0, theme().text_muted)
-                                .font_weight(FontWeight::MEDIUM),
-                        )
-                        .child(ui_text("·", 10.0, theme().text_disabled))
-                        .child(ui_text(&editor_label, 11.0, theme().text))
-                        .child(kbd("Ctrl+E")),
-                )
-                .child(
-                    div()
-                        .h(28.0_f32)
-                        .px(7.0_f32)
-                        .rounded(6.0_f32)
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(4.0_f32)
-                        .hover(|style| style.bg(theme().hover))
-                        .on_click({
-                            let state = state.clone();
-                            move |_| {
-                                state
-                                    .inspector_visible
-                                    .update(|visible| *visible = !*visible)
-                            }
-                        })
-                        .child(ui_text("ⓘ", 14.0, theme().text_muted))
-                        .child(kbd("Ctrl+I")),
-                ),
-        )
-}
-
-fn vdiv() -> Div {
-    div().w(1.0_f32).h(18.0_f32).mx(4.0_f32).bg(theme().border)
-}
-
-fn icon_button(glyph: &str, tooltip: &str) -> Div {
-    div()
-        .h(26.0_f32)
-        .min_w(26.0_f32)
-        .px(6.0_f32)
-        .rounded(5.0_f32)
-        .flex()
-        .items_center()
-        .justify_center()
-        .hover(|style| style.bg(theme().surface_muted))
-        .child(ui_text(glyph, 14.0, theme().text_muted))
-        .access({
-            let tooltip = tooltip.to_owned();
-            move |access| access.label(tooltip.clone())
-        })
-}
 
 // ---------------------------------------------------------------------------
 // Sidebar
@@ -1711,13 +1538,18 @@ fn sidebar(state: &AppState) -> Div {
                 .child(ui_text("Wiki", 13.0, theme().text).font_weight(FontWeight::SEMIBOLD))
                 .child(
                     div()
+                        .w(26.0_f32)
+                        .h(26.0_f32)
+                        .rounded(7.0_f32)
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .hover(|style| style.bg(theme().surface_muted))
-                        .rounded(4.0_f32)
                         .on_click({
                             let state = state.clone();
                             move |_| state.new_page()
                         })
-                        .child(ui_text("＋", 17.0, theme().accent)),
+                        .child(ui_text("＋", 16.0, theme().accent)),
                 ),
         )
         .child(side_section("ライブラリ"))
@@ -1877,58 +1709,6 @@ fn side_section(label: &str) -> Div {
         .child(section_label(label))
 }
 
-fn nav_row(
-    glyph: &str,
-    label: &str,
-    count: Option<usize>,
-    active: bool,
-    on_click: impl Fn() + 'static,
-) -> Div {
-    let mut row = div()
-        .h(29.0_f32)
-        .px(9.0_f32)
-        .rounded(6.0_f32)
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(8.0_f32)
-        .hover(|style| style.bg(theme().surface_muted))
-        .on_click(move |_| on_click())
-        .child(ui_text(
-            glyph,
-            12.0,
-            if active {
-                theme().on_accent
-            } else {
-                theme().text_disabled
-            },
-        ))
-        .child(ui_text(
-            label,
-            13.0,
-            if active {
-                theme().on_accent
-            } else {
-                theme().text
-            },
-        ));
-    if active {
-        row = row.bg(theme().accent);
-    }
-    if let Some(count) = count {
-        row = row.child(div().flex_1()).child(ui_text(
-            count.to_string(),
-            11.0,
-            if active {
-                rgb(0xffffff)
-            } else {
-                theme().text_disabled
-            },
-        ));
-    }
-    row
-}
-
 fn page_row(state: &AppState, summary: &Summary, active: bool) -> Div {
     let glyph = if active { "◈" } else { "◇" };
     let state = state.clone();
@@ -2004,6 +1784,7 @@ fn editor_column(state: &AppState) -> Div {
                 .flex_1()
                 .min_h(0.0_f32)
                 .overflow_y_scroll()
+                .node_ref(state.article_ref)
                 .child(article_scroll(state)),
         )
 }
@@ -2046,8 +1827,12 @@ fn tabs(state: &AppState) -> Div {
             ))
             .child(
                 div()
-                    .px(2.0_f32)
-                    .rounded(3.0_f32)
+                    .w(18.0_f32)
+                    .h(18.0_f32)
+                    .rounded(4.0_f32)
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .hover(|style| style.bg(theme().surface_muted))
                     .on_click({
                         let state = state.clone();
@@ -2104,19 +1889,14 @@ fn article_scroll(state: &AppState) -> Div {
             .p(40.0_f32)
             .child(ui_text("タブがありません。", 13.0, theme().text_muted)),
     };
-    div()
-        .w_full()
-        .node_ref(state.article_ref)
-        .flex()
-        .justify_center()
-        .child(
-            div()
-                .w_full()
-                .max_w(700.0_f32)
-                .px(48.0_f32)
-                .py(44.0_f32)
-                .child(body),
-        )
+    div().w_full().flex().justify_center().child(
+        div()
+            .w_full()
+            .max_w(700.0_f32)
+            .px(48.0_f32)
+            .py(44.0_f32)
+            .child(body),
+    )
 }
 
 fn placeholder(state: &AppState, index: usize, tab: &Tab) -> Div {
@@ -2898,7 +2678,6 @@ fn outline_column(state: &AppState) -> Div {
         .border_color(theme().border)
         .flex()
         .flex_col()
-        .justify_center()
         .child(div().mb(9.0_f32).child(section_label("Outline")))
         .child(nav)
 }
@@ -3279,10 +3058,6 @@ fn link_row(state: &AppState, summary: &Summary, arrow: &str) -> Div {
         .child(ui_text(arrow, 11.0, theme().text_disabled))
 }
 
-fn divider() -> Div {
-    div().my(16.0_f32).h(1.0_f32).bg(theme().border)
-}
-
 fn inspector_info(state: &AppState) -> Div {
     let workspace = state.active_workspace();
     let editor = state.editor.get();
@@ -3534,353 +3309,6 @@ fn info_row(label: &str, value: &str) -> Div {
         .child(ui_text(value, 12.0, theme().text))
 }
 
-// ---------------------------------------------------------------------------
-// Two-hop shelf
-// ---------------------------------------------------------------------------
-
-fn shelf(state: &AppState) -> Div {
-    let pinned = state.shelf_pinned;
-    let hovered = state.shelf_hover;
-    let count_state = state.clone();
-    let body_state = state.clone();
-    div()
-        .absolute()
-        .left(236.0_f32)
-        .right(0.0_f32)
-        .bottom(0.0_f32)
-        .h(SHELF_HEIGHT)
-        .z_index(20)
-        .bg(theme().surface)
-        .border_t(1.0_f32)
-        .border_color(theme().border)
-        .shadow(BoxShadow {
-            offset_x: 0.0,
-            offset_y: -16.0,
-            blur: 40.0,
-            spread: 0.0,
-            color: rgba(0x00000057),
-            inset: false,
-        })
-        .transition(Transition::ms(240).cubic_bezier(0.2, 0.8, 0.2, 1.0))
-        .dyn_style(move |style| {
-            let open = pinned.get() || hovered.get();
-            style.translate_y(if open {
-                0.0
-            } else {
-                SHELF_HEIGHT - SHELF_HANDLE
-            })
-        })
-        .on_hover(move |over| hovered.set(over))
-        .child(
-            div()
-                .h(SHELF_HANDLE)
-                .px(20.0_f32)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(9.0_f32)
-                .on_click(move |_| pinned.update(|pinned| *pinned = !*pinned))
-                .child(
-                    ui_text("2-hop リンク", 11.0, theme().text).font_weight(FontWeight::SEMIBOLD),
-                )
-                .child(dyn_view(move || {
-                    let total = count_state
-                        .active_workspace()
-                        .map(|workspace| workspace.links.two_hop.len())
-                        .unwrap_or(0);
-                    div()
-                        .min_w(17.0_f32)
-                        .h(16.0_f32)
-                        .px(4.0_f32)
-                        .rounded(4.0_f32)
-                        .bg(theme().surface_muted)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(ui_text(total.to_string(), 9.0, theme().text_muted))
-                }))
-                .child(ui_text("すべて見る", 11.0, theme().text_muted))
-                .child(div().flex_1())
-                .child(ui_text("ホバーで表示 ·", 9.5, theme().text_disabled))
-                .child(kbd("Ctrl+Alt+L"))
-                .child(dyn_view(move || {
-                    let open = pinned.get() || hovered.get();
-                    ui_text(if open { "▾" } else { "▴" }, 11.0, theme().text_disabled)
-                })),
-        )
-        .child(
-            div()
-                .h(SHELF_HEIGHT - SHELF_HANDLE)
-                .px(20.0_f32)
-                .pt(8.0_f32)
-                .pb(14.0_f32)
-                .overflow_y_scroll()
-                .child(dyn_view(move || shelf_body(&body_state))),
-        )
-}
-
-fn shelf_body(state: &AppState) -> Div {
-    let workspace = state.active_workspace();
-    let groups = workspace.as_ref().map(ordered_groups).unwrap_or_default();
-    if groups.is_empty() {
-        return div().child(ui_text(
-            "このページから 2-hop で辿れるリンクはありません。",
-            12.0,
-            theme().text_disabled,
-        ));
-    }
-    let mut columns = div().flex().flex_col().gap(16.0_f32);
-    for chunk in groups.chunks(3) {
-        let mut row = div().flex().flex_row().gap(24.0_f32);
-        for (via, items) in chunk {
-            let mut group = div().flex_1().min_w(0.0_f32).flex().flex_col().child(
-                div()
-                    .mb(3.0_f32)
-                    .px(7.0_f32)
-                    .flex()
-                    .justify_between()
-                    .child(ui_text(
-                        format!("{} から", via.title),
-                        10.0,
-                        theme().text_muted,
-                    ))
-                    .child(ui_text(
-                        items.len().to_string(),
-                        10.0,
-                        theme().text_disabled,
-                    )),
-            );
-            for hop in items {
-                group = group.child(hop_row(state, hop, items.len()));
-            }
-            row = row.child(group);
-        }
-        columns = columns.child(row);
-    }
-    columns
-}
-
-fn hop_row(state: &AppState, hop: &TwoHop, group_count: usize) -> Div {
-    let state = state.clone();
-    let target = hop.target.clone();
-    let count = if target.refs > 0 {
-        target.refs
-    } else {
-        group_count
-    };
-    let kind_tag = target.kind_label();
-    div()
-        .rounded(6.0_f32)
-        .px(8.0_f32)
-        .py(7.0_f32)
-        .flex()
-        .flex_col()
-        .hover(|style| style.bg(theme().surface_muted))
-        .on_click(move |_| state.open_summary(&target))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(6.0_f32)
-                .child(
-                    ui_text(truncate_chars(&hop.target.title, 22), 11.5, theme().text)
-                        .font_weight(FontWeight::SEMIBOLD),
-                )
-                .child(mono_text(kind_tag, 8.5, theme().text_disabled)),
-        )
-        .child(
-            ui_text(
-                truncate_chars(&hop.target.excerpt, 78),
-                10.0,
-                theme().text_muted,
-            )
-            .mt(2.0_f32)
-            .line_height(LineHeight::Relative(1.4_f32)),
-        )
-        .child(
-            ui_text(
-                format!(
-                    "更新 {} · {} リンク · {}",
-                    hop.target.updated_label,
-                    count,
-                    hop.target.kind_label()
-                ),
-                9.0,
-                theme().text_disabled,
-            )
-            .mt(3.0_f32),
-        )
-}
-
-// ---------------------------------------------------------------------------
-// Palette (non-modal: no backdrop)
-// ---------------------------------------------------------------------------
-
-fn palette(state: &AppState) -> Show {
-    let show_state = state.clone();
-    show(move || show_state.palette.get().is_some(), {
-        let state = state.clone();
-        move || palette_card(&state)
-    })
-}
-
-fn palette_card(state: &AppState) -> Div {
-    let input = node_ref();
-    request_frame(move |_| input.focus());
-    let mode = state.palette.get().unwrap_or(PaletteMode::Search);
-    let header_state = state.clone();
-    let results_state = state.clone();
-    div()
-        .absolute()
-        .top(58.0_f32)
-        .left(320.0_f32)
-        .w(620.0_f32)
-        .z_index(40)
-        .rounded(10.0_f32)
-        .bg(theme().surface)
-        .border(1.0_f32)
-        .border_color(theme().border)
-        .shadow_lg()
-        .p(8.0_f32)
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(7.0_f32)
-                .px(8.0_f32)
-                .child(ui_text(
-                    match mode {
-                        PaletteMode::Search => "◎",
-                        PaletteMode::Rename | PaletteMode::Tags => "✎",
-                        PaletteMode::QuickOpen => "›",
-                    },
-                    14.0,
-                    theme().text_muted,
-                ))
-                .child(
-                    text_input()
-                        .value(state.query)
-                        .placeholder(match mode {
-                            PaletteMode::Search => "検索 — タイトル・本文・タグ",
-                            PaletteMode::Rename => "新しいタイトル",
-                            PaletteMode::Tags => "タグをカンマ区切りで入力",
-                            PaletteMode::QuickOpen => "クイックオープン — ページ名",
-                        })
-                        .font_family(sans())
-                        .text_size(12.5_f32)
-                        .text_color(theme().text)
-                        .w_full()
-                        .h(28.0_f32)
-                        .px(6.0_f32)
-                        .node_ref(input)
-                        .on_input({
-                            let state = state.clone();
-                            move |text| state.on_query(text)
-                        })
-                        .on_submit({
-                            let state = state.clone();
-                            move |_| {
-                                let query = state.query.get_untracked();
-                                match state.palette.get_untracked() {
-                                    Some(PaletteMode::Rename) => state.rename_active(&query),
-                                    Some(PaletteMode::Tags) => state.set_tags(&query),
-                                    _ => {
-                                        if let Some(first) =
-                                            state.results.get_untracked().into_iter().next()
-                                        {
-                                            state.open_summary(&first);
-                                        }
-                                    }
-                                }
-                            }
-                        })
-                        .on_key_down({
-                            let state = state.clone();
-                            move |event| {
-                                if event.key == Key::Named(NamedKey::Escape) {
-                                    event.prevent_default();
-                                    state.close_palette();
-                                }
-                            }
-                        }),
-                )
-                .child(kbd("Esc")),
-        )
-        .child(
-            div()
-                .px(10.0_f32)
-                .pt(6.0_f32)
-                .pb(4.0_f32)
-                .child(dyn_view(move || {
-                    let mode = header_state.palette.get().unwrap_or(PaletteMode::Search);
-                    let label = match mode {
-                        PaletteMode::Search => "検索",
-                        PaletteMode::Rename => "タイトルを変更",
-                        PaletteMode::Tags => "タグを変更",
-                        PaletteMode::QuickOpen => "クイックオープン",
-                    };
-                    ui_text(label, 9.5, theme().text_disabled)
-                })),
-        )
-        .child(dyn_view(move || {
-            let results = results_state.results.get();
-            let error = results_state.palette_error.get();
-            let mut list = div().flex().flex_col();
-            if let Some(error) = error {
-                list = list.child(ui_text(error, 10.5, rgb(0xe0af68)).px(10.0_f32).py(6.0_f32));
-            }
-            if results.is_empty() {
-                list = list.child(
-                    ui_text("一致する項目はありません。", 12.0, theme().text_disabled)
-                        .px(10.0_f32)
-                        .py(8.0_f32),
-                );
-            }
-            for summary in results.iter().take(20) {
-                list = list.child(
-                    div()
-                        .px(10.0_f32)
-                        .py(7.0_f32)
-                        .rounded(6.0_f32)
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(9.0_f32)
-                        .hover(|style| style.bg(theme().surface_muted))
-                        .on_click({
-                            let state = results_state.clone();
-                            let summary = summary.clone();
-                            move |_| state.open_summary(&summary)
-                        })
-                        .child(
-                            ui_text(truncate_chars(&summary.title, 32), 12.5, theme().text)
-                                .flex_1(),
-                        )
-                        .child(mono_text(summary.kind_label(), 9.0, theme().text_disabled))
-                        .child(ui_text(&summary.updated_label, 10.0, theme().text_disabled)),
-                );
-            }
-            list
-        }))
-        .child(
-            div()
-                .px(10.0_f32)
-                .pt(5.0_f32)
-                .flex()
-                .justify_between()
-                .child(ui_text("Enter 開く", 9.0, theme().text_disabled))
-                .child(ui_text("Esc 閉じる", 9.0, theme().text_disabled))
-                .child(ui_text(
-                    "Ctrl+K 検索 · Ctrl+P クイックオープン",
-                    9.0,
-                    theme().text_disabled,
-                )),
-        )
-}
-
-// ---------------------------------------------------------------------------
 // Status bar
 // ---------------------------------------------------------------------------
 
@@ -3962,14 +3390,9 @@ fn extract_fences(body: &str) -> Vec<(String, String)> {
     }
     blocks
 }
-
 fn excerpt(body: &str) -> String {
     excerpt_of(body)
 }
-
-// ---------------------------------------------------------------------------
-// Built-in fixture (only used when the server is unavailable)
-// ---------------------------------------------------------------------------
 
 fn fixture_summaries() -> Vec<Summary> {
     let mut items = Vec::new();
@@ -4590,10 +4013,12 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mut snapshot_path = None;
     let mut page = None;
+    let mut search = false;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--snapshot" => snapshot_path = Some(args.next().expect("--snapshot requires a path")),
             "--page" => page = Some(args.next().expect("--page requires a title")),
+            "--search" => search = true,
             other => panic!("unknown argument: {other}"),
         }
     }
@@ -4611,6 +4036,9 @@ fn main() {
         {
             state.open_summary(&summary);
         }
+    }
+    if search {
+        state.open_palette(PaletteMode::Search);
     }
 
     if let Some(out) = snapshot_path {

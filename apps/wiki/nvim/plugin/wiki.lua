@@ -43,6 +43,8 @@ local function set_metadata(buf, content)
   vim.api.nvim_buf_set_var(buf, "wiki_rev", content.rev)
   vim.api.nvim_buf_set_var(buf, "wiki_type", content.type)
   vim.api.nvim_buf_set_var(buf, "wiki_title", content.title)
+  vim.o.title = true
+  vim.o.titlestring = "Harmion Wiki — " .. content.title
   if content.type == "snippet" and content.language then
     vim.bo[buf].filetype = content.language
   else

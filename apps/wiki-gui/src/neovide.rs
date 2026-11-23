@@ -91,24 +91,25 @@ impl Manager {
     }
 
     /// Focus the Neovide window that belongs to this Wiki session.
-    pub fn focus_window(&self, title: &str) -> Result<(), String> {
+    pub fn focus_window(&self, _title: &str) -> Result<(), String> {
         let windows = niri_windows()?;
-        let wanted = windows.iter().find_map(|window| {
-            let app = window
-                .get("app_id")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let window_title = window
-                .get("title")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            let is_editor = app.contains("neovide") || app.contains("neovim");
-            let mentions_page = !title.is_empty() && window_title.contains(title);
-            (is_editor || mentions_page)
-                .then(|| window.get("id").and_then(|value| value.as_i64()))
-                .flatten()
-        });
+        let wanted = windows
+            .iter()
+            .find(|window| {
+                window
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|title| title.contains("Harmion Wiki"))
+            })
+            .or_else(|| {
+                windows.iter().find(|window| {
+                    window
+                        .get("app_id")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|app| app.to_ascii_lowercase().contains("neovide"))
+                })
+            })
+            .and_then(|window| window.get("id").and_then(|value| value.as_i64()));
         let Some(id) = wanted else {
             return Err("niri: Neovide のウィンドウが見つかりません".to_owned());
         };
@@ -144,16 +145,29 @@ impl Manager {
         ))
     }
 
+    fn has_wiki_window(&self) -> bool {
+        niri_windows().ok().is_some_and(|windows| {
+            windows.iter().any(|window| {
+                window
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|title| title.contains("Harmion Wiki"))
+            })
+        })
+    }
+
     /// Attach a Neovide window to a server that is already listening but has no window.
     fn ensure_window(&self) -> Result<(), String> {
-        if let Ok(windows) = niri_windows()
-            && windows.iter().any(|window| {
-                window
-                    .get("app_id")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|app| app.to_ascii_lowercase().contains("neovide"))
-            })
-        {
+        if self.launched {
+            let deadline = std::time::Instant::now() + LAUNCH_TIMEOUT;
+            while std::time::Instant::now() < deadline {
+                if has_editor_window() {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+        if self.has_wiki_window() || has_editor_window() {
             return Ok(());
         }
         // No window yet: attach one to the server. `--fork` keeps the GUI responsive.
@@ -165,7 +179,7 @@ impl Manager {
             Ok(_child) => {
                 let deadline = std::time::Instant::now() + LAUNCH_TIMEOUT;
                 while std::time::Instant::now() < deadline {
-                    if self.focus_window("").is_ok() {
+                    if self.has_wiki_window() {
                         return Ok(());
                     }
                     thread::sleep(Duration::from_millis(100));
@@ -392,6 +406,17 @@ fn nix_uid() -> u32 {
                 .and_then(|uid| uid.parse().ok())
         })
         .unwrap_or(1000)
+}
+
+fn has_editor_window() -> bool {
+    niri_windows().ok().is_some_and(|windows| {
+        windows.iter().any(|window| {
+            window
+                .get("app_id")
+                .and_then(|value| value.as_str())
+                .is_some_and(|app| app.to_ascii_lowercase().contains("neovide"))
+        })
+    })
 }
 
 fn niri_windows() -> Result<Vec<serde_json::Value>, String> {
