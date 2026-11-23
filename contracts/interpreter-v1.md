@@ -267,8 +267,8 @@ OAuth originでは、access tokenで同じticketを再発行できる。
 ```
 
 - `version`は1。`name`は1〜128バイト。`redirect_uri`はIPリテラルのloopback HTTP。`web_origin`を指定する場合は`redirect_uri`と同じoriginの`http://127.0.0.1:PORT`または`http://[::1]:PORT`で、パス・クエリを持たない。
-- `grants`に`manage_apps`/`manage_nodes`は指定できない。`call`/`provide`はRead/Writeを含意しない。`provide`をtrueにする場合は`provide_names`を1〜32個列挙する。`provider`を指定する場合は名前が`provide_names`に含まれること。
-- `provider_replace`はアプリからの置換希望であり、所有者の承認時に明示的な`replace`がなければ置換しない。
+- `grants`に`manage_apps`/`manage_nodes`は指定できない。`call`/`provide`はRead/Writeを含意しない。`provide`をtrueにする場合は`provide_names`を1〜32個列挙する。`providers`は最大8件で、各名前が`provide_names`に含まれること。名前の重複は拒否する。旧クライアント用の単数`provider`も受け付けるが、`providers`とは同時に指定できない。
+- `provider_replace`はアプリからの置換希望であり、`providers`の全名前に適用される。所有者の承認時に明示的な`replace`がなければ置換しない。
 - `state`は1〜512バイト、制御文字なし。`challenge`は32バイトのS256。本文は192 KiB以下。未知フィールドは拒否する。
 - 応答は`connection_id`、`request_secret`（アプリだけが保持）、`expires_at`、任意で`verification_url`。要求は5分で失効し、同時に32件まで。`request_secret`はURL・ログへ出さない（`verification_url`はフラグメントに含める）。
 - 既存`client_id`を指定した場合、登録済みの名前・redirectと一致しなければならない。未指定の場合、承認時にOAuthクライアントを作成する。
@@ -284,9 +284,9 @@ OAuth originでは、access tokenで同じticketを再発行できる。
 
 ### 6.3 状態と完了
 
-- `POST /app/v1/connect-status`（App APIでは資格情報不要）またはOAuth origin`POST /connect/status`。本文は`{"connection_id":"hex","request_secret":"hex"}`。応答は`connection_id`、`status`（`pending`/`approved`/`denied`/`completed`/`expired`）、`name`、`web_origin`、`provider_name`、`expires_at`。secret不一致は404。
+- `POST /app/v1/connect-status`（App APIでは資格情報不要）またはOAuth origin`POST /connect/status`。本文は`{"connection_id":"hex","request_secret":"hex"}`。応答は`connection_id`、`status`（`pending`/`approved`/`denied`/`completed`/`expired`）、`name`、`web_origin`、`provider_name`（先頭）、`provider_names`（全件）、`expires_at`。secret不一致は404。
 - `POST /app/v1/connect-complete`またはOAuth origin`POST /connect/complete`。本文は`{"connection_id":"hex","request_secret":"hex","code_verifier":"PKCE verifier"}`。
-  - 承認済みでsecretとPKCEが一致した場合だけ、access token（10分）、refresh token（30日系列）、scope、`client_id`、任意のProvider `ticket`/`websocket_url`を返す。完了は単回で、応答を失った場合は要求を作り直す。
+  - 承認済みでsecretとPKCEが一致した場合だけ、access token（10分）、refresh token（30日系列）、scope、`client_id`、Providerごとの`provider_id`・`name`・任意の`ticket`/`websocket_url`を返す。`providers`が全件で、単数`provider`は先頭の互換エイリアス。完了は単回で、応答を失った場合は要求を作り直す。
   - 未承認は409 `connection_pending`、拒否は403 `connection_denied`、期限切れは410 `connection_expired`、完了済みは409 `connection_completed`。secret不一致は404。
   - 応答のscopeは承認時のgrantを表す。App APIの認証時はDBの現在grantを再検査するため、以後の縮小・失効は既存access tokenにも及ぶ。
   - 同じ`connection_id`・request secret・PKCE verifierの完了要求は、成功後60秒間プロセス内キャッシュから同じ応答を返す。ノード再起動後はキャッシュが消えるため409 `connection_completed`になる。
