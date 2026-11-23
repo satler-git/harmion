@@ -1361,8 +1361,6 @@ fn layout(state: &AppState) -> Div {
     drain_updates(state);
     let root = state.root;
     let key_state = state.clone();
-    let root_ref = root;
-    request_frame(move |_| root_ref.focus());
     div()
         .w_full()
         .h_full()
