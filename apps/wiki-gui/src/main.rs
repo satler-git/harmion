@@ -387,6 +387,7 @@ struct AppState {
     outline_active: Signal<usize>,
     delete_armed: Signal<bool>,
     article_ref: NodeRef,
+    heading_refs: Rc<RefCell<Vec<NodeRef>>>,
     root: NodeRef,
     manager: Rc<RefCell<neovide::Manager>>,
 }
@@ -933,6 +934,14 @@ impl AppState {
         self.outline_active.set(0);
     }
 
+    fn scroll_to_outline(&self, index: usize, line: usize) {
+        if let Some(anchor) = self.heading_refs.borrow().get(index).copied() {
+            anchor.scroll_into_view();
+            return;
+        }
+        self.scroll_to_line(line);
+    }
+
     fn scroll_to_line(&self, line: usize) {
         let y = (line.saturating_sub(1) as f32 * 27.0) as i32;
         let article = self.article_ref;
@@ -1215,6 +1224,7 @@ fn boot(snapshot: bool) -> AppState {
         outline_active: signal(0),
         delete_armed: signal(false),
         article_ref: node_ref(),
+        heading_refs: Rc::new(RefCell::new(Vec::new())),
         root,
         manager,
     };
@@ -2093,7 +2103,12 @@ fn article(state: &AppState, workspace: &Workspace) -> Div {
                 )),
         );
 
-    body = body.child(render_markdown_body(state, workspace));
+    state.heading_refs.borrow_mut().clear();
+    body = body.child(render_markdown_body(
+        state,
+        workspace,
+        Some(&state.heading_refs),
+    ));
 
     body
 }
@@ -2112,7 +2127,11 @@ enum MdBlock {
     Interpreter(String, String),
 }
 
-fn render_markdown_body(state: &AppState, workspace: &Workspace) -> Div {
+fn render_markdown_body(
+    state: &AppState,
+    workspace: &Workspace,
+    collect: Option<&RefCell<Vec<NodeRef>>>,
+) -> Div {
     let page = &workspace.page;
     let mut out = div().flex().flex_col();
     if page.content_type == "snippet" {
@@ -2133,11 +2152,16 @@ fn render_markdown_body(state: &AppState, workspace: &Workspace) -> Div {
                     4 => 16.0,
                     _ => 15.0,
                 };
-                out = out.child(
-                    ui_text(text, size, theme().text)
-                        .mt(if level <= 2 { 26.0_f32 } else { 20.0_f32 })
-                        .font_weight(FontWeight::SEMIBOLD),
-                );
+                let heading = ui_text(text, size, theme().text)
+                    .mt(if level <= 2 { 26.0_f32 } else { 20.0_f32 })
+                    .font_weight(FontWeight::SEMIBOLD);
+                if level >= 2 && let Some(collect) = collect {
+                    let anchor = node_ref();
+                    collect.borrow_mut().push(anchor);
+                    out = out.child(div().node_ref(anchor).child(heading));
+                } else {
+                    out = out.child(heading);
+                }
             }
             MdBlock::Paragraph(text) => {
                 out = out.child(
@@ -2271,7 +2295,7 @@ fn render_markdown_body(state: &AppState, workspace: &Workspace) -> Div {
                             .bg(theme().surface_muted)
                             .border(1.0_f32)
                             .border_color(theme().border)
-                            .child(render_markdown_body(state, &nested)),
+                            .child(render_markdown_body(state, &nested, None)),
                     );
                 } else {
                     out = out.child(
@@ -2731,7 +2755,7 @@ fn outline_column(state: &AppState) -> Div {
                     let index = index;
                     move |_| {
                         state.outline_active.set(index);
-                        state.scroll_to_line(line);
+                        state.scroll_to_outline(index, line);
                     }
                 })
                 .child(ui_text(
