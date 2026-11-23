@@ -19,10 +19,10 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
-use std::sync::OnceLock;
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -1069,37 +1069,39 @@ fn load_summaries() -> Result<Vec<Summary>, String> {
 fn start_polling(state: &AppState, alive: Arc<AtomicBool>, updates: mpsc::Sender<PollUpdate>) {
     let _ = state;
     let mut since = 0u64;
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_millis(250));
-        if !alive.load(Ordering::SeqCst) {
-            break;
-        }
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let watch = rpc("watch", json!({ "since": since, "timeout_ms": 20_000 }));
-            match watch {
-                Ok(value) => {
-                    if let Some(generation) = value.get("generation").and_then(Value::as_u64) {
-                        since = generation;
-                    }
-                    if let Ok(items) = serde_json::from_value::<Vec<Summary>>(
-                        value.get("items").cloned().unwrap_or(Value::Null),
-                    ) && updates.send(PollUpdate::Summaries(items)).is_ok()
-                    {
-                        request_frame(|_| {});
-                    }
-                }
-                Err(_) => {
-                    if let Ok(items) = load_summaries() {
-                        since = 0;
-                        if updates.send(PollUpdate::Reconnected(items)).is_ok() {
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_millis(250));
+            if !alive.load(Ordering::SeqCst) {
+                break;
+            }
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let watch = rpc("watch", json!({ "since": since, "timeout_ms": 20_000 }));
+                match watch {
+                    Ok(value) => {
+                        if let Some(generation) = value.get("generation").and_then(Value::as_u64) {
+                            since = generation;
+                        }
+                        if let Ok(items) = serde_json::from_value::<Vec<Summary>>(
+                            value.get("items").cloned().unwrap_or(Value::Null),
+                        ) && updates.send(PollUpdate::Summaries(items)).is_ok()
+                        {
                             request_frame(|_| {});
                         }
                     }
+                    Err(_) => {
+                        if let Ok(items) = load_summaries() {
+                            since = 0;
+                            if updates.send(PollUpdate::Reconnected(items)).is_ok() {
+                                request_frame(|_| {});
+                            }
+                        }
+                    }
                 }
+            }));
+            if outcome.is_err() || updates.send(PollUpdate::Ping).is_err() {
+                break;
             }
-        }));
-        if outcome.is_err() || updates.send(PollUpdate::Ping).is_err() {
-            break;
         }
     });
 }
@@ -1202,7 +1204,7 @@ fn boot(snapshot: bool) -> AppState {
         state.push_history(Some(id));
     }
     if !snapshot {
-        start_polling(&state, poll_alive, poll_tx);
+        start_polling(poll_alive, poll_tx);
     }
     state
 }
