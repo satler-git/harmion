@@ -760,6 +760,24 @@ impl State {
         Ok(content)
     }
 
+    pub fn delete_with_rev(&mut self, id: &str, rev: Option<u64>) -> RpcResult<Content> {
+        if let Some(rev) = rev {
+            let content = self.open(id)?;
+            if content.rev != rev {
+                return Err(RpcError::conflict("revision conflict").with_data(json!({
+                    "type": "revision_conflict",
+                    "id": id,
+                    "field": {"type": "deletion"},
+                    "provided_rev": rev,
+                    "current_rev": content.rev,
+                    "current_updated_label": content.updated_label,
+                    "resolution": "reload the Content before deleting",
+                })));
+            }
+        }
+        self.delete(id)
+    }
+
     pub fn conflicts(&self, id: &str) -> RpcResult<Value> {
         let content = self
             .contents

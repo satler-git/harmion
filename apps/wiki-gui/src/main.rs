@@ -855,12 +855,12 @@ impl AppState {
         }
     }
 
-    fn delete_content(&self, id: &str) {
+    fn delete_content(&self, id: &str, rev: u64) {
         if !matches!(self.source.get_untracked(), Source::Server) {
             self.set_editor_error("削除: wiki-server に接続していません".to_owned());
             return;
         }
-        if let Err(error) = rpc("delete", json!({ "id": id })) {
+        if let Err(error) = rpc("delete", json!({ "id": id, "rev": rev })) {
             self.set_editor_error(format!("削除できません: {error}"));
             return;
         }
@@ -3420,6 +3420,7 @@ fn inspector_info(state: &AppState) -> Div {
     }
     if let Some(workspace) = state.active_workspace() {
         let id = workspace.page.id.clone();
+        let rev = workspace.page.rev;
         let armed = state.delete_armed.get();
         content = content.child(divider()).child(
             div()
@@ -3479,7 +3480,7 @@ fn inspector_info(state: &AppState) -> Div {
                     let state = state.clone();
                     move |_| {
                         if state.delete_armed.get_untracked() {
-                            state.delete_content(&id);
+                            state.delete_content(&id, rev);
                         } else {
                             state.delete_armed.set(true);
                         }

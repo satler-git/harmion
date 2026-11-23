@@ -220,6 +220,8 @@ enum Command {
     },
     Delete {
         id: String,
+        #[arg(long)]
+        rev: Option<u64>,
         #[arg(long, default_value = SOCKET_DEFAULT)]
         socket: PathBuf,
     },
@@ -357,7 +359,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "update_meta",
             json!({ "id": id, "rev": rev, "title": title, "tags": tags, "aliases": aliases }),
         ),
-        Command::Delete { id, socket } => print_call(&socket, "delete", json!({ "id": id })),
+        Command::Delete { id, rev, socket } => print_call(
+            &socket,
+            "delete",
+            json!({ "id": id, "rev": rev }),
+        ),
     }
 }
 
@@ -849,8 +855,9 @@ fn dispatch_result(state: &Arc<Mutex<State>>, request: &Request) -> RpcResult<Va
         }
         "delete" => {
             let id = required_str(params, "id")?;
+            let rev = optional_u64(params, "rev")?;
             let mut state = state.lock().expect("state lock");
-            let content = state.delete(&id)?;
+            let content = state.delete_with_rev(&id, rev)?;
             Ok(json!({ "deleted": true, "id": id, "content": content }))
         }
         "transclude" => {

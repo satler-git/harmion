@@ -114,6 +114,15 @@ local function resolve_id(value)
   error("WikiOpen: no Content matches " .. value)
 end
 
+local function record_conflict(buf, id)
+  local ok, current = pcall(run, { "open", id })
+  if not ok then
+    return
+  end
+  vim.api.nvim_buf_set_var(buf, "wiki_conflict_body", current.body)
+  vim.notify("wiki: conflict — :WikiConflict で現在の本文と比較できます", vim.log.levels.ERROR)
+end
+
 local function open(id_or_title)
   local id = resolve_id(id_or_title)
   local existing = vim.fn.bufnr("wiki://" .. id)
@@ -152,6 +161,7 @@ local function open(id_or_title)
       local ok, response = pcall(run, args, body)
       if not ok then
         vim.notify("wiki: save failed (conflict?): " .. tostring(response), vim.log.levels.ERROR)
+        record_conflict(buf, content.id)
         return
       end
       local saved = response.page or response
@@ -283,7 +293,7 @@ end, { nargs = 1 })
 vim.api.nvim_create_user_command("WikiDelete", function(args)
   local id = current_id()
   if args.bang or vim.fn.confirm("Delete " .. id .. "?", "&Yes\n&No", 2) == 1 then
-    run({ "delete", id })
+    run({ "delete", id, "--rev", tostring(vim.b.wiki_rev) })
     vim.cmd("bwipeout!")
   end
 end, { bang = true })
@@ -295,6 +305,20 @@ end, { nargs = 1 })
 vim.api.nvim_create_user_command("WikiWorkspace", function(args)
   workspace(args.args)
 end, { nargs = 1 })
+vim.api.nvim_create_user_command("WikiConflict", function()
+  local id = current_id()
+  local current = run({ "open", id })
+  local local_body = lines_to_body(0)
+  local remote_path = vim.fn.tempname()
+  local local_path = vim.fn.tempname()
+  vim.fn.writefile(vim.split(current.body, "\n", { plain = true }), remote_path)
+  vim.fn.writefile(vim.split(local_body, "\n", { plain = true }), local_path)
+  vim.cmd("tabnew " .. vim.fn.fnameescape(remote_path))
+  vim.cmd("vert diffsplit " .. vim.fn.fnameescape(local_path))
+  vim.cmd("windo diffthis")
+  vim.cmd("windo setlocal filetype=markdown")
+end, {})
+
 vim.api.nvim_create_user_command("WikiLspStart", lsp_start, {})
 vim.api.nvim_create_user_command("WikiSave", function()
   vim.cmd("write")
@@ -332,6 +356,7 @@ vim.api.nvim_create_autocmd("BufReadCmd", {
         local saved_ok, response = pcall(run, argv, body)
         if not saved_ok then
           vim.notify("wiki: save failed: " .. tostring(response), vim.log.levels.ERROR)
+          record_conflict(args.buf, content.id)
           return
         end
         local saved = response.page or response

@@ -103,3 +103,11 @@ WebSocket subscription path is still pending.
 2. Add subscription catch-up and the offline cache.
 3. Add the streaming interpreter contract and provider registration.
 4. Fill the app gaps above, starting with transclusion rendering and conflicts.
+
+## Conflict and delete flow
+
+`save`, `update_meta` and `delete` are revision-checked. A stale save keeps the
+buffer dirty and records the current server body; `:WikiConflict` opens a
+side-by-side diff for manual merge. The GUI delete action requires a second
+click and sends the displayed revision. This is a 2-way manual flow, not a
+3-way merge against a common ancestor.
