@@ -4401,16 +4401,30 @@ fn fixture_recent() -> Vec<Summary> {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let snapshot_path = if args.next().as_deref() == Some("--snapshot") {
-        Some(args.next().expect("--snapshot requires a path"))
-    } else {
-        None
-    };
+    let mut snapshot_path = None;
+    let mut page = None;
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--snapshot" => snapshot_path = Some(args.next().expect("--snapshot requires a path")),
+            "--page" => page = Some(args.next().expect("--page requires a title")),
+            other => panic!("unknown argument: {other}"),
+        }
+    }
     let snapshot = snapshot_path.is_some();
 
     let _ = fonts();
     set_theme(app_theme());
     let state = boot(snapshot);
+    if let Some(title) = page {
+        if let Some(summary) = state
+            .summaries
+            .get_untracked()
+            .into_iter()
+            .find(|summary| summary.title == title)
+        {
+            state.open_summary(&summary);
+        }
+    }
 
     if let Some(out) = snapshot_path {
         anti_webui::app::headless::render_png(out, WINDOW_WIDTH, WINDOW_HEIGHT, 1.0, move || {
