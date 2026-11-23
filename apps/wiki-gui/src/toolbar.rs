@@ -92,9 +92,9 @@ pub(super) fn toolbar(state: &AppState) -> Div {
                 )
                 .child(
                     div()
-                        .h(28.0_f32)
+                        .h(30.0_f32)
                         .px(9.0_f32)
-                        .rounded(6.0_f32)
+                        .rounded(7.0_f32)
                         .bg(theme().surface_muted)
                         .flex()
                         .flex_row()
@@ -116,9 +116,9 @@ pub(super) fn toolbar(state: &AppState) -> Div {
                 )
                 .child(
                     div()
-                        .h(28.0_f32)
+                        .h(30.0_f32)
                         .px(7.0_f32)
-                        .rounded(6.0_f32)
+                        .rounded(7.0_f32)
                         .flex()
                         .flex_row()
                         .items_center()
