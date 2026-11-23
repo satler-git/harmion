@@ -214,8 +214,8 @@ Rust SDKは`Client::interpreter_list`・`interpreter_describe`・`interpreter_re
 
 アプリの初回接続とProvider登録を、所有者の1回の承認にまとめる。詳細なJSONとエラーは[Interpreter v1 §6](../contracts/interpreter-v1.md#6-統合接続)に定める。nativeのApp APIでは`connect-start`・`connect-status`・`connect-complete`を資格情報なしで呼べる。要求secretが状態と完了を認可する。`connect-list`・`connect-approve`は`manage_apps`を必要とする管理操作。
 
-1. アプリが`connect-start`へアプリ名、loopback callback、任意の`web_origin`、PKCE challenge、state、grant、任意のProvider manifestを送る。応答の`connection_id`と`request_secret`を保持する。OAuth originが有効なら`verification_url`も返る。
-2. 所有者は管理UIの「接続」画面で内容を確認し、承認・拒否する。承認はOAuthクライアント作成、grant確定、Provider登録・承認を1つのDB transactionで行う。同名Providerの置換は所有者が明示的に選ぶ。
+1. アプリが`connect-start`へアプリ名、loopback callback、任意の`web_origin`、PKCE challenge、state、grant、任意のProvider manifest（`providers`最大8件）を送る。応答の`connection_id`と`request_secret`を保持する。OAuth originが有効なら`verification_url`も返る。
+2. 所有者は管理UIの「接続」画面で内容を確認し、承認・拒否する。承認はOAuthクライアント作成、grant確定、Provider登録・承認を1つのDB transactionで行う。各Provider名の置換は所有者が明示的に選ぶ。1要求で全manifestを同じtransactionで登録する。
 3. アプリは`connect-status`をポーリングするか、Webアプリは`verification_url`をポップアップで開く。ヘルパーページは承認を`window.opener.postMessage`で通知するが、secretやトークンは渡さない。
 4. アプリは`connect-complete`へsecretとPKCE verifierを送り、access token・refresh token・Provider ticketを受け取る。同じsecretとverifierの再送は60秒間同じ応答を返す（プロセス内キャッシュ）。60秒経過後やノード再起動後は要求を作り直す。Provider ticketだけを失った場合は、OAuth originの`/connect/ticket`へaccess tokenを提示して再発行できる。
 
