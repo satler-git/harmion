@@ -37,7 +37,7 @@ use harmion_client::{Error as ClientError, OAuthTokenClient, ProviderClient, Pro
 use serde_json::{Value, json};
 use tokio::time::sleep;
 
-use crate::auth::{self, Credentials};
+use crate::auth::{self, Credentials, ProviderBinding};
 use crate::error::RpcError;
 use crate::provider::{self, NAMES, ProviderOutput};
 use crate::store::State;
@@ -119,15 +119,29 @@ pub fn registration(name: &str) -> Result<ProviderRegistration, String> {
 /// Resolve the connect-time provider choice. Registration requires a `provide`
 /// grant; `--no-provide` therefore also suppresses the manifest, while
 /// `--no-provider` only skips the manifest and keeps the requested names.
+pub fn registrations_for_connect(
+    provide: bool,
+    no_provider: bool,
+    provider_name: Option<&str>,
+) -> Result<Vec<ProviderRegistration>, String> {
+    if !provide || no_provider {
+        return Ok(Vec::new());
+    }
+    let names: Vec<&str> = match provider_name {
+        Some(name) => vec![name],
+        None => NAMES.to_vec(),
+    };
+    names.into_iter().map(registration).collect()
+}
+
 pub fn registration_for_connect(
     provide: bool,
     no_provider: bool,
     provider_name: Option<&str>,
 ) -> Result<Option<ProviderRegistration>, String> {
-    if !provide || no_provider {
-        return Ok(None);
-    }
-    registration(provider_name.unwrap_or(DEFAULT_PROVIDER_NAME)).map(Some)
+    Ok(registrations_for_connect(provide, no_provider, provider_name)?
+        .into_iter()
+        .next())
 }
 
 /// The grant names to request. All three built-in names are requested when the
@@ -155,8 +169,49 @@ pub fn requested_provide_names(
     Ok(names)
 }
 
-/// Extract the persisted `provider_id` from a `connect-complete` response and
-/// verify the node registered the expected name. No token is touched here.
+/// Extract all persisted Provider bindings from a `connect-complete` response
+/// and verify the node returned the requested names. No token is touched here.
+pub fn completion_providers(
+    completion: &Value,
+    expected_names: &[String],
+) -> Result<Vec<ProviderBinding>, String> {
+    let entries = completion
+        .get("providers")
+        .and_then(Value::as_array)
+        .cloned()
+        .or_else(|| {
+            completion
+                .get("provider")
+                .filter(|value| !value.is_null())
+                .map(|value| vec![value.clone()])
+        })
+        .unwrap_or_default();
+    let mut bindings = Vec::new();
+    for entry in entries {
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("connect-complete returned a provider without name")?
+            .to_owned();
+        let id = entry
+            .get("provider_id")
+            .and_then(Value::as_str)
+            .ok_or("connect-complete returned a provider without provider_id")?;
+        protocol::unhex::<32>(id)
+            .map_err(|_| "connect-complete returned an invalid provider_id".to_owned())?;
+        if !expected_names.is_empty() && !expected_names.iter().any(|expected| expected == &name) {
+            return Err(format!(
+                "node registered provider {name:?}, expected one of {expected_names:?}"
+            ));
+        }
+        bindings.push(ProviderBinding {
+            name,
+            provider_id: id.to_owned(),
+        });
+    }
+    Ok(bindings)
+}
+
 pub fn completion_provider_id(
     completion: &Value,
     expected_name: Option<&str>,
@@ -233,56 +288,76 @@ pub fn reconnect_delay(attempt: u32) -> Duration {
 /// Load the persisted provider registration and start the attach loop on its own
 /// thread. A missing credential provider ID is not fatal for `serve`: the local
 /// JSON-RPC endpoint still works, and the reason is printed for the operator.
-pub fn spawn(dir: PathBuf, state: Arc<Mutex<State>>) -> Option<thread::JoinHandle<()>> {
+pub fn spawn(dir: PathBuf, state: Arc<Mutex<State>>) -> Vec<thread::JoinHandle<()>> {
     let credentials = match Credentials::load(&dir) {
         Ok(credentials) => credentials,
         Err(error) => {
             eprintln!("provider: cannot load node credentials: {error}");
-            return None;
+            return Vec::new();
         }
     };
-    let Some(provider_id) = credentials.provider_id else {
+    let bindings = credentials.provider_bindings();
+    if bindings.is_empty() {
         eprintln!(
             "provider: no Provider is registered in {}; run `wiki-server connect --node {}` \
-             (registration is enabled by default) to attach one",
+             (registration is enabled by default) to attach providers",
             dir.join(auth::CREDENTIALS_FILE).display(),
             dir.display()
         );
-        return None;
-    };
+        return Vec::new();
+    }
     let info = match auth::connection_info(&dir) {
         Ok(info) => info,
         Err(error) => {
             eprintln!("provider: cannot read the node connection: {error}");
-            return None;
+            return Vec::new();
         }
     };
-    eprintln!(
-        "provider: starting attach loop for provider {}",
-        protocol::hex(&provider_id.0)
-    );
-    Some(thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                eprintln!("provider: cannot build the attach runtime: {error}");
-                return;
+    let mut handles = Vec::new();
+    for binding in bindings {
+        let provider_id = match protocol::unhex::<32>(&binding.provider_id) {
+            Ok(bytes) => ProviderId(bytes),
+            Err(_) => {
+                eprintln!(
+                    "provider: credentials contain an invalid provider_id for {}",
+                    binding.name
+                );
+                continue;
             }
         };
-        runtime.block_on(
-            ProviderLoop {
-                dir,
-                info,
-                provider_id,
-                credentials,
-                state,
-            }
-            .run(),
+        eprintln!(
+            "provider: starting attach loop for {} ({})",
+            binding.name,
+            protocol::hex(&provider_id.0)
         );
-    }))
+        let credentials = credentials.clone();
+        let info = info.clone();
+        let dir = dir.clone();
+        let state = Arc::clone(&state);
+        handles.push(thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("provider: cannot build the attach runtime: {error}");
+                    return;
+                }
+            };
+            runtime.block_on(
+                ProviderLoop {
+                    dir,
+                    info,
+                    provider_id,
+                    credentials,
+                    state,
+                }
+                .run(),
+            );
+        }));
+    }
+    handles
 }
 
 struct ProviderLoop {
@@ -516,6 +591,43 @@ mod tests {
         );
         assert!(completion_provider_id(&json!({}), None).unwrap().is_none());
         assert!(completion_provider_id(&json!({"provider": {}}), None).is_err());
+    }
+
+    #[test]
+    fn connect_defaults_to_all_three_manifests() {
+        let names = registrations_for_connect(true, false, None)
+            .unwrap()
+            .into_iter()
+            .map(|manifest| manifest.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, NAMES.map(str::to_owned).to_vec());
+        assert_eq!(
+            registrations_for_connect(true, false, Some("wiki/transclude"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(registrations_for_connect(false, false, None).unwrap().is_empty());
+        assert!(registrations_for_connect(true, true, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn completion_returns_every_provider() {
+        let completion = json!({
+            "providers": [
+                {"provider_id": "11".repeat(32), "name": "wiki/backlinks"},
+                {"provider_id": "22".repeat(32), "name": "wiki/outline"},
+                {"provider_id": "33".repeat(32), "name": "wiki/transclude"}
+            ]
+        });
+        let expected = NAMES.map(str::to_owned).to_vec();
+        let bindings = completion_providers(&completion, &expected).unwrap();
+        assert_eq!(bindings.len(), 3);
+        assert_eq!(bindings[1].name, "wiki/outline");
+        assert_eq!(bindings[2].provider_id, "33".repeat(32));
+        let legacy = json!({"provider": {"provider_id": "44".repeat(32), "name": "wiki/outline"}});
+        assert_eq!(completion_providers(&legacy, &[]).unwrap().len(), 1);
+        assert!(completion_providers(&json!({}), &[]).unwrap().is_empty());
     }
 
     #[test]

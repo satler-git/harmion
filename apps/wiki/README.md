@@ -86,9 +86,7 @@ The GUI writes a 0600 cache under the normal `~/.cache/harmion-wiki/`. If the
 server is stopped, it opens that cache and labels the window
 `オフラインキャッシュ` instead of silently showing demo data.
 
-`connect` registers one Wiki Interpreter provider (default `wiki/outline`)
-because a `ConnectionOffer` has one provider manifest; use
-`--provider-name wiki/backlinks` or `--provider-name wiki/transclude` to pick a
-different one, or `--no-provider` to connect as a consumer only. All three names
-remain in `provide_names`; the other two can be registered with the node's
-separate `interpreter-register` flow.
+`connect` registers all three Wiki Interpreter providers (`wiki/backlinks`,
+`wiki/outline`, `wiki/transclude`) through one connection request. Use
+`--provider-name NAME` to register only one, or `--no-provider` to connect as a
+consumer only. The device keeps one attach loop per registered provider.

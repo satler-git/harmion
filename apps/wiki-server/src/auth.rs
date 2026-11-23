@@ -28,6 +28,13 @@ const MAX_CREDENTIALS_BYTES: usize = 64 * 1024;
 /// Refresh shortly before the node would reject the access token.
 pub const REFRESH_SKEW_SECONDS: i64 = 60;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderBinding {
+    pub name: String,
+    pub provider_id: String,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
@@ -44,6 +51,8 @@ pub struct Credentials {
     /// identifier, not a token; it is persisted so `serve --node` can attach.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<ProviderId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<ProviderBinding>,
 }
 
 impl fmt::Debug for Credentials {
@@ -56,6 +65,7 @@ impl fmt::Debug for Credentials {
             .field("scope", &self.scope)
             .field("oauth_origin", &self.oauth_origin)
             .field("provider_id", &self.provider_id)
+            .field("providers", &self.providers)
             .finish()
     }
 }
@@ -77,6 +87,19 @@ pub enum WriteAccess {
 }
 
 impl Credentials {
+    pub fn provider_bindings(&self) -> Vec<ProviderBinding> {
+        if !self.providers.is_empty() {
+            return self.providers.clone();
+        }
+        self.provider_id
+            .map(|id| ProviderBinding {
+                name: "wiki/outline".to_owned(),
+                provider_id: harmion_client::protocol::hex(&id.0),
+            })
+            .into_iter()
+            .collect()
+    }
+
     pub fn load(dir: &Path) -> Result<Self, String> {
         let directory = ProtectedDir::open(dir).map_err(|error| {
             format!(
@@ -365,6 +388,8 @@ pub fn filter_spec(all: bool, kinds: Vec<String>) -> Option<FilterSpec> {
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     const ACCESS: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const REFRESH: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -380,6 +405,7 @@ mod tests {
             scope: "read:kind:d2lraQ write:all".to_owned(),
             oauth_origin: Some("https://127.0.0.1:8788".to_owned()),
             provider_id: None,
+            providers: Vec::new(),
         }
     }
 
@@ -389,9 +415,10 @@ mod tests {
     impl TempDir {
         fn new(name: &str) -> Self {
             let path = std::env::temp_dir().join(format!(
-                "harmion-wiki-auth-{name}-{}-{}",
+                "harmion-wiki-auth-{name}-{}-{}-{}",
                 std::process::id(),
-                now_seconds()
+                now_seconds(),
+                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir(&path).unwrap();
@@ -464,6 +491,25 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn credentials_persist_all_provider_bindings() {
+        let directory = TempDir::new("providers");
+        let mut value = credentials();
+        value.providers = vec![
+            ProviderBinding {
+                name: "wiki/backlinks".to_owned(),
+                provider_id: "11".repeat(32),
+            },
+            ProviderBinding {
+                name: "wiki/outline".to_owned(),
+                provider_id: "22".repeat(32),
+            },
+        ];
+        value.save(&directory.path).unwrap();
+        let loaded = Credentials::load(&directory.path).unwrap();
+        assert_eq!(loaded.provider_bindings(), value.providers);
+    }
+
     fn credentials_persist_the_registered_provider_id() {
         let directory = TempDir::new("provider");
         let mut credentials = credentials();

@@ -102,9 +102,8 @@ enum Command {
         /// providers.
         #[arg(long = "provide-name", value_delimiter = ',')]
         provide_name: Vec<String>,
-        /// Register one built-in Provider manifest with this connection:
-        /// `wiki/backlinks`, `wiki/outline` (default) or `wiki/transclude`.
-        /// A connection offer carries at most one manifest.
+        /// Register only one built-in Provider manifest instead of all three:
+        /// `wiki/backlinks`, `wiki/outline` or `wiki/transclude`.
         #[arg(
             long = "provider-name",
             value_name = "NAME",
@@ -430,16 +429,21 @@ fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         options.write_kind
     };
-    // A ConnectionOffer carries at most one provider manifest. The other names
-    // stay in provide_names so they can be registered by a later flow.
-    let registration = provider_loop::registration_for_connect(
+    // One connection registers every built-in Provider manifest by default.
+    let registrations = provider_loop::registrations_for_connect(
         options.provide,
         options.no_provider,
         options.provider_name.as_deref(),
     )?;
-    let registered_name = registration.as_ref().map(|manifest| manifest.name.clone());
+    let registered_names = registrations
+        .iter()
+        .map(|manifest| manifest.name.clone())
+        .collect::<Vec<_>>();
     let provide_names = if options.provide {
-        provider_loop::requested_provide_names(registered_name.as_deref(), &options.provide_name)?
+        provider_loop::requested_provide_names(
+            registered_names.first().map(String::as_str),
+            &options.provide_name,
+        )?
     } else {
         Vec::new()
     };
@@ -461,8 +465,8 @@ fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
         challenge: pkce.challenge,
         state,
         grants,
-        provider: registration,
-        providers: Vec::new(),
+        provider: None,
+        providers: registrations.clone(),
         provider_replace: false,
     };
     // Fail before creating a pending request if the offer violates the same
@@ -488,9 +492,18 @@ fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
         .and_then(Value::as_i64)
         .filter(|seconds| *seconds > 0)
         .ok_or("node connect-complete returned no valid expires_in")?;
-    let provider_id =
-        provider_loop::completion_provider_id(&completion, registered_name.as_deref())?;
-    if registered_name.is_some() && provider_id.is_none() {
+    let expected_names = registrations
+        .iter()
+        .map(|manifest| manifest.name.clone())
+        .collect::<Vec<_>>();
+    let providers = provider_loop::completion_providers(&completion, &expected_names)?;
+    let provider_id = providers
+        .first()
+        .map(|binding| harmion_client::protocol::unhex::<32>(&binding.provider_id))
+        .transpose()
+        .map_err(|_| "connect-complete returned an invalid provider_id".to_owned())?
+        .map(harmion_client::protocol::interpreter::ProviderId);
+    if !expected_names.is_empty() && providers.is_empty() {
         eprintln!(
             "warning: the node approved the connection but returned no Provider registration; \
              `serve --node` will not attach a Provider"
@@ -509,6 +522,7 @@ fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
             .to_owned(),
         oauth_origin: info.oauth_origin.clone(),
         provider_id,
+        providers,
     };
     credentials.save(&options.node)?;
     let missing = credentials.missing_write_kinds(write_kind.iter());
@@ -525,12 +539,12 @@ fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
         options.node.join(auth::CREDENTIALS_FILE).display()
     );
     println!("client_id: {}", credentials.client_id);
-    match (&registered_name, credentials.provider_id) {
-        (Some(name), Some(provider_id)) => println!(
-            "provider: {name} (provider_id {})",
-            harmion_client::protocol::hex(&provider_id.0)
-        ),
-        _ => println!("provider: no manifest registered"),
+    if credentials.providers.is_empty() {
+        println!("provider: no manifest registered");
+    } else {
+        for binding in &credentials.providers {
+            println!("provider: {} (provider_id {})", binding.name, binding.provider_id);
+        }
     }
     println!(
         "access token expires at {} (unix seconds); it will refresh automatically",
