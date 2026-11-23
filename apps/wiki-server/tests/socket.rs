@@ -373,3 +373,26 @@ fn socket_round_trip_create_convert_save_export_and_restart() {
     drop(server);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn watch_blocks_until_a_mutation_and_returns_new_generation() {
+    let root = temp_root();
+    let server = start(&root);
+    let socket = server.socket.clone();
+    let first = ok(&socket, "watch", json!({"since": 0, "timeout_ms": 100}));
+    let generation = first["generation"].as_u64().unwrap_or(0);
+    let watcher_socket = socket.clone();
+    let watcher = std::thread::spawn(move || {
+        ok(
+            &watcher_socket,
+            "watch",
+            json!({"since": generation, "timeout_ms": 3000}),
+        )
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    ok(&socket, "update_meta", json!({"id": "p-home", "title": "watch test"}));
+    let changed = watcher.join().expect("watch thread");
+    assert_eq!(changed["changed"], true);
+    assert!(changed["generation"].as_u64().unwrap_or(0) > generation);
+    assert!(changed["items"].as_array().is_some_and(|items| !items.is_empty()));
+}
