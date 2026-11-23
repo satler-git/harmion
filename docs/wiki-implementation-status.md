@@ -129,3 +129,18 @@ are generated from the live server.
 `target/debug/wiki-gui --page "Markdown 見本" --snapshot out.png` opens a page
 directly; the GUI polls every 2s, reconnects, and falls back to the 0600
 offline cache with an `オフラインキャッシュ` label.
+
+## UI/editor pass
+
+The GUI is split into `ui`, `toolbar`, `shelf`, and `palette` modules plus the
+existing `neovide`/`highlight` modules. Tabs only switch views; opening Neovide
+is explicit (`Ctrl+E` or the Neovide control), so browsing no longer focuses or
+launches the editor. Sidebar All/Recent modes, sidebar collapse, centered
+search with arrow-key selection, 2-hop keyboard selection, aligned 30 px
+toolbar controls, larger hit targets, pointer cursors, and an explicit shelf
+close control were added.
+
+Neovim receives absolute `WIKI_SERVER_CMD`, `WIKI_LSP_CMD`, `WIKI_SOCKET`, and
+the dedicated server socket. The plugin honors those env values, sets
+`titlestring = "Harmion Wiki — <title>"`, and the GUI focuses that titled
+Neovide window only after an explicit edit request.
