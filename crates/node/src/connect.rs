@@ -27,7 +27,8 @@ pub struct ConnectionRequest {
     pub challenge: [u8; 32],
     pub state: String,
     pub grants: Grants,
-    /// Canonical ProviderRegistration JSON, already validated by protocol.
+    /// Provider manifests already validated by protocol. New rows store a JSON
+    /// array; rows written before multi-Provider support store one JSON object.
     pub provider_manifest: Option<Vec<u8>>,
     pub provider_replace: bool,
     pub status: ConnectionStatus,
@@ -36,18 +37,43 @@ pub struct ConnectionRequest {
     pub approved_at: Option<i64>,
     pub completed_at: Option<i64>,
     pub app: Option<AppId>,
+    /// First approved Provider, retained for legacy rows and clients.
     pub provider_id: Option<ProviderId>,
+    /// Every Provider approved by this connection, in offer order.
+    pub provider_ids: Vec<ProviderId>,
 }
 impl ConnectionRequest {
+    /// Decode the stored manifests. A malformed row is corrupt; the legacy
+    /// single-object representation is still accepted.
+    pub fn provider_registrations(&self) -> Result<Vec<ProviderRegistration>, Error> {
+        let Some(bytes) = &self.provider_manifest else {
+            return Ok(Vec::new());
+        };
+        if let Ok(registrations) = serde_json::from_slice::<Vec<ProviderRegistration>>(bytes) {
+            return Ok(registrations);
+        }
+        serde_json::from_slice::<ProviderRegistration>(bytes)
+            .map(|registration| vec![registration])
+            .map_err(|_| Error::CorruptLog)
+    }
+    pub fn provider_names(&self) -> Result<Vec<String>, Error> {
+        Ok(self
+            .provider_registrations()?
+            .into_iter()
+            .map(|registration| registration.name)
+            .collect())
+    }
     pub fn provider_name(&self) -> Result<Option<String>, Error> {
-        self.provider_manifest
-            .as_ref()
-            .map(|bytes| {
-                serde_json::from_slice::<ProviderRegistration>(bytes)
-                    .map(|registration| registration.name)
-                    .map_err(|_| Error::CorruptLog)
-            })
-            .transpose()
+        Ok(self.provider_names()?.into_iter().next())
+    }
+    /// All approved IDs, falling back to the legacy singular column for rows
+    /// written before the `providers` column existed.
+    pub fn all_provider_ids(&self) -> Vec<ProviderId> {
+        if self.provider_ids.is_empty() {
+            self.provider_id.into_iter().collect()
+        } else {
+            self.provider_ids.clone()
+        }
     }
     pub fn is_expired(&self, now: i64) -> bool {
         self.expires_at <= now
@@ -65,15 +91,26 @@ pub struct Started {
 }
 pub struct Approval {
     pub app: Option<AppId>,
+    /// First registered Provider, retained for older clients.
     pub provider: Option<ProviderId>,
+    /// Every Provider registered by this approval, in offer order.
+    pub providers: Vec<ProviderId>,
+    pub provider_names: Vec<String>,
+    /// First superseded Provider, retained for older clients.
     pub replaced: Option<ProviderId>,
+    /// Every Provider superseded by this approval.
+    pub replaced_providers: Vec<ProviderId>,
     pub status: ConnectionStatus,
     pub grants: Option<Grants>,
 }
 pub struct Completion {
     pub app: AppId,
+    /// First Provider connection, retained for older clients.
     pub provider: Option<ProviderId>,
     pub provider_name: Option<String>,
+    /// Every Provider registered by the approval, in offer order.
+    pub providers: Vec<ProviderId>,
+    pub provider_names: Vec<String>,
     pub tokens: crate::oauth::Tokens,
 }
 
@@ -97,12 +134,12 @@ pub fn start(
         .transpose()
         .map_err(|_| Error::InvalidRequest)?
         .map(AppId);
-    let provider_manifest = offer
-        .provider
-        .as_ref()
-        .map(serde_json::to_vec)
-        .transpose()
-        .map_err(|_| Error::InvalidRequest)?;
+    let registrations: Vec<ProviderRegistration> = offer.all_providers().cloned().collect();
+    let provider_manifest = if registrations.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_vec(&registrations).map_err(|_| Error::InvalidRequest)?)
+    };
     let secret = host.random_bytes()?;
     let id = ConnectionId(host.random_bytes()?);
     store.transaction(|tx| {
@@ -130,6 +167,7 @@ pub fn start(
             completed_at: None,
             app: None,
             provider_id: None,
+            provider_ids: Vec::new(),
         };
         tx.insert_connection_request(&request)?;
         Ok(Started {
@@ -152,12 +190,14 @@ pub fn status(
             request.status = ConnectionStatus::Expired;
             tx.update_connection_request(&request)?;
         }
+        let provider_names = request.provider_names()?;
         Ok(ConnectionStatusView {
             connection_id: harmion_protocol::connect::hex_connection_id(request.id),
             status: request.status.as_str(),
             name: request.name.clone(),
             web_origin: request.web_origin.clone(),
-            provider_name: request.provider_name()?,
+            provider_name: provider_names.first().cloned(),
+            provider_names,
             expires_at: request.expires_at.to_string(),
         })
     })
@@ -221,7 +261,10 @@ pub fn approve(
             return Ok(Approval {
                 app: None,
                 provider: None,
+                providers: Vec::new(),
+                provider_names: Vec::new(),
                 replaced: None,
+                replaced_providers: Vec::new(),
                 status: ConnectionStatus::Denied,
                 grants: None,
             });
@@ -252,11 +295,10 @@ pub fn approve(
             tx.update_app(&app)?;
             registry::reconcile_grants(tx, app.id, &app.grants)?;
         }
-        let mut provider = None;
-        let mut replaced = None;
-        if let Some(manifest) = &request.provider_manifest {
-            let registration: ProviderRegistration =
-                serde_json::from_slice(manifest).map_err(|_| Error::CorruptLog)?;
+        let mut providers = Vec::new();
+        let mut provider_names = Vec::new();
+        let mut replaced_providers = Vec::new();
+        for registration in request.provider_registrations()? {
             if !app.grants.allows_provider_name(&registration.name) {
                 return Err(Error::Forbidden);
             }
@@ -271,23 +313,29 @@ pub fn approve(
                     ProviderStatus::Superseded,
                     current.approved_at,
                 )?;
-                replaced = Some(current.provider);
+                replaced_providers.push(current.provider);
             }
+            let name = registration.name.clone();
             let registration = registry::register_in_tx(tx, host, app.id, registration)?;
             if registration.status != ProviderStatus::Approved {
                 return Err(Error::InterpreterNotApproved);
             }
-            provider = Some(registration.provider);
+            providers.push(registration.provider);
+            provider_names.push(name);
         }
         request.status = ConnectionStatus::Approved;
         request.approved_at = Some(now);
         request.app = Some(app.id);
-        request.provider_id = provider;
+        request.provider_id = providers.first().copied();
+        request.provider_ids = providers.clone();
         tx.update_connection_request(&request)?;
         Ok(Approval {
             app: Some(app.id),
-            provider,
-            replaced,
+            provider: providers.first().copied(),
+            providers,
+            provider_names,
+            replaced: replaced_providers.first().copied(),
+            replaced_providers,
             status: ConnectionStatus::Approved,
             grants: Some(app.grants),
         })
@@ -325,10 +373,14 @@ pub fn complete(
         request.status = ConnectionStatus::Completed;
         request.completed_at = Some(host.now_micros());
         tx.update_connection_request(&request)?;
+        let provider_ids = request.all_provider_ids();
+        let provider_names = request.provider_names()?;
         Ok(Completion {
             app,
-            provider: request.provider_id,
-            provider_name: request.provider_name()?,
+            provider: provider_ids.first().copied(),
+            provider_name: provider_names.first().cloned(),
+            providers: provider_ids,
+            provider_names,
             tokens,
         })
     })
@@ -365,4 +417,90 @@ fn secret_verifier(secret: [u8; 32]) -> [u8; 32] {
         .chain_update(secret)
         .finalize()
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use harmion_protocol::GrantSpec;
+    use harmion_protocol::connect::ConnectionId;
+    use serde_json::json;
+
+    fn registration(name: &str) -> ProviderRegistration {
+        ProviderRegistration {
+            name: name.into(),
+            contract_version: harmion_protocol::interpreter::CONTRACT_VERSION,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({"type": "object"}),
+            default_query: None,
+        }
+    }
+
+    fn request(manifest: Option<Vec<u8>>) -> ConnectionRequest {
+        ConnectionRequest {
+            id: ConnectionId([1; 32]),
+            secret_verifier: [2; 32],
+            name: "Wiki".into(),
+            redirect: "http://127.0.0.1:43123/callback".into(),
+            web_origin: None,
+            client: None,
+            challenge: [3; 32],
+            state: "state".into(),
+            grants: GrantSpec {
+                read: Some(harmion_protocol::FilterSpec::All),
+                write: None,
+                call: true,
+                provide: true,
+                provide_names: vec!["wiki/backlinks".into(), "wiki/outline".into()],
+                manage_apps: false,
+                manage_nodes: false,
+            }
+            .into(),
+            provider_manifest: manifest,
+            provider_replace: false,
+            status: ConnectionStatus::Pending,
+            created_at: 0,
+            expires_at: 1,
+            approved_at: None,
+            completed_at: None,
+            app: None,
+            provider_id: None,
+            provider_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_single_object_manifest_still_parses() {
+        let mut request = request(Some(
+            serde_json::to_vec(&registration("wiki/backlinks")).unwrap(),
+        ));
+        assert_eq!(
+            request.provider_names().unwrap(),
+            ["wiki/backlinks".to_string()]
+        );
+        assert_eq!(
+            request.provider_name().unwrap().as_deref(),
+            Some("wiki/backlinks")
+        );
+        request.provider_id = Some(ProviderId([9; 32]));
+        assert_eq!(request.all_provider_ids(), [ProviderId([9; 32])]);
+    }
+
+    #[test]
+    fn manifest_array_round_trips_and_prefers_explicit_provider_ids() {
+        let manifests = vec![registration("wiki/backlinks"), registration("wiki/outline")];
+        let mut request = request(Some(serde_json::to_vec(&manifests).unwrap()));
+        let manifest_ids = [ProviderId([8; 32]), ProviderId([9; 32])];
+        request.provider_id = Some(manifest_ids[0]);
+        request.provider_ids = manifest_ids.to_vec();
+        assert_eq!(
+            request.provider_names().unwrap(),
+            ["wiki/backlinks".to_string(), "wiki/outline".to_string()]
+        );
+        assert_eq!(
+            request.provider_registrations().unwrap().as_slice(),
+            manifests.as_slice()
+        );
+        assert_eq!(request.all_provider_ids(), manifest_ids);
+    }
 }

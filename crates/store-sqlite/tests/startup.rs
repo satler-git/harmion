@@ -178,7 +178,7 @@ fn indexed_legacy_versions_still_migrate_after_stream_verification() {
         assert_eq!(
             sql.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            17
+            18
         );
         assert_eq!(test.counts(), (6, 6));
     }

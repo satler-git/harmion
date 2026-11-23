@@ -11,6 +11,8 @@ pub const MAX_CONNECTION_STATE: usize = 512;
 pub const MAX_CONNECTION_NAME: usize = 128;
 pub const CONNECTION_TTL_SECONDS: i64 = 5 * 60;
 pub const MAX_PENDING_CONNECTIONS: usize = 32;
+/// One connection offer may register at most this many Provider manifests.
+pub const MAX_CONNECTION_PROVIDERS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ConnectionId(pub [u8; 32]);
@@ -28,10 +30,25 @@ pub struct ConnectionOffer {
     pub challenge: String,
     pub state: String,
     pub grants: GrantSpec,
+    /// Legacy single-Provider manifest. New clients send `providers` instead;
+    /// the two fields are mutually exclusive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderRegistration>,
+    /// Provider manifests registered by one approved connection. Serialized only
+    /// when non-empty; legacy `provider` remains accepted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<ProviderRegistration>,
+    /// Applies to every manifest in the offer (`provider` or `providers`).
     #[serde(default)]
     pub provider_replace: bool,
+}
+
+impl ConnectionOffer {
+    /// Every requested manifest, legacy singular first and then the vector.
+    /// Validation rejects offers where both sources are non-empty.
+    pub fn all_providers(&self) -> impl Iterator<Item = &ProviderRegistration> {
+        self.provider.iter().chain(self.providers.iter())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,7 +104,10 @@ pub struct ConnectionStatusView {
     pub status: &'static str,
     pub name: String,
     pub web_origin: Option<String>,
+    /// First Provider name, retained for older clients.
     pub provider_name: Option<String>,
+    /// Every Provider name requested by this connection, in offer order.
+    pub provider_names: Vec<String>,
     pub expires_at: String,
 }
 
@@ -144,10 +164,20 @@ pub fn validate_offer(offer: &ConnectionOffer) -> Result<(), CodecError> {
     } else if !grants.provide_names.is_empty() {
         return Err(CodecError::InvalidFieldValue);
     }
-    if let Some(provider) = &offer.provider {
+    if offer.provider.is_some() && !offer.providers.is_empty() {
+        return Err(CodecError::InvalidFieldValue);
+    }
+    if offer.providers.len() > MAX_CONNECTION_PROVIDERS {
+        return Err(CodecError::InvalidFieldValue);
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for provider in offer.all_providers() {
         crate::interpreter::validate_registration(provider)?;
         if !grants.provide_names.contains(&provider.name) {
             return Err(CodecError::InvalidFieldValue);
+        }
+        if !names.insert(provider.name.as_str()) {
+            return Err(CodecError::Duplicate);
         }
     }
     Ok(())
@@ -254,7 +284,10 @@ pub struct ConnectionCompletion {
     pub expires_in: i64,
     pub scope: String,
     pub client_id: String,
+    /// First Provider connection, retained for older clients.
     pub provider: Option<ProviderConnectionInfo>,
+    /// Every Provider registered by the approval, in offer order.
+    pub providers: Vec<ProviderConnectionInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

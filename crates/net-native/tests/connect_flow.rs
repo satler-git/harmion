@@ -71,19 +71,29 @@ async fn integrated_connection_approval_registers_provider_and_call_works() {
             write: None,
             call: true,
             provide: true,
-            provide_names: vec!["ledger/balance".into()],
+            provide_names: vec!["ledger/balance".into(), "ledger/audit".into()],
             manage_apps: false,
             manage_nodes: false,
         },
-        provider: Some(ProviderRegistration {
-            name: "ledger/balance".into(),
-            contract_version: CONTRACT_VERSION,
-            input_schema: json!({"type": "object"}),
-            output_schema: json!({"type": "object"}),
-            default_query: Some(DefaultQuery {
-                kinds: vec!["ledger".into()],
-            }),
-        }),
+        provider: None,
+        providers: vec![
+            ProviderRegistration {
+                name: "ledger/balance".into(),
+                contract_version: CONTRACT_VERSION,
+                input_schema: json!({"type": "object"}),
+                output_schema: json!({"type": "object"}),
+                default_query: Some(DefaultQuery {
+                    kinds: vec!["ledger".into()],
+                }),
+            },
+            ProviderRegistration {
+                name: "ledger/audit".into(),
+                contract_version: CONTRACT_VERSION,
+                input_schema: json!({"type": "object"}),
+                output_schema: json!({"type": "object"}),
+                default_query: None,
+            },
+        ],
         provider_replace: false,
     };
     let started = anonymous.connect_start(&offer).await.unwrap();
@@ -93,6 +103,10 @@ async fn integrated_connection_approval_registers_provider_and_call_works() {
     let listed = admin_client.connect_list().await.unwrap();
     assert_eq!(listed["connections"][0]["name"], "AntiWebUI");
     assert_eq!(listed["connections"][0]["status"], "pending");
+    assert_eq!(
+        listed["connections"][0]["provider_names"],
+        json!(["ledger/balance", "ledger/audit"])
+    );
     let approved = admin_client
         .connect_approve(&ConnectionApproval {
             connection_id: connection_id.clone(),
@@ -102,16 +116,25 @@ async fn integrated_connection_approval_registers_provider_and_call_works() {
         .await
         .unwrap();
     assert_eq!(approved["status"], "approved");
-    let provider_id = approved["provider_id"].as_str().unwrap().to_owned();
     assert_eq!(
-        anonymous
-            .connect_status(&ConnectionStatusRequest {
-                connection_id: connection_id.clone(),
-                request_secret: request_secret.clone(),
-            })
-            .await
-            .unwrap()["status"],
-        "approved"
+        approved["provider_names"],
+        json!(["ledger/balance", "ledger/audit"])
+    );
+    assert_eq!(approved["provider_ids"].as_array().unwrap().len(), 2);
+    let provider_id = approved["provider_id"].as_str().unwrap().to_owned();
+    assert_eq!(approved["provider_ids"][0], provider_id);
+    let status = anonymous
+        .connect_status(&ConnectionStatusRequest {
+            connection_id: connection_id.clone(),
+            request_secret: request_secret.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(status["status"], "approved");
+    assert_eq!(status["provider_name"], "ledger/balance");
+    assert_eq!(
+        status["provider_names"],
+        json!(["ledger/balance", "ledger/audit"])
     );
     let complete_request = ConnectionCompleteRequest {
         connection_id,
@@ -125,12 +148,22 @@ async fn integrated_connection_approval_registers_provider_and_call_works() {
     assert_eq!(completed["token_type"], "Bearer");
     assert_eq!(completed["provider"]["name"], "ledger/balance");
     assert!(completed["provider"].get("ticket").is_none());
+    assert_eq!(
+        completed["providers"],
+        json!([
+            {"provider_id": approved["provider_ids"][0], "name": "ledger/balance"},
+            {"provider_id": approved["provider_ids"][1], "name": "ledger/audit"},
+        ])
+    );
     let access: [u8; 32] = protocol::unhex(completed["access_token"].as_str().unwrap()).unwrap();
     let app_client = Client::new(info.clone(), access).unwrap();
     let permissions = app_client.call("permissions", &[]).await.unwrap();
     assert_eq!(permissions["call"], true);
     assert_eq!(permissions["provide"], true);
-    assert_eq!(permissions["provide_names"], json!(["ledger/balance"]));
+    assert_eq!(
+        permissions["provide_names"],
+        json!(["ledger/audit", "ledger/balance"])
+    );
 
     let content = ContentId([4; 32]);
     admin_client
@@ -195,6 +228,7 @@ async fn integrated_connection_approval_registers_provider_and_call_works() {
             manage_nodes: false,
         },
         provider: None,
+        providers: Vec::new(),
         provider_replace: false,
     };
     let started = anonymous.connect_start(&reduced).await.unwrap();

@@ -77,14 +77,43 @@ fn identity() -> Identity {
     }
 }
 fn manifest() -> ProviderRegistration {
+    manifest_named("ledger/balance")
+}
+fn manifest_named(name: &str) -> ProviderRegistration {
     ProviderRegistration {
-        name: "ledger/balance".into(),
+        name: name.into(),
         contract_version: CONTRACT_VERSION,
         input_schema: json!({"type": "object"}),
         output_schema: json!({"type": "object"}),
         default_query: Some(DefaultQuery {
             kinds: vec!["ledger".into()],
         }),
+    }
+}
+fn multi_offer(name: &str, provider_names: &[&str]) -> ConnectionOffer {
+    ConnectionOffer {
+        version: 1,
+        name: name.into(),
+        redirect_uri: "http://127.0.0.1:43123/callback".into(),
+        web_origin: Some("http://127.0.0.1:43123".into()),
+        client_id: None,
+        challenge: oauth::pkce_challenge(VERIFIER).unwrap(),
+        state: "state".into(),
+        grants: GrantSpec {
+            read: Some(FilterSpec::All),
+            write: None,
+            call: true,
+            provide: true,
+            provide_names: provider_names.iter().map(|name| (*name).into()).collect(),
+            manage_apps: false,
+            manage_nodes: false,
+        },
+        provider: None,
+        providers: provider_names
+            .iter()
+            .map(|name| manifest_named(name))
+            .collect(),
+        provider_replace: false,
     }
 }
 fn offer(name: &str, provider: bool) -> ConnectionOffer {
@@ -110,6 +139,7 @@ fn offer(name: &str, provider: bool) -> ConnectionOffer {
             manage_nodes: false,
         },
         provider: provider.then(manifest),
+        providers: Vec::new(),
         provider_replace: false,
     }
 }
@@ -240,6 +270,179 @@ fn provider_replacement_requires_explicit_owner_approval() {
             .status,
         ProviderStatus::Superseded
     );
+}
+
+#[test]
+fn multi_provider_connection_registers_all_and_persists_ids() {
+    let mut t = Test::new();
+    let names = ["wiki/backlinks", "wiki/outline", "wiki/transclude"];
+    let expected_names = names
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    let started = connect::start(&mut t.store, &mut t.host, multi_offer("Wiki", &names)).unwrap();
+    let pending = connect::list(&mut t.store, &t.admin, t.host.now).unwrap();
+    assert_eq!(pending[0].provider_names().unwrap(), expected_names);
+
+    let approved =
+        connect::approve(&mut t.store, &mut t.host, &t.admin, started.id, true, false).unwrap();
+    let providers = approved.providers.clone();
+    assert_eq!(providers.len(), 3);
+    assert_eq!(approved.provider, Some(providers[0]));
+    assert_eq!(approved.provider_names, expected_names);
+    assert_eq!(approved.replaced_providers, Vec::new());
+    for provider in &providers {
+        assert_eq!(
+            registry::describe(&mut t.store, &t.admin, t.host.now, *provider)
+                .unwrap()
+                .status,
+            ProviderStatus::Approved
+        );
+    }
+    let view = connect::status(&mut t.store, &mut t.host, started.id, started.secret).unwrap();
+    assert_eq!(view.provider_name.as_deref(), Some("wiki/backlinks"));
+    assert_eq!(view.provider_names, expected_names);
+
+    // The unpacked `providers` column must round-trip through a real reopen.
+    let path = t.path.join("node.db");
+    t.store = SqliteStore::open(&path, identity()).unwrap();
+    let listed = connect::list(&mut t.store, &t.admin, t.host.now).unwrap();
+    assert_eq!(listed[0].provider_ids, providers);
+    assert_eq!(listed[0].provider_id, Some(providers[0]));
+    assert_eq!(listed[0].provider_names().unwrap(), expected_names);
+
+    let completion = connect::complete(
+        &mut t.store,
+        &mut t.host,
+        started.id,
+        started.secret,
+        VERIFIER,
+    )
+    .unwrap();
+    assert_eq!(completion.providers, providers);
+    assert_eq!(completion.provider_names, expected_names);
+    assert_eq!(completion.provider, Some(providers[0]));
+    assert_eq!(completion.provider_name.as_deref(), Some("wiki/backlinks"));
+}
+
+#[test]
+fn one_provider_name_conflict_rejects_the_whole_multi_provider_request() {
+    let mut t = Test::new();
+    let first = connect::start(
+        &mut t.store,
+        &mut t.host,
+        multi_offer("First", &["wiki/backlinks"]),
+    )
+    .unwrap();
+    let first_provider =
+        connect::approve(&mut t.store, &mut t.host, &t.admin, first.id, true, false)
+            .unwrap()
+            .provider
+            .unwrap();
+
+    let second = connect::start(
+        &mut t.store,
+        &mut t.host,
+        multi_offer("Second", &["wiki/backlinks", "wiki/outline"]),
+    )
+    .unwrap();
+    assert!(matches!(
+        connect::approve(&mut t.store, &mut t.host, &t.admin, second.id, true, false),
+        Err(Error::InterpreterNameConflict)
+    ));
+    // The conflicting approval must not leave the other manifest registered.
+    let registrations = registry::list(&mut t.store, &t.admin, t.host.now).unwrap();
+    assert_eq!(registrations.len(), 1);
+    assert_eq!(registrations[0].provider, first_provider);
+
+    let approved =
+        connect::approve(&mut t.store, &mut t.host, &t.admin, second.id, true, true).unwrap();
+    assert_eq!(approved.providers.len(), 2);
+    assert_eq!(approved.replaced_providers, vec![first_provider]);
+}
+
+#[test]
+fn legacy_single_object_manifest_row_still_approves_and_completes() {
+    let mut t = Test::new();
+    let started = connect::start(&mut t.store, &mut t.host, offer("Legacy", true)).unwrap();
+    let sql = rusqlite::Connection::open(t.path.join("node.db")).unwrap();
+    sql.execute(
+        "UPDATE connection_requests SET provider_manifest=?2,providers='[]' WHERE id=?1",
+        rusqlite::params![
+            started.id.0.as_slice(),
+            serde_json::to_vec(&manifest()).unwrap()
+        ],
+    )
+    .unwrap();
+    drop(sql);
+
+    let approved =
+        connect::approve(&mut t.store, &mut t.host, &t.admin, started.id, true, false).unwrap();
+    let provider = approved.provider.unwrap();
+    // Pre-v18 rows have no Provider ID array; completion falls back to `provider`.
+    let sql = rusqlite::Connection::open(t.path.join("node.db")).unwrap();
+    sql.execute(
+        "UPDATE connection_requests SET providers='[]' WHERE id=?1",
+        rusqlite::params![started.id.0.as_slice()],
+    )
+    .unwrap();
+    drop(sql);
+
+    let completion = connect::complete(
+        &mut t.store,
+        &mut t.host,
+        started.id,
+        started.secret,
+        VERIFIER,
+    )
+    .unwrap();
+    assert_eq!(completion.providers, vec![provider]);
+    assert_eq!(completion.provider, Some(provider));
+    assert_eq!(completion.provider_name.as_deref(), Some("ledger/balance"));
+}
+
+#[test]
+fn schema_v17_database_upgrades_and_keeps_existing_connection_rows() {
+    let mut t = Test::new();
+    let started = connect::start(&mut t.store, &mut t.host, offer("Existing", true)).unwrap();
+    let path = t.path.join("node.db");
+    let store = std::mem::replace(
+        &mut t.store,
+        SqliteStore::open(":memory:", identity()).unwrap(),
+    );
+    drop(store);
+
+    let sql = rusqlite::Connection::open(&path).unwrap();
+    sql.execute_batch(
+        "ALTER TABLE connection_requests DROP COLUMN providers; PRAGMA user_version=17;",
+    )
+    .unwrap();
+    drop(sql);
+
+    t.store = SqliteStore::open(&path, identity()).unwrap();
+    let sql = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = sql
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 18);
+    let columns: i64 = sql
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('connection_requests') WHERE name='providers'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(columns, 1);
+    drop(sql);
+
+    let listed = connect::list(&mut t.store, &t.admin, t.host.now).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, started.id);
+    assert_eq!(
+        listed[0].provider_names().unwrap(),
+        ["ledger/balance".to_string()]
+    );
+    assert!(listed[0].provider_ids.is_empty());
 }
 
 #[test]

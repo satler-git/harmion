@@ -123,6 +123,7 @@ struct ConnectionRow {
     completed_at: Option<i64>,
     app: Option<Vec<u8>>,
     provider: Option<Vec<u8>>,
+    providers: String,
 }
 fn connection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionRow> {
     Ok(ConnectionRow {
@@ -144,11 +145,14 @@ fn connection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionRow> {
         completed_at: row.get(15)?,
         app: row.get(16)?,
         provider: row.get(17)?,
+        providers: row.get(18)?,
     })
 }
 fn connection_from(row: ConnectionRow) -> Result<harmion_node::connect::ConnectionRequest, Error> {
     let grants: harmion_protocol::GrantSpec =
         serde_json::from_str(&row.grants).map_err(|_| Error::CorruptLog)?;
+    let provider_ids: Vec<ProviderId> =
+        serde_json::from_str(&row.providers).map_err(|_| Error::CorruptLog)?;
     Ok(harmion_node::connect::ConnectionRequest {
         id: ConnectionId(fixed(row.id)?),
         secret_verifier: fixed(row.secret_verifier)?,
@@ -168,6 +172,7 @@ fn connection_from(row: ConnectionRow) -> Result<harmion_node::connect::Connecti
         completed_at: row.completed_at,
         app: row.app.map(fixed).transpose()?.map(AppId),
         provider_id: row.provider.map(fixed).transpose()?.map(ProviderId),
+        provider_ids,
     })
 }
 fn interpreter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InterpreterRow> {
@@ -308,7 +313,7 @@ impl SqliteStore {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(db)?;
-        if !(0..=17).contains(&version) {
+        if !(0..=18).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
@@ -560,6 +565,18 @@ impl SqliteStore {
             )
             .map_err(db)?;
         }
+        if version < 18 {
+            // Multi-Provider connection approvals. `provider_manifest` keeps its
+            // column and now holds a JSON array; `providers` stores the approved
+            // Provider IDs as a JSON array. Legacy rows keep the column default.
+            if !has_column(&tx, "connection_requests", "providers")? {
+                tx.execute_batch(
+                    "ALTER TABLE connection_requests ADD COLUMN providers TEXT NOT NULL DEFAULT '[]';",
+                )
+                .map_err(db)?;
+            }
+            tx.pragma_update(None, "user_version", 18).map_err(db)?;
+        }
         {
             let mut storage = SqlTransaction { sql: &tx, identity };
             // Reject broken bytes/dependencies at startup; never salvage only the
@@ -616,7 +633,7 @@ impl SqliteStore {
         let version: i64 = tx
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db)?;
-        if !(1..=17).contains(&version) {
+        if !(1..=18).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
@@ -1839,7 +1856,7 @@ impl Transaction for SqlTransaction<'_> {
         let row = self
             .sql
             .query_row(
-                "SELECT id,secret_verifier,name,redirect,web_origin,client,challenge,state,grants,provider_manifest,provider_replace,status,created_at,expires_at,approved_at,completed_at,app,provider FROM connection_requests WHERE id=?1",
+                "SELECT id,secret_verifier,name,redirect,web_origin,client,challenge,state,grants,provider_manifest,provider_replace,status,created_at,expires_at,approved_at,completed_at,app,provider,providers FROM connection_requests WHERE id=?1",
                 [id.0],
                 connection_row,
             )
@@ -1853,7 +1870,7 @@ impl Transaction for SqlTransaction<'_> {
         let mut statement = self
             .sql
             .prepare(
-                "SELECT id,secret_verifier,name,redirect,web_origin,client,challenge,state,grants,provider_manifest,provider_replace,status,created_at,expires_at,approved_at,completed_at,app,provider FROM connection_requests ORDER BY created_at DESC,id",
+                "SELECT id,secret_verifier,name,redirect,web_origin,client,challenge,state,grants,provider_manifest,provider_replace,status,created_at,expires_at,approved_at,completed_at,app,provider,providers FROM connection_requests ORDER BY created_at DESC,id",
             )
             .map_err(db)?;
         let rows = statement
@@ -1870,9 +1887,11 @@ impl Transaction for SqlTransaction<'_> {
         let grants =
             serde_json::to_string(&harmion_protocol::GrantSpec::from(request.grants.clone()))
                 .map_err(|_| Error::InvalidRequest)?;
+        let providers =
+            serde_json::to_string(&request.provider_ids).map_err(|_| Error::InvalidRequest)?;
         self.sql
             .execute(
-                "INSERT INTO connection_requests(id,secret_verifier,name,redirect,web_origin,client,challenge,state,grants,provider_manifest,provider_replace,status,created_at,expires_at,approved_at,completed_at,app,provider) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                "INSERT INTO connection_requests(id,secret_verifier,name,redirect,web_origin,client,challenge,state,grants,provider_manifest,provider_replace,status,created_at,expires_at,approved_at,completed_at,app,provider,providers) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 params![
                     request.id.0,
                     request.secret_verifier,
@@ -1892,6 +1911,7 @@ impl Transaction for SqlTransaction<'_> {
                     request.completed_at,
                     request.app.map(|app| app.0),
                     request.provider_id.map(|provider| provider.0),
+                    providers,
                 ],
             )
             .map_err(db)?;
@@ -1904,10 +1924,12 @@ impl Transaction for SqlTransaction<'_> {
         let grants =
             serde_json::to_string(&harmion_protocol::GrantSpec::from(request.grants.clone()))
                 .map_err(|_| Error::InvalidRequest)?;
+        let providers =
+            serde_json::to_string(&request.provider_ids).map_err(|_| Error::InvalidRequest)?;
         let changed = self
             .sql
             .execute(
-                "UPDATE connection_requests SET secret_verifier=?2,name=?3,redirect=?4,web_origin=?5,client=?6,challenge=?7,state=?8,grants=?9,provider_manifest=?10,provider_replace=?11,status=?12,expires_at=?13,approved_at=?14,completed_at=?15,app=?16,provider=?17 WHERE id=?1",
+                "UPDATE connection_requests SET secret_verifier=?2,name=?3,redirect=?4,web_origin=?5,client=?6,challenge=?7,state=?8,grants=?9,provider_manifest=?10,provider_replace=?11,status=?12,expires_at=?13,approved_at=?14,completed_at=?15,app=?16,provider=?17,providers=?18 WHERE id=?1",
                 params![
                     request.id.0,
                     request.secret_verifier,
@@ -1926,6 +1948,7 @@ impl Transaction for SqlTransaction<'_> {
                     request.completed_at,
                     request.app.map(|app| app.0),
                     request.provider_id.map(|provider| provider.0),
+                    providers,
                 ],
             )
             .map_err(db)?;

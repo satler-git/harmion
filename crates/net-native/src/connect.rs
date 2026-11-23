@@ -165,10 +165,8 @@ pub(crate) async fn handle_public<S: Store + Send + 'static>(
                     node_connect::complete(s, &mut SystemHost, id, secret, &verifier_for_node)
                 })
                 .await?;
-            let provider = completion
-                .provider
-                .map(|provider| -> Result<ProviderConnectionInfo, Error> {
-                    let name = completion.provider_name.clone().unwrap_or_default();
+            let provider_info =
+                |provider: ProviderId, name: String| -> Result<ProviderConnectionInfo, Error> {
                     match store.oauth.get() {
                         Some(oauth) => {
                             match oauth.issue_provider_ticket(completion.app, provider, now) {
@@ -202,8 +200,29 @@ pub(crate) async fn handle_public<S: Store + Send + 'static>(
                             websocket_url: None,
                         }),
                     }
+                };
+            // `providers` is authoritative; the singular field is a compatibility
+            // fallback for rows approved before multi-Provider support.
+            let provider_ids = if completion.providers.is_empty() {
+                completion.provider.into_iter().collect()
+            } else {
+                completion.providers.clone()
+            };
+            let providers = provider_ids
+                .iter()
+                .enumerate()
+                .map(|(index, provider)| {
+                    provider_info(
+                        *provider,
+                        completion
+                            .provider_names
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
                 })
-                .transpose()?;
+                .collect::<Result<Vec<_>, Error>>()?;
+            let provider = providers.first().cloned();
             let tokens = completion.tokens;
             let response = serde_json::to_value(ConnectionCompletion {
                 token_type: "Bearer",
@@ -213,6 +232,7 @@ pub(crate) async fn handle_public<S: Store + Send + 'static>(
                 scope: crate::oauth_browser::format_scope(&tokens.grants),
                 client_id: hex(&completion.app.0),
                 provider,
+                providers,
             })
             .map_err(|_| harmion_node::Error::InvalidRequest)?;
             remember_completion(key, verifier, response.clone());
@@ -249,18 +269,32 @@ pub(crate) async fn handle_admin<S: Store + Send + 'static>(
                     node_connect::approve(s, &mut SystemHost, &credential, id, allow, replace)
                 })
                 .await?;
-            if let Some(provider) = result.replaced {
-                store.interpreter.close_provider(provider);
+            for provider in &result.replaced_providers {
+                store.interpreter.close_provider(*provider);
             }
             if let (Some(app), Some(grants)) = (result.app, result.grants.clone()) {
                 store.notify_app_changed(app, &grants, false).await?;
             }
+            let provider_ids = result
+                .providers
+                .iter()
+                .map(|provider| hex(&provider.0))
+                .collect::<Vec<_>>();
+            let provider_names = result.provider_names.clone();
+            let replaced_provider_ids = result
+                .replaced_providers
+                .iter()
+                .map(|provider| hex(&provider.0))
+                .collect::<Vec<_>>();
             Ok(json!({
                 "connection_id": hex_connection_id(id),
                 "status": result.status.as_str(),
                 "app_id": result.app.map(|app| hex(&app.0)),
                 "provider_id": result.provider.map(|provider| hex(&provider.0)),
+                "provider_ids": provider_ids,
+                "provider_names": provider_names,
                 "replaced_provider_id": result.replaced.map(|provider| hex(&provider.0)),
+                "replaced_provider_ids": replaced_provider_ids,
             }))
         }
         _ => Err(harmion_node::Error::InvalidRequest.into()),
@@ -301,14 +335,16 @@ pub(crate) async fn provider_ticket<S: Store + Send + 'static>(
 }
 
 fn connection_json(request: &node_connect::ConnectionRequest) -> Result<Json, Error> {
-    let provider = request
-        .provider_manifest
-        .as_ref()
-        .map(|bytes| {
-            serde_json::from_slice::<harmion_protocol::interpreter::ProviderRegistration>(bytes)
-                .map_err(|_| harmion_node::Error::CorruptLog)
-        })
-        .transpose()?;
+    let providers = request.provider_registrations()?;
+    let provider_names = providers
+        .iter()
+        .map(|registration| registration.name.clone())
+        .collect::<Vec<_>>();
+    let provider_ids = request
+        .all_provider_ids()
+        .iter()
+        .map(|provider| hex(&provider.0))
+        .collect::<Vec<_>>();
     Ok(json!({
         "connection_id": hex_connection_id(request.id),
         "name": request.name,
@@ -317,10 +353,13 @@ fn connection_json(request: &node_connect::ConnectionRequest) -> Result<Json, Er
         "client_id": request.client.map(|app| hex(&app.0)),
         "status": request.status.as_str(),
         "grants": GrantSpec::from(request.grants.clone()),
-        "provider": provider,
+        "provider": providers.first(),
+        "providers": providers,
+        "provider_names": provider_names,
         "provider_replace": request.provider_replace,
         "app_id": request.app.map(|app| hex(&app.0)),
-        "provider_id": request.provider_id.map(|provider| hex(&provider.0)),
+        "provider_id": provider_ids.first(),
+        "provider_ids": provider_ids,
         "created_at": request.created_at.to_string(),
         "expires_at": request.expires_at.to_string(),
         "approved_at": request.approved_at.map(|value| value.to_string()),

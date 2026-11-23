@@ -199,6 +199,7 @@ async fn web_connection_start_status_complete_uses_cors_and_helper() {
                 kinds: vec!["ledger".into()],
             }),
         }),
+        providers: Vec::new(),
         provider_replace: false,
     };
     let body = serde_json::to_vec(&offer).unwrap();
@@ -284,6 +285,12 @@ async fn web_connection_start_status_complete_uses_cors_and_helper() {
     assert!(completion["access_token"].is_string());
     assert_eq!(completion["provider"]["name"], "ledger/balance");
     assert!(completion["provider"]["ticket"].is_string());
+    assert_eq!(
+        completion["providers"][0]["provider_id"],
+        completion["provider"]["provider_id"]
+    );
+    assert_eq!(completion["providers"][0]["name"], "ledger/balance");
+    assert!(completion["providers"][0]["ticket"].is_string());
 
     let ticket_body = serde_json::to_vec(&json!({
         "provider_id": completion["provider"]["provider_id"],
