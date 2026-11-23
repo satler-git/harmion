@@ -602,7 +602,7 @@ impl AppState {
                         needle.is_empty() || summary.title.to_lowercase().contains(&needle)
                     })
                     .collect::<Vec<_>>();
-                results.truncate(8);
+                results.truncate(20);
                 self.results.set(results);
                 self.palette_error.set(None);
             }
@@ -614,7 +614,7 @@ impl AppState {
                         .into_iter()
                         .filter(|summary| summary.is_page())
                         .collect::<Vec<_>>();
-                    results.truncate(8);
+                    results.truncate(20);
                     self.results.set(results);
                     self.palette_error.set(None);
                     return;
@@ -624,7 +624,7 @@ impl AppState {
                         Ok(value) => match value.get("items").cloned() {
                             Some(items) => match serde_json::from_value::<Vec<Summary>>(items) {
                                 Ok(mut results) => {
-                                    results.truncate(8);
+                                    results.truncate(20);
                                     self.results.set(results);
                                     self.palette_error.set(None);
                                 }
@@ -811,7 +811,7 @@ fn local_search(summaries: &[Summary], query: &str) -> Vec<Summary> {
         })
         .cloned()
         .collect::<Vec<_>>();
-    results.truncate(8);
+    results.truncate(20);
     results
 }
 
@@ -3497,7 +3497,7 @@ fn palette_card(state: &AppState) -> Div {
                         .py(8.0_f32),
                 );
             }
-            for summary in results.iter().take(8) {
+            for summary in results.iter().take(20) {
                 list = list.child(
                     div()
                         .px(10.0_f32)
