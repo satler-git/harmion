@@ -376,6 +376,7 @@ struct AppState {
     shelf_dismissed: Signal<bool>,
     palette: Signal<Option<PaletteMode>>,
     palette_selected: Signal<usize>,
+    palette_needs_focus: Signal<bool>,
     query: Signal<String>,
     results: Signal<Vec<Summary>>,
     palette_error: Signal<Option<String>>,
@@ -718,6 +719,7 @@ impl AppState {
     fn open_palette(&self, mode: PaletteMode) {
         self.palette.set(Some(mode));
         self.palette_selected.set(0);
+        self.palette_needs_focus.set(true);
         let prefill = match mode {
             PaletteMode::Rename => self.active_tab().map(|tab| tab.title).unwrap_or_default(),
             PaletteMode::Tags => self
@@ -1196,6 +1198,7 @@ fn boot(snapshot: bool) -> AppState {
         shelf_dismissed: signal(false),
         palette: signal(None),
         palette_selected: signal(0),
+        palette_needs_focus: signal(false),
         query: signal(String::new()),
         results: signal(Vec::new()),
         palette_error: signal(None),

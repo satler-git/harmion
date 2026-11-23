@@ -28,7 +28,10 @@ fn palette_card(state: &AppState) -> Div {
 
 fn palette_card_inner(state: &AppState) -> Div {
     let input = node_ref();
-    request_frame(move |_| input.focus());
+    if state.palette_needs_focus.get_untracked() {
+        state.palette_needs_focus.set(false);
+        request_frame(move |_| input.focus());
+    }
     let mode = state.palette.get().unwrap_or(PaletteMode::Search);
     let results_state = state.clone();
     div()
