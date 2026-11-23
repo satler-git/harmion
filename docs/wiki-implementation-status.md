@@ -113,3 +113,17 @@ buffer dirty and records the current server body; `:WikiConflict` opens a
 side-by-side diff for manual merge. The GUI delete action requires a second
 click and sends the displayed revision. This is a 2-way manual flow, not a
 3-way merge against a common ancestor.
+
+## Functional UI evidence
+
+The GUI is no longer a static mock: the sidebar lists every page, tag chips
+filter pages/snippets, search uses the server, tabs load workspaces, outline
+entries scroll the article, links/2-hop rows open Content, new/rename/tags/
+delete/conflict routes call the server, and Markdown headings/lists/tables/
+quotes/code plus embeds/transclusions/interpreter panels are rendered from
+Content data. [Demo snapshot](wiki-demo.png) and [home snapshot](wiki-final.png)
+are generated from the live server.
+
+`target/debug/wiki-gui --page "Markdown 見本" --snapshot out.png` opens a page
+directly; the GUI polls every 2s, reconnects, and falls back to the 0600
+offline cache with an `オフラインキャッシュ` label.
