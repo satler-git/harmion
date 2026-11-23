@@ -1448,6 +1448,33 @@ fn handle_key(state: &AppState, event: &KeyboardEvent) {
         return;
     }
     if !ctrl {
+        let hops = state
+            .active_workspace()
+            .map(|workspace| workspace.links.two_hop)
+            .unwrap_or_default();
+        if !hops.is_empty() && event.key == Key::Named(NamedKey::ArrowDown) {
+            event.prevent_default();
+            let index = (state.next_selected.get_untracked() + 1).min(hops.len() - 1);
+            state.next_selected.set(index);
+            return;
+        }
+        if !hops.is_empty() && event.key == Key::Named(NamedKey::ArrowUp) {
+            event.prevent_default();
+            let index = state.next_selected.get_untracked().saturating_sub(1);
+            state.next_selected.set(index);
+            return;
+        }
+        if event.key == Key::Named(NamedKey::Enter) {
+            let index = state
+                .next_selected
+                .get_untracked()
+                .min(hops.len().saturating_sub(1));
+            if let Some(hop) = hops.get(index) {
+                event.prevent_default();
+                state.open_summary(&hop.target);
+            }
+            return;
+        }
         return;
     }
     if event.key.is_char('k') {
@@ -2933,7 +2960,7 @@ fn inspector_links(state: &AppState) -> Div {
                 .justify_between()
                 .child(ui_text("↑ ↓ 選択", 9.0, theme().text_disabled))
                 .child(ui_text("↵ 開く", 9.0, theme().text_disabled))
-                .child(ui_text("Ctrl+Enter 新規タブ", 9.0, theme().text_disabled)),
+                .child(ui_text("Enter 開く", 9.0, theme().text_disabled)),
         )
         .child(divider())
         .child(
