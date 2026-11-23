@@ -20,6 +20,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::sync::OnceLock;
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -332,13 +333,10 @@ impl Drop for PollGuard {
     }
 }
 
-#[derive(Clone)]
-struct PollState {
-    alive: Arc<AtomicBool>,
-    source: Signal<Source>,
-    summaries: Signal<Vec<Summary>>,
-    tabs: Signal<Vec<Tab>>,
-    active: Signal<usize>,
+enum PollUpdate {
+    Summaries(Vec<Summary>),
+    Reconnected(Vec<Summary>),
+    Ping,
 }
 
 #[derive(Clone)]
@@ -350,6 +348,7 @@ struct AppState {
     providers: Signal<Vec<String>>,
     cache: Rc<RefCell<CacheFile>>,
     poll_guard: Rc<PollGuard>,
+    updates: Rc<RefCell<mpsc::Receiver<PollUpdate>>>,
     tag_filter: Signal<Option<String>>,
     tabs: Signal<Vec<Tab>>,
     active: Signal<usize>,
@@ -1067,14 +1066,8 @@ fn load_summaries() -> Result<Vec<Summary>, String> {
     serde_json::from_value(items).map_err(|error| format!("list の解釈に失敗: {error}"))
 }
 
-fn start_polling(state: &AppState, alive: Arc<AtomicBool>) {
-    let poll = PollState {
-        alive: alive.clone(),
-        source: state.source,
-        summaries: state.summaries,
-        tabs: state.tabs,
-        active: state.active,
-    };
+fn start_polling(state: &AppState, alive: Arc<AtomicBool>, updates: mpsc::Sender<PollUpdate>) {
+    let _ = state;
     let mut since = 0u64;
     thread::spawn(move || loop {
         thread::sleep(Duration::from_millis(250));
@@ -1082,67 +1075,46 @@ fn start_polling(state: &AppState, alive: Arc<AtomicBool>) {
             break;
         }
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if poll.source.get_untracked() != Source::Server {
-            if let Ok(items) = load_summaries() {
-                let source = poll.source;
-                let summaries = poll.summaries;
-                let guard = alive.clone();
-                request_frame(move |_| {
-                    if !guard.load(Ordering::SeqCst) {
-                        return;
+            let watch = rpc("watch", json!({ "since": since, "timeout_ms": 20_000 }));
+            match watch {
+                Ok(value) => {
+                    if let Some(generation) = value.get("generation").and_then(Value::as_u64) {
+                        since = generation;
                     }
-                    source.set(Source::Server);
-                    summaries.set(items);
-                });
-            }
-            return;
-        }
-        if let Ok(value) = rpc("watch", json!({ "since": since, "timeout_ms": 20_000 })) {
-            if let Some(generation) = value.get("generation").and_then(Value::as_u64) {
-                since = generation;
-            }
-            if let Ok(items) = serde_json::from_value::<Vec<Summary>>(
-                value.get("items").cloned().unwrap_or(Value::Null),
-            ) {
-                let summaries = poll.summaries;
-                let guard = alive.clone();
-                request_frame(move |_| {
-                    if guard.load(Ordering::SeqCst) {
-                        summaries.set(items);
+                    if let Ok(items) = serde_json::from_value::<Vec<Summary>>(
+                        value.get("items").cloned().unwrap_or(Value::Null),
+                    ) && updates.send(PollUpdate::Summaries(items)).is_ok()
+                    {
+                        request_frame(|_| {});
                     }
-                });
-            }
-        }
-        let active = poll.active.get_untracked();
-        let tabs = poll.tabs.get_untracked();
-        for (index, tab) in tabs.iter().enumerate() {
-            if index != active {
-                continue;
-            }
-            let Some(id) = tab.id.as_deref() else { continue };
-            let Ok(value) = rpc("workspace", json!({ "id": id })) else { continue };
-            let Ok(workspace) = serde_json::from_value::<Workspace>(value) else { continue };
-            let changed = tab.workspace.as_ref().map(|current| current.page.rev) != Some(workspace.page.rev);
-            if changed {
-                let tabs = poll.tabs;
-                let guard = alive.clone();
-                request_frame(move |_| {
-                    if !guard.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    tabs.update(|items| {
-                        if let Some(tab) = items.get_mut(index) {
-                            tab.workspace = Some(workspace);
+                }
+                Err(_) => {
+                    if let Ok(items) = load_summaries() {
+                        since = 0;
+                        if updates.send(PollUpdate::Reconnected(items)).is_ok() {
+                            request_frame(|_| {});
                         }
-                    });
-                });
+                    }
+                }
             }
-        }
         }));
-        if outcome.is_err() {
+        if outcome.is_err() || updates.send(PollUpdate::Ping).is_err() {
             break;
         }
     });
+}
+
+fn drain_updates(state: &AppState) {
+    while let Ok(update) = state.updates.borrow().try_recv() {
+        match update {
+            PollUpdate::Summaries(items) => state.summaries.set(items),
+            PollUpdate::Reconnected(items) => {
+                state.source.set(Source::Server);
+                state.summaries.set(items);
+            }
+            PollUpdate::Ping => {}
+        }
+    }
 }
 
 fn boot(snapshot: bool) -> AppState {
@@ -1183,6 +1155,7 @@ fn boot(snapshot: bool) -> AppState {
     let manager = Rc::new(RefCell::new(neovide::Manager::detect()));
     let poll_alive = Arc::new(AtomicBool::new(true));
     let poll_guard = Rc::new(PollGuard(poll_alive.clone()));
+    let (poll_tx, poll_rx) = mpsc::channel();
     let attached = manager.borrow().has_server();
     let detail = manager.borrow().status_label();
     let root = node_ref();
@@ -1194,6 +1167,7 @@ fn boot(snapshot: bool) -> AppState {
         providers: signal(load_providers()),
         cache: Rc::new(RefCell::new(cached)),
         poll_guard,
+        updates: Rc::new(RefCell::new(poll_rx)),
         tag_filter: signal(None),
         tabs: signal(tabs),
         active: signal(0),
@@ -1228,7 +1202,7 @@ fn boot(snapshot: bool) -> AppState {
         state.push_history(Some(id));
     }
     if !snapshot {
-        start_polling(&state, poll_alive);
+        start_polling(&state, poll_alive, poll_tx);
     }
     state
 }
@@ -1383,6 +1357,7 @@ fn code_block(lines: &[&str], language: &str) -> Div {
 // ---------------------------------------------------------------------------
 
 fn layout(state: &AppState) -> Div {
+    drain_updates(state);
     let root = state.root;
     let key_state = state.clone();
     let root_ref = root;
