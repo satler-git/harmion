@@ -120,6 +120,11 @@ local function record_conflict(buf, id)
     return
   end
   vim.api.nvim_buf_set_var(buf, "wiki_conflict_body", current.body)
+  vim.schedule(function()
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.bo[buf].modified = true
+    end
+  end)
   vim.notify("wiki: conflict — :WikiConflict で現在の本文と比較できます", vim.log.levels.ERROR)
 end
 

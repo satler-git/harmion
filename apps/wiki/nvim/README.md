@@ -47,6 +47,7 @@ nvim --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/new_page.lua'
 nvim --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/autosave.lua'
 nvim --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/metadata.lua'
 nvim --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/bufread.lua'
+nvim -n --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/conflict.lua'
 ```
 
 The test opens `p-home`, edits it, saves it, then opens a ledger snippet and
