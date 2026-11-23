@@ -299,6 +299,8 @@ enum Inspector {
 enum PaletteMode {
     Search,
     QuickOpen,
+    Rename,
+    Tags,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -465,6 +467,71 @@ impl AppState {
         self.open_id(&content.id, &content.title, &content.content_type);
     }
 
+    fn rename_active(&self, title: &str) {
+        let Some(workspace) = self.active_workspace() else { return };
+        let id = workspace.page.id.clone();
+        let rev = workspace.page.rev;
+        match rpc("update_meta", json!({ "id": id, "rev": rev, "title": title.trim() })) {
+            Ok(value) => match serde_json::from_value::<Content>(value) {
+                Ok(content) => {
+                    self.tabs.update(|tabs| {
+                        if let Some(tab) = tabs.iter_mut().find(|tab| tab.id.as_deref() == Some(id.as_str())) {
+                            tab.title = content.title.clone();
+                            if let Some(workspace) = tab.workspace.as_mut() {
+                                workspace.page = content.clone();
+                                workspace.info.updated = content.updated_label.clone();
+                            }
+                        }
+                    });
+                    self.summaries.update(|items| {
+                        if let Some(summary) = items.iter_mut().find(|summary| summary.id == id) {
+                            summary.title = content.title.clone();
+                            summary.rev = content.rev;
+                        }
+                    });
+                    self.close_palette();
+                }
+                Err(error) => self.palette_error.set(Some(format!("解釈に失敗: {error}"))),
+            },
+            Err(error) => self.palette_error.set(Some(format!("変更できません: {error}"))),
+        }
+    }
+
+    fn set_tags(&self, tags: &str) {
+        let Some(workspace) = self.active_workspace() else { return };
+        let id = workspace.page.id.clone();
+        let rev = workspace.page.rev;
+        let values = tags
+            .split([',', '、'])
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        match rpc("update_meta", json!({ "id": id, "rev": rev, "tags": values })) {
+            Ok(value) => match serde_json::from_value::<Content>(value) {
+                Ok(content) => {
+                    self.tabs.update(|tabs| {
+                        if let Some(tab) = tabs.iter_mut().find(|tab| tab.id.as_deref() == Some(id.as_str())) {
+                            if let Some(workspace) = tab.workspace.as_mut() {
+                                workspace.page = content.clone();
+                                workspace.info.tags = content.tags.join(", ");
+                            }
+                        }
+                    });
+                    self.summaries.update(|items| {
+                        if let Some(summary) = items.iter_mut().find(|summary| summary.id == id) {
+                            summary.tags = content.tags.clone();
+                            summary.rev = content.rev;
+                        }
+                    });
+                    self.close_palette();
+                }
+                Err(error) => self.palette_error.set(Some(format!("解釈に失敗: {error}"))),
+            },
+            Err(error) => self.palette_error.set(Some(format!("変更できません: {error}"))),
+        }
+    }
+
     fn open_id(&self, id: &str, title: &str, kind: &str) {
         if let Some(index) = self
             .tabs
@@ -571,7 +638,18 @@ impl AppState {
 
     fn open_palette(&self, mode: PaletteMode) {
         self.palette.set(Some(mode));
-        self.query.set(String::new());
+        let prefill = match mode {
+            PaletteMode::Rename => self
+                .active_tab()
+                .map(|tab| tab.title)
+                .unwrap_or_default(),
+            PaletteMode::Tags => self
+                .active_workspace()
+                .map(|workspace| workspace.page.tags.join(", "))
+                .unwrap_or_default(),
+            PaletteMode::Search | PaletteMode::QuickOpen => String::new(),
+        };
+        self.query.set(prefill);
         self.palette_error.set(None);
         self.refresh_results();
     }
@@ -654,6 +732,10 @@ impl AppState {
                         .set(local_search(&self.summaries.get_untracked(), &query));
                     self.palette_error.set(None);
                 }
+            }
+            Some(PaletteMode::Rename | PaletteMode::Tags) => {
+                self.results.set(Vec::new());
+                self.palette_error.set(None);
             }
             None => {}
         }
@@ -3152,6 +3234,44 @@ provider 接続は未取得",
         let armed = state.delete_armed.get();
         content = content.child(divider()).child(
             div()
+                .flex()
+                .flex_row()
+                .gap(6.0_f32)
+                .child(
+                    div()
+                        .flex_1()
+                        .h(28.0_f32)
+                        .rounded(5.0_f32)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(theme().surface_muted)
+                        .hover(|style| style.bg(theme().hover))
+                        .on_click({
+                            let state = state.clone();
+                            move |_| state.open_palette(PaletteMode::Rename)
+                        })
+                        .child(ui_text("名前", 11.5, theme().text_muted)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .h(28.0_f32)
+                        .rounded(5.0_f32)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(theme().surface_muted)
+                        .hover(|style| style.bg(theme().hover))
+                        .on_click({
+                            let state = state.clone();
+                            move |_| state.open_palette(PaletteMode::Tags)
+                        })
+                        .child(ui_text("タグ", 11.5, theme().text_muted)),
+                ),
+        );
+        content = content.child(divider()).child(
+            div()
                 .h(28.0_f32)
                 .px(9.0_f32)
                 .rounded(5.0_f32)
@@ -3419,10 +3539,10 @@ fn palette_card(state: &AppState) -> Div {
                 .gap(7.0_f32)
                 .px(8.0_f32)
                 .child(ui_text(
-                    if mode == PaletteMode::Search {
-                        "◎"
-                    } else {
-                        "›"
+                    match mode {
+                        PaletteMode::Search => "◎",
+                        PaletteMode::Rename | PaletteMode::Tags => "✎",
+                        PaletteMode::QuickOpen => "›",
                     },
                     14.0,
                     theme().text_muted,
@@ -3430,10 +3550,11 @@ fn palette_card(state: &AppState) -> Div {
                 .child(
                     text_input()
                         .value(state.query)
-                        .placeholder(if mode == PaletteMode::Search {
-                            "検索 — タイトル・本文・タグ"
-                        } else {
-                            "クイックオープン — ページ名"
+                        .placeholder(match mode {
+                            PaletteMode::Search => "検索 — タイトル・本文・タグ",
+                            PaletteMode::Rename => "新しいタイトル",
+                            PaletteMode::Tags => "タグをカンマ区切りで入力",
+                            PaletteMode::QuickOpen => "クイックオープン — ページ名",
                         })
                         .font_family(sans())
                         .text_size(12.5_f32)
@@ -3449,10 +3570,17 @@ fn palette_card(state: &AppState) -> Div {
                         .on_submit({
                             let state = state.clone();
                             move |_| {
-                                if let Some(first) =
-                                    state.results.get_untracked().into_iter().next()
-                                {
-                                    state.open_summary(&first);
+                                let query = state.query.get_untracked();
+                                match state.palette.get_untracked() {
+                                    Some(PaletteMode::Rename) => state.rename_active(&query),
+                                    Some(PaletteMode::Tags) => state.set_tags(&query),
+                                    _ => {
+                                        if let Some(first) =
+                                            state.results.get_untracked().into_iter().next()
+                                        {
+                                            state.open_summary(&first);
+                                        }
+                                    }
                                 }
                             }
                         })
@@ -3475,10 +3603,11 @@ fn palette_card(state: &AppState) -> Div {
                 .pb(4.0_f32)
                 .child(dyn_view(move || {
                     let mode = header_state.palette.get().unwrap_or(PaletteMode::Search);
-                    let label = if mode == PaletteMode::Search {
-                        "検索"
-                    } else {
-                        "クイックオープン"
+                    let label = match mode {
+                        PaletteMode::Search => "検索",
+                        PaletteMode::Rename => "タイトルを変更",
+                        PaletteMode::Tags => "タグを変更",
+                        PaletteMode::QuickOpen => "クイックオープン",
                     };
                     ui_text(label, 9.5, theme().text_disabled)
                 })),
