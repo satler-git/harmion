@@ -655,6 +655,7 @@ impl State {
         if current.rev != rev {
             let conflict = json!({
                 "type": "revision_conflict",
+                "supported": true,
                 "id": id,
                 "provided_rev": rev,
                 "current_rev": current.rev,

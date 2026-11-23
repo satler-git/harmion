@@ -310,7 +310,9 @@ fn socket_round_trip_create_convert_save_export_and_restart() {
     );
 
     let conflicts = ok(&socket, "conflicts", json!({ "id": page_id }));
-    assert_eq!(conflicts["supported"], false);
+    assert_eq!(conflicts["supported"], true);
+    assert_eq!(conflicts["type"], "revision_conflict");
+    assert_eq!(conflicts["fields"][0]["field"]["type"], "body");
 
     let export_dir = root.join("export");
     let export = ok(
