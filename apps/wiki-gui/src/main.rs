@@ -318,6 +318,7 @@ struct AppState {
     boot_error: Option<String>,
     socket: String,
     summaries: Signal<Vec<Summary>>,
+    providers: Signal<Vec<String>>,
     tag_filter: Signal<Option<String>>,
     tabs: Signal<Vec<Tab>>,
     active: Signal<usize>,
@@ -940,6 +941,22 @@ fn save_content(id: &str, rev: u64, body: &str) -> Result<Content, String> {
     serde_json::from_value(value).map_err(|error| format!("save の解釈に失敗: {error}"))
 }
 
+fn load_providers() -> Vec<String> {
+    match rpc("provider_list", json!({})) {
+        Ok(value) => value
+            .get("providers")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("name").and_then(Value::as_str).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
 fn load_summaries() -> Result<Vec<Summary>, String> {
     let value = rpc("list", json!({}))?;
     let items = value
@@ -985,6 +1002,7 @@ fn boot(snapshot: bool) -> AppState {
         boot_error,
         socket,
         summaries: signal(summaries),
+        providers: signal(load_providers()),
         tag_filter: signal(None),
         tabs: signal(tabs),
         active: signal(0),
@@ -3146,7 +3164,7 @@ fn inspector_info(state: &AppState) -> Div {
                 .items_center()
                 .gap(4.0_f32)
                 .child(section_label("接続"))
-                .child(ui_text("—", 10.0, theme().text_disabled)),
+                .child(ui_text(format!("{}", state.providers.get().len()), 10.0, theme().text_disabled)),
         )
         .child(
             div()
@@ -3154,13 +3172,20 @@ fn inspector_info(state: &AppState) -> Div {
                 .flex()
                 .items_center()
                 .gap(7.0_f32)
-                .child(dot(theme().text_disabled))
-                .child(ui_text("provider 状態は未取得", 12.0, theme().text_muted)),
+                .child(dot(if state.providers.get().is_empty() { theme().text_disabled } else { theme().success }))
+                .child(ui_text(
+                    if state.providers.get().is_empty() { "provider 状態は未取得" } else { "ローカル provider を検出" },
+                    12.0,
+                    theme().text_muted,
+                )),
         )
         .child(
             ui_text(
-                "ローカル関数: wiki/backlinks · wiki/outline · wiki/transclude
-provider 接続は未取得",
+                if state.providers.get().is_empty() {
+                    "provider を取得できません".to_owned()
+                } else {
+                    state.providers.get().join(" · ")
+                },
                 10.5,
                 theme().text_disabled,
             )
