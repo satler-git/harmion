@@ -66,3 +66,18 @@ cargo test -p harmion-wiki-lsp
 # with a server on target/wiki-m0.sock:
 nvim --headless -u NONE -i NONE -c 'luafile apps/wiki/nvim/test/m0.lua'
 ```
+
+## Connect to a real node
+
+The Wiki app uses the integrated connection flow, not `admin.secret`:
+
+```sh
+./target/debug/wiki-server connect --node ./node-a
+# open the printed verification URL, then approve "Harmion Wiki" in Harmion Admin
+./target/debug/wiki-server serve --node ./node-a --socket target/wiki.sock
+```
+
+Tokens are stored in `<node>/credentials.json` with mode 0600 and refreshed
+before expiry. Add every kind produced by a `!` fence to the write grant, e.g.
+`--write-kind wiki,snippet,ledger,free`. Reads are a startup snapshot; live
+subscription catch-up is still pending.
