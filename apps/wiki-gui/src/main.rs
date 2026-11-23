@@ -2962,7 +2962,6 @@ fn inspector_links(state: &AppState) -> Div {
                 .flex()
                 .justify_between()
                 .child(ui_text("↑ ↓ 選択", 9.0, theme().text_disabled))
-                .child(ui_text("↵ 開く", 9.0, theme().text_disabled))
                 .child(ui_text("Enter 開く", 9.0, theme().text_disabled)),
         )
         .child(divider())
