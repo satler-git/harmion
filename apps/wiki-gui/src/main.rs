@@ -2853,8 +2853,8 @@ fn segment_button(
     let active = value == current;
     div()
         .flex_1()
-        .h(24.0_f32)
-        .rounded(5.0_f32)
+        .h(28.0_f32)
+        .rounded(6.0_f32)
         .flex()
         .items_center()
         .justify_center()
@@ -2865,6 +2865,7 @@ fn segment_button(
             Color::TRANSPARENT
         })
         .hover(|style| style.bg(theme().pressed))
+        .cursor(CursorIcon::Pointer)
         .on_click({
             let state = state.clone();
             move |_| state.inspector.set(value)

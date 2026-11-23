@@ -87,6 +87,7 @@ pub(super) fn toolbar(state: &AppState) -> Div {
                             let state = state.clone();
                             move |_| state.open_palette(PaletteMode::Search)
                         })
+                        .access(|access| access.label("検索 Ctrl+K"))
                         .child(ui_text("検索", 11.5, theme().text_muted))
                         .child(kbd("Ctrl+K")),
                 )
