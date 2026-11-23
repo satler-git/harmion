@@ -20,6 +20,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::sync::OnceLock;
+use std::thread;
 use std::time::Duration;
 
 use anti_webui::prelude::*;
@@ -318,6 +319,14 @@ struct EditorState {
     detail: String,
     warning: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Clone)]
+struct PollState {
+    source: Signal<Source>,
+    summaries: Signal<Vec<Summary>>,
+    tabs: Signal<Vec<Tab>>,
+    active: Signal<usize>,
 }
 
 #[derive(Clone)]
@@ -1045,6 +1054,54 @@ fn load_summaries() -> Result<Vec<Summary>, String> {
     serde_json::from_value(items).map_err(|error| format!("list の解釈に失敗: {error}"))
 }
 
+fn start_polling(state: &AppState) {
+    let poll = PollState {
+        source: state.source,
+        summaries: state.summaries,
+        tabs: state.tabs,
+        active: state.active,
+    };
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(2));
+        if poll.source.get_untracked() != Source::Server {
+            if let Ok(items) = load_summaries() {
+                let source = poll.source;
+                let summaries = poll.summaries;
+                request_frame(move |_| {
+                    source.set(Source::Server);
+                    summaries.set(items);
+                });
+            }
+            continue;
+        }
+        if let Ok(items) = load_summaries() {
+            let summaries = poll.summaries;
+            request_frame(move |_| summaries.set(items));
+        }
+        let active = poll.active.get_untracked();
+        let tabs = poll.tabs.get_untracked();
+        for (index, tab) in tabs.iter().enumerate() {
+            if index != active {
+                continue;
+            }
+            let Some(id) = tab.id.as_deref() else { continue };
+            let Ok(value) = rpc("workspace", json!({ "id": id })) else { continue };
+            let Ok(workspace) = serde_json::from_value::<Workspace>(value) else { continue };
+            let changed = tab.workspace.as_ref().map(|current| current.page.rev) != Some(workspace.page.rev);
+            if changed {
+                let tabs = poll.tabs;
+                request_frame(move |_| {
+                    tabs.update(|items| {
+                        if let Some(tab) = items.get_mut(index) {
+                            tab.workspace = Some(workspace);
+                        }
+                    });
+                });
+            }
+        }
+    });
+}
+
 fn boot(snapshot: bool) -> AppState {
     let socket = socket_path();
     let mut cached = load_cache().unwrap_or_default();
@@ -1123,6 +1180,9 @@ fn boot(snapshot: bool) -> AppState {
     }
     if let Some(id) = state.active_tab().and_then(|tab| tab.id) {
         state.push_history(Some(id));
+    }
+    if !snapshot {
+        start_polling(&state);
     }
     state
 }
