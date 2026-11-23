@@ -12,6 +12,7 @@ mod export;
 mod import;
 mod model;
 mod provider;
+mod provider_loop;
 mod search;
 mod slug;
 mod store;
@@ -101,6 +102,19 @@ enum Command {
         /// providers.
         #[arg(long = "provide-name", value_delimiter = ',')]
         provide_name: Vec<String>,
+        /// Register one built-in Provider manifest with this connection:
+        /// `wiki/backlinks`, `wiki/outline` (default) or `wiki/transclude`.
+        /// A connection offer carries at most one manifest.
+        #[arg(
+            long = "provider-name",
+            value_name = "NAME",
+            conflicts_with = "no_provider"
+        )]
+        provider_name: Option<String>,
+        /// Do not register a Provider manifest. The requested provide_names
+        /// (all three built-ins by default) are still granted.
+        #[arg(long)]
+        no_provider: bool,
         /// Maximum wait for owner approval, in seconds.
         #[arg(long, default_value_t = 300)]
         timeout_secs: u64,
@@ -241,6 +255,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             no_call,
             no_provide,
             provide_name,
+            provider_name,
+            no_provider,
             timeout_secs,
             poll_secs,
         } => connect(ConnectOptions {
@@ -254,6 +270,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             call: !no_call,
             provide: !no_provide,
             provide_name,
+            provider_name,
+            no_provider,
             timeout_secs,
             poll_secs,
         }),
@@ -359,11 +377,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "update_meta",
             json!({ "id": id, "rev": rev, "title": title, "tags": tags, "aliases": aliases }),
         ),
-        Command::Delete { id, rev, socket } => print_call(
-            &socket,
-            "delete",
-            json!({ "id": id, "rev": rev }),
-        ),
+        Command::Delete { id, rev, socket } => {
+            print_call(&socket, "delete", json!({ "id": id, "rev": rev }))
+        }
     }
 }
 
@@ -386,6 +402,8 @@ struct ConnectOptions {
     call: bool,
     provide: bool,
     provide_name: Vec<String>,
+    provider_name: Option<String>,
+    no_provider: bool,
     timeout_secs: u64,
     poll_secs: u64,
 }
@@ -412,25 +430,25 @@ fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         options.write_kind
     };
-    let provide_name = if options.provide_name.is_empty() {
-        vec![
-            "wiki/backlinks".to_owned(),
-            "wiki/outline".to_owned(),
-            "wiki/transclude".to_owned(),
-        ]
+    // A ConnectionOffer carries at most one provider manifest. The other names
+    // stay in provide_names so they can be registered by a later flow.
+    let registration = provider_loop::registration_for_connect(
+        options.provide,
+        options.no_provider,
+        options.provider_name.as_deref(),
+    )?;
+    let registered_name = registration.as_ref().map(|manifest| manifest.name.clone());
+    let provide_names = if options.provide {
+        provider_loop::requested_provide_names(registered_name.as_deref(), &options.provide_name)?
     } else {
-        options.provide_name
+        Vec::new()
     };
     let grants = GrantSpec {
         read: auth::filter_spec(options.read_all, read_kind.clone()),
         write: auth::filter_spec(options.write_all, write_kind.clone()),
         call: options.call,
         provide: options.provide,
-        provide_names: if options.provide {
-            provide_name
-        } else {
-            Vec::new()
-        },
+        provide_names,
         manage_apps: false,
         manage_nodes: false,
     };
@@ -443,7 +461,7 @@ fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
         challenge: pkce.challenge,
         state,
         grants,
-        provider: None,
+        provider: registration,
         provider_replace: false,
     };
     // Fail before creating a pending request if the offer violates the same
@@ -469,6 +487,14 @@ fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
         .and_then(Value::as_i64)
         .filter(|seconds| *seconds > 0)
         .ok_or("node connect-complete returned no valid expires_in")?;
+    let provider_id =
+        provider_loop::completion_provider_id(&completion, registered_name.as_deref())?;
+    if registered_name.is_some() && provider_id.is_none() {
+        eprintln!(
+            "warning: the node approved the connection but returned no Provider registration; \
+             `serve --node` will not attach a Provider"
+        );
+    }
     let credentials = auth::Credentials {
         version: 1,
         client_id: json_string(&completion, "client_id")?,
@@ -481,6 +507,7 @@ fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default()
             .to_owned(),
         oauth_origin: info.oauth_origin.clone(),
+        provider_id,
     };
     credentials.save(&options.node)?;
     let missing = credentials.missing_write_kinds(write_kind.iter());
@@ -497,6 +524,13 @@ fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
         options.node.join(auth::CREDENTIALS_FILE).display()
     );
     println!("client_id: {}", credentials.client_id);
+    match (&registered_name, credentials.provider_id) {
+        (Some(name), Some(provider_id)) => println!(
+            "provider: {name} (provider_id {})",
+            harmion_client::protocol::hex(&provider_id.0)
+        ),
+        _ => println!("provider: no manifest registered"),
+    }
     println!(
         "access token expires at {} (unix seconds); it will refresh automatically",
         credentials.expires_at
@@ -612,6 +646,7 @@ fn serve(
     data: Option<PathBuf>,
     node: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let provider_dir = node.clone();
     let state = match node {
         Some(dir) => State::open_node(dir),
         None => State::load(data),
@@ -646,6 +681,11 @@ fn serve(
         status["persistence"].as_str().unwrap_or("-")
     );
     let state = Arc::new(Mutex::new(state));
+    // The startup snapshot is complete; the Provider loop serves invocations
+    // from it and never performs node writes.
+    if let Some(dir) = provider_dir {
+        provider_loop::spawn(dir, Arc::clone(&state));
+    }
 
     for stream in listener.incoming() {
         let stream = match stream {
@@ -905,4 +945,79 @@ fn call(socket: &Path, method: &str, params: Value) -> Result<Value, Box<dyn std
         return Err(format!("server error: {error}").into());
     }
     Ok(response.get("result").cloned().unwrap_or(Value::Null))
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    fn connect_command(args: &[&str]) -> Command {
+        let mut argv = vec!["wiki-server", "connect", "--node", "/tmp/harmion-test-node"];
+        argv.extend_from_slice(args);
+        let cli = Cli::try_parse_from(argv).expect("connect arguments parse");
+        cli.command
+    }
+
+    #[test]
+    fn connect_parses_the_provider_options() {
+        let Command::Connect {
+            provider_name,
+            no_provider,
+            provide_name,
+            no_provide,
+            ..
+        } = connect_command(&[])
+        else {
+            panic!("expected connect");
+        };
+        assert_eq!(provider_name, None);
+        assert!(!no_provider);
+        assert!(provide_name.is_empty());
+        assert!(!no_provide);
+
+        let Command::Connect {
+            provider_name,
+            no_provider,
+            provide_name,
+            ..
+        } = connect_command(&[
+            "--provider-name",
+            "wiki/transclude",
+            "--provide-name",
+            "wiki/outline",
+        ])
+        else {
+            panic!("expected connect");
+        };
+        assert_eq!(provider_name.as_deref(), Some("wiki/transclude"));
+        assert!(!no_provider);
+        assert_eq!(provide_name, ["wiki/outline"]);
+
+        let Command::Connect {
+            no_provider,
+            no_provide,
+            ..
+        } = connect_command(&["--no-provider", "--no-provide"])
+        else {
+            panic!("expected connect");
+        };
+        assert!(no_provider);
+        assert!(no_provide);
+    }
+
+    #[test]
+    fn no_provider_conflicts_with_an_explicit_provider_name() {
+        assert!(
+            Cli::try_parse_from([
+                "wiki-server",
+                "connect",
+                "--node",
+                "/tmp/harmion-test-node",
+                "--no-provider",
+                "--provider-name",
+                "wiki/outline",
+            ])
+            .is_err()
+        );
+    }
 }

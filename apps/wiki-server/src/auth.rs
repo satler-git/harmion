@@ -14,6 +14,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use harmion_client::protocol::interpreter::ProviderId;
 use harmion_client::protocol::{self, ConnectionInfo, FilterSpec};
 use harmion_client::{Error as ClientError, OAuthTokens, ProtectedDir};
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,10 @@ pub struct Credentials {
     pub scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_origin: Option<String>,
+    /// Provider registered by the integrated connection, if any. This is an
+    /// identifier, not a token; it is persisted so `serve --node` can attach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<ProviderId>,
 }
 
 impl fmt::Debug for Credentials {
@@ -50,6 +55,7 @@ impl fmt::Debug for Credentials {
             .field("expires_at", &self.expires_at)
             .field("scope", &self.scope)
             .field("oauth_origin", &self.oauth_origin)
+            .field("provider_id", &self.provider_id)
             .finish()
     }
 }
@@ -373,6 +379,7 @@ mod tests {
             expires_at: 1_000,
             scope: "read:kind:d2lraQ write:all".to_owned(),
             oauth_origin: Some("https://127.0.0.1:8788".to_owned()),
+            provider_id: None,
         }
     }
 
@@ -454,6 +461,30 @@ mod tests {
         assert_eq!(Credentials::load(&directory.path).unwrap(), credentials);
         assert!(!format!("{credentials:?}").contains(ACCESS));
         assert!(!format!("{credentials:?}").contains(REFRESH));
+    }
+
+    #[test]
+    fn credentials_persist_the_registered_provider_id() {
+        let directory = TempDir::new("provider");
+        let mut credentials = credentials();
+        credentials.provider_id = Some(ProviderId([0x2a; 32]));
+        credentials.save(&directory.path).unwrap();
+        let path = directory.path.join(CREDENTIALS_FILE);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let loaded = Credentials::load(&directory.path).unwrap();
+        assert_eq!(loaded.provider_id, Some(ProviderId([0x2a; 32])));
+        // Credentials written before provider registration stay readable.
+        let mut old = serde_json::to_value(credentials).unwrap();
+        old.as_object_mut().unwrap().remove("provider_id");
+        fs::write(&path, serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            Credentials::load(&directory.path).unwrap().provider_id,
+            None
+        );
     }
 
     #[test]

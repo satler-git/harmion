@@ -2,13 +2,30 @@
 //! `wiki/backlinks`, `wiki/outline` and `wiki/transclude` interpreter names.
 //!
 //! The platform-side registration/attach and the streaming v1 input contract
-//! are separate; this module lets the app self-test and lets a local client call
-//! the same functions without the 64-Content interpreter limit.
+//! live in `provider_loop`; this module is the single implementation shared by
+//! the local `provider_call` RPC and the attached Provider WebSocket loop.
+//!
+//! Callers pass the Wiki Content ID (and, for transclusion, the depth) in the
+//! explicit invocation `input`. The node's selected Content snapshots are not
+//! needed: the Wiki server already holds the startup snapshot of its own store,
+//! and a Provider must never be handed read or write permission implicitly.
 
 use serde_json::{Value, json};
 
 use crate::error::{RpcError, RpcResult, optional_u64, required_str};
 use crate::store::State;
+
+/// The three provider names this app can serve locally.
+pub const NAMES: [&str; 3] = ["wiki/backlinks", "wiki/outline", "wiki/transclude"];
+
+/// The display contract for one provider call. The local RPC wraps this in its
+/// JSON shape while the Provider WebSocket sends `data` + `Display` directly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProviderOutput {
+    pub data: Value,
+    pub display: String,
+    pub media_type: &'static str,
+}
 
 fn md_text(text: &str) -> String {
     text.replace('\\', "\\\\")
@@ -45,7 +62,10 @@ pub fn list() -> Value {
     })
 }
 
-pub fn call(state: &State, name: &str, params: &Value) -> RpcResult<Value> {
+/// Run one Wiki provider against the in-memory startup snapshot. Both the local
+/// `provider_call` RPC and an attached Provider invocation use this function, so
+/// their results cannot drift.
+pub fn invoke(state: &State, name: &str, params: &Value) -> RpcResult<ProviderOutput> {
     let id = required_str(params, "id")?;
     match name {
         "wiki/backlinks" => {
@@ -65,12 +85,11 @@ pub fn call(state: &State, name: &str, params: &Value) -> RpcResult<Value> {
                     ));
                 }
             }
-            Ok(json!({
-                "display": display,
-                "media_type": "text/markdown",
-                "data": items,
-                "partial": false
-            }))
+            Ok(ProviderOutput {
+                data: json!(items),
+                display,
+                media_type: "text/markdown",
+            })
         }
         "wiki/outline" => {
             let workspace = state.workspace(&id)?;
@@ -84,28 +103,37 @@ pub fn call(state: &State, name: &str, params: &Value) -> RpcResult<Value> {
                     item.line
                 ));
             }
-            Ok(json!({
-                "display": display,
-                "media_type": "text/markdown",
-                "data": items,
-                "partial": false
-            }))
+            Ok(ProviderOutput {
+                data: json!(items),
+                display,
+                media_type: "text/markdown",
+            })
         }
         "wiki/transclude" => {
             let depth = optional_u64(params, "depth")?.unwrap_or(1).min(3) as u32;
             let response = state.transclude(&id, depth)?;
             let display = response.body.clone();
-            Ok(json!({
-                "display": display,
-                "media_type": "text/markdown",
-                "data": response,
-                "partial": false
-            }))
+            Ok(ProviderOutput {
+                data: json!(response),
+                display,
+                media_type: "text/markdown",
+            })
         }
         other => Err(RpcError::not_found(format!(
             "unknown Wiki provider {other:?}"
         ))),
     }
+}
+
+/// Local `provider_call` result shape, kept for the existing Unix-socket API.
+pub fn call(state: &State, name: &str, params: &Value) -> RpcResult<Value> {
+    let output = invoke(state, name, params)?;
+    Ok(json!({
+        "display": output.display,
+        "media_type": output.media_type,
+        "data": output.data,
+        "partial": false
+    }))
 }
 
 #[cfg(test)]
