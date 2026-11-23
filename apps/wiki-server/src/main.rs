@@ -9,8 +9,10 @@ mod auth;
 mod backend;
 mod error;
 mod export;
+mod import;
 mod model;
 mod provider;
+mod search;
 mod slug;
 mod store;
 mod transclude;
@@ -158,6 +160,11 @@ enum Command {
         #[arg(long, default_value = SOCKET_DEFAULT)]
         socket: PathBuf,
     },
+    Import {
+        dir: PathBuf,
+        #[arg(long, default_value = SOCKET_DEFAULT)]
+        socket: PathBuf,
+    },
     /// Create a page; the body is read from stdin.
     #[command(name = "create_page")]
     CreatePage {
@@ -281,6 +288,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &socket,
             "export",
             json!({ "dir": dir.map(|dir| dir.display().to_string()), "raw": raw }),
+        ),
+        Command::Import { dir, socket } => print_call(
+            &socket,
+            "import",
+            json!({ "dir": dir.display().to_string() }),
         ),
         Command::CreatePage {
             title,
@@ -855,6 +867,12 @@ fn dispatch_result(state: &Arc<Mutex<State>>, request: &Request) -> RpcResult<Va
             let dir = optional_str(params, "dir")?;
             let state = state.lock().expect("state lock");
             Ok(state.export(raw, dir.as_deref().map(Path::new))?)
+        }
+        "import" => {
+            let dir = required_str(params, "dir")?;
+            let mut state = state.lock().expect("state lock");
+            Ok(serde_json::to_value(state.import_dir(Path::new(&dir))?)
+                .expect("import report serializes"))
         }
         "conflicts" => {
             let id = required_str(params, "id")?;

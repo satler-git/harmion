@@ -1,6 +1,7 @@
 //! In-memory Content store, optional atomic JSON persistence, CRUD, fence
 //! conversion and the `Workspace` composition.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -68,6 +69,7 @@ enum Backend {
 pub struct State {
     contents: BTreeMap<String, Content>,
     backend: Backend,
+    search: RefCell<Option<crate::search::SearchIndex>>,
 }
 
 impl State {
@@ -79,6 +81,7 @@ impl State {
             return Ok(Self {
                 contents: fixtures(),
                 backend: Backend::Memory,
+                search: RefCell::new(None),
             });
         };
         if path.exists() {
@@ -88,6 +91,7 @@ impl State {
             return Ok(Self {
                 contents,
                 backend: Backend::Json { path },
+                search: RefCell::new(None),
             });
         }
         let contents = fixtures();
@@ -96,6 +100,7 @@ impl State {
         Ok(Self {
             contents,
             backend: Backend::Json { path },
+            search: RefCell::new(None),
         })
     }
 
@@ -107,6 +112,7 @@ impl State {
         Ok(Self {
             contents,
             backend: Backend::Node(node),
+            search: RefCell::new(None),
         })
     }
 
@@ -115,6 +121,7 @@ impl State {
         Self {
             contents,
             backend: Backend::Memory,
+            search: RefCell::new(None),
         }
     }
 
@@ -309,6 +316,22 @@ impl State {
     }
 
     pub fn search(&self, query: &str) -> Vec<Summary> {
+        if self.search.borrow().is_none() {
+            if let Ok(index) = crate::search::SearchIndex::build(&self.contents) {
+                *self.search.borrow_mut() = Some(index);
+            }
+        }
+        if let Some(index) = self.search.borrow().as_ref() {
+            if let Ok(ids) = index.search(query, 20) {
+                let items = ids
+                    .into_iter()
+                    .filter_map(|id| self.contents.get(&id).map(Summary::from))
+                    .collect::<Vec<_>>();
+                if !items.is_empty() {
+                    return items;
+                }
+            }
+        }
         let needle = query.to_lowercase();
         let mut scored = self
             .contents
@@ -713,6 +736,17 @@ impl State {
         })
     }
 
+    pub fn import_dir(&mut self, dir: &Path) -> RpcResult<crate::import::ImportReport> {
+        self.ensure_writable("import")?;
+        let mut candidate = self.contents.clone();
+        let report = crate::import::import(&mut candidate, dir).map_err(RpcError::bad_request)?;
+        self.mutate(|contents| {
+            *contents = candidate;
+            Ok(())
+        })?;
+        Ok(report)
+    }
+
     pub fn delete(&mut self, id: &str) -> RpcResult<Content> {
         self.ensure_writable("delete")?;
         let content = self.open(id)?;
@@ -781,6 +815,7 @@ impl State {
             })?;
         }
         self.contents = candidate;
+        *self.search.borrow_mut() = None;
         Ok(value)
     }
 
@@ -904,14 +939,14 @@ fn derived_snippet_title(block: &EmbeddedBlock) -> String {
     }
 }
 
-fn now_micros() -> i64 {
+pub(crate) fn now_micros() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_micros().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
 }
 
-fn today_utc() -> String {
+pub(crate) fn today_utc() -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
@@ -944,7 +979,7 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn new_content_id() -> String {
+pub(crate) fn new_content_id() -> String {
     let mut bytes = [0u8; 32];
     if let Ok(mut file) = fs::File::open("/dev/urandom")
         && file.read_exact(&mut bytes).is_ok()
@@ -1067,6 +1102,18 @@ fn fixtures() -> BTreeMap<String, Content> {
     home.updated_at = 202611221431;
     home.updated_label = "14:31".to_owned();
     push(home);
+    let mut demo = Content::fixture(
+        "p-demo",
+        "page",
+        "Markdown 見本",
+        "# Markdown 見本\n\n見出し・リスト・表・引用・コード・参照を確認するページ。\n\n## リスト\n\n- 見出し\n- リスト\n- 表\n\n## 表\n\n| 要素 | 状態 |\n|---|---|\n| Markdown | 描画 |\n| transclusion | 展開 |\n\n> 引用は本文から描画する。\n\n## コード\n\n```rust\nfn main() {\n    println!(\"wiki\");\n}\n```\n\n## 参照\n\n![[p-goals]]\n\n![wiki/outline()]\n".to_owned(),
+    );
+    demo.kinds = vec!["wiki".to_owned(), "reference".to_owned()];
+    demo.tags = vec!["見本".to_owned(), "Markdown".to_owned()];
+    demo.created = "2026-11-23".to_owned();
+    demo.updated_at = 202611231200;
+    demo.updated_label = "12:00".to_owned();
+    push(demo);
 
     let mut goals = Content::fixture(
         "p-goals",
@@ -1740,6 +1787,22 @@ mod tests {
         let state = sample_state();
         assert_eq!(state.transclude("p-test", 4).unwrap_err().code, 400);
         assert!(state.transclude("p-test", 3).is_ok());
+    }
+
+    #[test]
+    fn raw_export_import_round_trip() {
+        let source = State::load(None).unwrap();
+        let dir = temp_dir("roundtrip-import");
+        source.export(true, Some(&dir)).unwrap();
+        let mut target = State::from_contents(BTreeMap::new());
+        let report = target.import_dir(&dir).unwrap();
+        assert!(report.imported >= 20, "{report:?}");
+        assert_eq!(target.contents.len(), source.contents.len());
+        assert_eq!(
+            target.open("p-home").unwrap().title,
+            source.open("p-home").unwrap().title
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

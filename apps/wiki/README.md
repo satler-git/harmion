@@ -43,7 +43,7 @@ See [apps/wiki/nvim/README.md](nvim/README.md).
 
 - `list`, `open`, `workspace`, `search`, `save`
 - `status`, `create_page`, `create_snippet`, `convert_fence`, `delete`,
-  `transclude`, `export`, `conflicts`, `provider_list`, `provider_call`
+  `transclude`, `export`, `import`, `conflicts`, `provider_list`, `provider_call`
 
 CLI helpers: `list`, `open`, `workspace`, `search`, `save`, `status`,
 `conflicts`, `transclude`, `export`.

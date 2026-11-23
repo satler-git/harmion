@@ -179,7 +179,7 @@ fn socket_round_trip_create_convert_save_export_and_restart() {
 
     let status = ok(&socket, "status", json!({}));
     assert_eq!(status["backend"], "json");
-    assert_eq!(status["contents"]["pages"], 16);
+    assert_eq!(status["contents"]["pages"], 17);
     assert_eq!(status["contents"]["snippets"], 5);
     assert_eq!(
         status["persistence"],
