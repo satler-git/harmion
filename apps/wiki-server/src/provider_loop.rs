@@ -1,21 +1,11 @@
 //! Provider registration/attach loop for a node-backed Wiki server.
 //!
-//! `wiki-server connect` puts one Provider manifest into the integrated OAuth
-//! connection offer. The node stores the manifest, approves it because the same
-//! name is listed in `provide_names`, and returns its `provider_id`; `connect`
-//! persists that ID in `credentials.json` (mode 0600). `serve --node DIR` loads
-//! the startup snapshot and then runs this loop so the registered Provider is
-//! attached to the node.
-//!
-//! # One manifest per connection
-//!
-//! The platform contract has exactly one `provider` field in `ConnectionOffer`
-//! (`crates/protocol/src/connect.rs`), so one approved connection can
-//! register at most one Provider manifest. The Wiki app requests all three
-//! provider names as grants, but only the selected one (default `wiki/outline`)
-//! is registered by `connect`. The other names can be registered later with a
-//! separate `interpreter-register` flow; this loop only attaches the one ID
-//! stored in the credentials.
+//! `wiki-server connect` puts Provider manifests into the integrated OAuth
+//! connection offer. The node stores and approves them because the same names
+//! are listed in `provide_names`, then returns one `provider_id` per manifest;
+//! `connect` persists the bindings in `credentials.json` (mode 0600).
+//! `serve --node DIR` loads the startup snapshot and runs one attach loop per
+//! registered Provider, all from the same snapshot.
 //!
 //! # Safety
 //!
@@ -54,7 +44,7 @@ const MAX_PROVIDE_NAMES: usize = 32;
 /// Provider failures are bounded by the interpreter contract.
 const MAX_FAILURE_MESSAGE_BYTES: usize = 1024;
 
-/// Build the one manifest that the integrated connection can register.
+/// Build one manifest for the integrated connection.
 ///
 /// Only the three names implemented by `provider::invoke` are accepted, so the
 /// manifest cannot promise an operation this process cannot serve.
