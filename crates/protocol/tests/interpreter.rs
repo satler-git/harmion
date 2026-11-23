@@ -260,3 +260,217 @@ fn interpreter_grants_are_an_additive_optional_extension_of_grant_json() {
     assert_eq!(encoded["call"], true);
     assert_eq!(encoded["provide"], true);
 }
+
+#[test]
+fn legacy_call_requests_are_no_longer_capped_at_64_contents() {
+    let contents: Vec<_> = (1..=65u8)
+        .map(|id| json!({"id": format!("{id:02x}").repeat(32), "token": "aa".repeat(32)}))
+        .collect();
+    let call = json!({
+        "provider": "wiki/all",
+        "input": {"page": 1},
+        "contents": contents,
+        "timeout_ms": 10_000,
+    });
+    let decoded = decode_call_request(&serde_json::to_vec(&call).unwrap()).unwrap();
+    assert_eq!(decoded.contents.len(), 65);
+    assert_eq!(decoded.contents[0].content.0, [1; 32]);
+    assert_eq!(decoded.contents[64].content.0, [65; 32]);
+    assert_eq!(decoded.contents[0].token.0, [0xaa; 32]);
+    // The old body cap still applies, so an arbitrarily large non-streaming
+    // request is rejected rather than silently truncated.
+    let oversized = vec![b' '; MAX_CALL_REQUEST_BYTES + 1];
+    assert!(decode_call_request(&oversized).is_err());
+}
+
+#[test]
+fn stream_frames_validate_chunks_order_shapes_and_limits() {
+    let stream_id = "ab".repeat(32);
+    let start = decode_stream_frame(
+        &serde_json::to_vec(&json!({
+            "frame": "start",
+            "stream_id": stream_id,
+            "provider": "wiki/all",
+            "input": {"page": 1},
+            "timeout_ms": 5_000,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    match start {
+        StreamFrame::Start(start) => {
+            assert_eq!(start.stream_id.0, [0xab; 32]);
+            assert_eq!(start.provider, "wiki/all");
+            assert_eq!(start.input["page"], 1);
+            assert_eq!(start.timeout_ms, 5_000);
+        }
+        _ => panic!("start"),
+    }
+    let chunk = decode_stream_frame(
+        &serde_json::to_vec(&json!({
+            "frame": "chunk",
+            "stream_id": stream_id,
+            "seq": 0,
+            "contents": [{"id": "01".repeat(32), "token": "02".repeat(32)}],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    match chunk {
+        StreamFrame::Chunk(chunk) => {
+            assert_eq!(chunk.seq, 0);
+            assert_eq!(chunk.contents.len(), 1);
+            assert_eq!(chunk.contents[0].content.0, [1; 32]);
+        }
+        _ => panic!("chunk"),
+    }
+    for frame in ["end", "cancel"] {
+        let decoded = decode_stream_frame(
+            &serde_json::to_vec(&json!({
+                "frame": frame,
+                "stream_id": "ab".repeat(32),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            (frame, decoded),
+            ("end", StreamFrame::End(_)) | ("cancel", StreamFrame::Cancel(_))
+        ));
+    }
+
+    for invalid in [
+        json!({"frame": "chunk", "stream_id": "ab".repeat(32), "seq": 0, "contents": [], "extra": 1}),
+        json!({"frame": "unknown", "stream_id": "ab".repeat(32)}),
+        json!({"frame": "start", "stream_id": "ab", "provider": "wiki/all"}),
+        json!({"frame": "start", "stream_id": "ab".repeat(32), "provider": "Wiki/All"}),
+        json!({"frame": "start", "stream_id": "ab".repeat(32), "provider": "wiki/all", "timeout_ms": 99}),
+        json!({"frame": "start", "stream_id": "ab".repeat(32), "provider": "wiki/all", "input": {"n": "1".repeat(MAX_CALL_INPUT_BYTES + 1)}}),
+        json!({"frame": "chunk", "stream_id": "ab".repeat(32), "seq": 0, "contents": [
+            {"id": "01".repeat(32), "token": "02".repeat(32)},
+            {"id": "01".repeat(32), "token": "03".repeat(32)}
+        ]}),
+    ] {
+        assert!(
+            decode_stream_frame(&serde_json::to_vec(&invalid).unwrap()).is_err(),
+            "{invalid}"
+        );
+    }
+    let oversized = vec![b' '; MAX_STREAM_FRAME_BYTES + 1];
+    assert!(decode_stream_frame(&oversized).is_err());
+}
+
+#[test]
+fn stream_contract_constants_and_provider_frames_are_explicit() {
+    assert_eq!(STREAM_INPUT_VERSION, 1);
+    assert_eq!(MAX_STREAM_INPUT_BYTES, 128 * 1024 * 1024);
+    const { assert!(MAX_STREAM_CHUNK_CONTENT_BYTES < MAX_PROVIDER_MESSAGE_BYTES) };
+    const { assert!(MAX_STREAM_CHUNKS > 0) };
+    const { assert!(MAX_ACTIVE_INPUT_STREAMS_PER_APP < MAX_ACTIVE_INPUT_STREAMS) };
+
+    let legacy = InvokeParams {
+        invocation_id: InvocationId([1; 32]),
+        provider: "wiki/all".into(),
+        contract_version: CONTRACT_VERSION,
+        input: json!({}),
+        contents: Vec::new(),
+        stream: None,
+    };
+    let value = serde_json::to_value(&legacy).unwrap();
+    assert!(value.get("stream").is_none());
+    assert_eq!(
+        serde_json::from_value::<InvokeParams>(value).unwrap(),
+        legacy
+    );
+
+    let streamed = InvokeParams {
+        invocation_id: InvocationId([1; 32]),
+        provider: "wiki/all".into(),
+        contract_version: CONTRACT_VERSION,
+        input: json!({}),
+        contents: Vec::new(),
+        stream: Some(InvokeStream {
+            version: STREAM_INPUT_VERSION,
+            chunks: 2,
+            total_contents: 70,
+            total_bytes: 1234,
+        }),
+    };
+    let value = serde_json::to_value(&streamed).unwrap();
+    assert_eq!(value["stream"]["version"], 1);
+    assert_eq!(value["stream"]["chunks"], 2);
+    assert_eq!(
+        serde_json::from_value::<InvokeParams>(value).unwrap(),
+        streamed
+    );
+    assert!(validate_invoke_stream(streamed.stream.as_ref().unwrap()).is_ok());
+    assert!(
+        validate_invoke_stream(&InvokeStream {
+            version: 2,
+            chunks: 1,
+            total_contents: 1,
+            total_bytes: 1,
+        })
+        .is_err()
+    );
+    assert!(
+        validate_invoke_stream(&InvokeStream {
+            version: 1,
+            chunks: MAX_STREAM_CHUNKS + 1,
+            total_contents: 1,
+            total_bytes: 1,
+        })
+        .is_err()
+    );
+    assert!(
+        validate_invoke_stream(&InvokeStream {
+            version: 1,
+            chunks: 1,
+            total_contents: 1,
+            total_bytes: MAX_STREAM_INPUT_BYTES as u64 + 1,
+        })
+        .is_err()
+    );
+
+    let chunk = InvokeChunkParams {
+        invocation_id: InvocationId([1; 32]),
+        seq: 0,
+        contents: vec![ProviderContent {
+            content: json!({"id": "01".repeat(32), "body": "x", "attributes": [], "kinds": []}),
+            conflict: false,
+        }],
+    };
+    let value = serde_json::to_value(&chunk).unwrap();
+    assert_eq!(value["seq"], 0);
+    assert_eq!(
+        serde_json::from_value::<InvokeChunkParams>(value).unwrap(),
+        chunk
+    );
+    let end = InvokeEndParams {
+        invocation_id: InvocationId([1; 32]),
+        seq: 1,
+        total_contents: 1,
+        total_bytes: 1,
+    };
+    let value = serde_json::to_value(&end).unwrap();
+    assert_eq!(value["seq"], 1);
+    assert_eq!(
+        serde_json::from_value::<InvokeEndParams>(value).unwrap(),
+        end
+    );
+}
+
+#[test]
+fn provider_data_and_display_caps_stay_unchanged() {
+    let at_display_cap = json!({
+        "status": "ok",
+        "data": null,
+        "display": {"media_type": "text/plain", "text": "x".repeat(MAX_DISPLAY_TEXT_BYTES)},
+    });
+    assert!(decode_provider_result(at_display_cap).is_ok());
+    let data_over_cap = json!({
+        "status": "ok",
+        "data": "x".repeat(MAX_PROVIDER_DATA_BYTES + 1),
+    });
+    assert!(decode_provider_result(data_over_cap).is_err());
+}

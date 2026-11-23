@@ -1,6 +1,6 @@
 # Interpreter v1 契約
 
-更新日: 2026-11-22
+更新日: 2026-11-23
 
 この文書は、一つのHarmionノード内でInterpreterの登録・発見・呼び出しを仲介するv1契約を定める。Interpreterは計算を提供する別プロセスまたは別アプリであり、ノード内に動的ライブラリとしてロードしない。遠隔ノード上のInterpreterを探すこと、未起動の提供元を自動起動することはv1の範囲外。
 
@@ -106,8 +106,8 @@ grantはアプリ単位の`call`と`provide`、および`provide`時の任意の
 ```
 
 - `input`は呼び出し元が送ったJSON。null、真偽値、数値、文字列、配列、オブジェクト。深さ128・要素合計32,768・符号化後128 KiB以下。数値はJSONの10進表記を保持する。
-- `contents`は呼び出し元が選んだスナップショット。最大64件。各Contentは通常値だけで、編集トークン・basis・競合候補・履歴を含まない。`conflict`はその固定basisで通常値が競合しているかを示す。
-- 本文全体は2 MiB以下。ノードは上限超過を呼び出し元へ413で返し、Providerへ送らない。
+- `contents`は呼び出し元が選んだスナップショット。件数上限はない。各Contentは通常値だけで、編集トークン・basis・競合候補・履歴を含まない。`conflict`はその固定basisで通常値が競合しているかを示す。
+- この非ストリーミング形式では、本文全体は2 MiB以下（`MAX_PROVIDER_MESSAGE_BYTES`からinvocation envelope分を引いた上限）。ノードは上限超過を呼び出し元へ413で返し、Providerへ送らない。64件を超える入力も、このフレーム上限に収まる限り同じ1回の`interpreter.invoke`で送る。より大きい入力は§4.3のストリーミングを使う。
 - ProviderはContent IDから最新値を取り直す契約を持たない。ノードは呼び出し中にQueryやSubscribeを暗黙に実行しない。
 
 成功応答:
@@ -127,7 +127,47 @@ grantはアプリ単位の`call`と`provide`、および`provide`時の任意の
 - `code`は1〜64バイトの小文字英数字と`. _ -`。`message`は1024バイト以下。`details`は任意JSONで256 KiB以下。ノードはProvider固有のcodeを解釈しない。
 - JSON-RPC errorはtransport/protocol違反を表し、アプリケーションエラーには使わない。結果の`status`が不正、または上限超過なら502 `interpreter_invalid_response`。
 
-### 4.3 キャンセル
+### 4.3 ストリーミング入力（v1追加契約）
+
+非ストリーミング呼び出しは従来どおり。入力全体が2 MiBを超え得る場合、呼び出し元はApp APIの`interpreter-call-stream`を使う。Provider側は同じ`interpreter.invoke`要求IDで結果を返すため、結果とキャンセルの契約は変わらない。
+
+呼び出し元App APIのフレーム（1フレーム1 HTTP要求、各要求は1 MiB以下）:
+
+```json
+{"frame":"start","stream_id":"hex32","provider":"wiki/all","input":{},"timeout_ms":10000}
+{"frame":"chunk","stream_id":"hex32","seq":0,"contents":[{"id":"hex32","token":"hex32"}]}
+{"frame":"end","stream_id":"hex32"}
+{"frame":"cancel","stream_id":"hex32"}
+```
+
+- `stream_id`は呼び出し元が生成する32バイトのhex。アプリと有効期間内で一意で、重複は400 `invalid_request`。
+- `chunk.seq`は0から始まる連続した番号。順序違反・Content IDのストリーム内重複は状態を変えず、明示エラーを返す。同じ呼び出し元だけがchunk/end/cancelできる。
+- 応答は`{"stream_id":"hex","status":"open","limit_bytes":134217728,"expires_in_ms":60000}`、chunk成功は`{"stream_id":"hex","status":"accepted","seq":N,"next_seq":N+1,"accepted_contents":M,"accepted_bytes":B,"limit_bytes":134217728}`、cancelは`{"stream_id":"hex","status":"canceled","canceled":true}`。
+- `end`は通常の呼び出し結果（`invocation_id`・`status`・`data`・`display`、または`status:"error"`）に`stream_id`を加えて返す。`timeout_ms`は`end`後のProvider待機時間であり、アップロード期限60秒とは別。
+- アップロードの論理上限は128 MiB（`MAX_STREAM_INPUT_BYTES`）。Content選択フレームの受理バイトと、終了時に実体化したProvider Contentの符号化バイトの両方で検査する。超過は`status:"error"`、`error.code:"stream_limit_exceeded"`、`partial:true`、`actual_bytes`/`limit_bytes`/`accepted_contents`/`accepted_bytes`を返し、部分入力は破棄する。無言の切り捨ても部分的な呼び出しも行わない。
+- その他のストリームエラーはHTTP 200の`status:"error"`で`stream_not_found`、`stream_expired`、`stream_sequence`、`stream_duplicate_content`。認証・grant・容量・Provider不在は通常のApp APIエラー（401/403/429/503）。不正JSON・未知フィールドは400 `invalid_request`。
+
+Provider側のフレーム（同じWebSocket接続）:
+
+```json
+{"jsonrpc":"2.0","id":"invocation hex","method":"interpreter.invoke","params":{
+  "invocation_id":"hex","provider":"wiki/all","contract_version":1,"input":{},"contents":[],
+  "stream":{"version":1,"chunks":2,"total_contents":65,"total_bytes":123456}
+}}
+{"jsonrpc":"2.0","method":"interpreter.invoke.chunk","params":{
+  "invocation_id":"hex","seq":0,"contents":[...]
+}}
+{"jsonrpc":"2.0","method":"interpreter.invoke.end","params":{
+  "invocation_id":"hex","seq":2,"total_contents":65,"total_bytes":123456
+}}
+```
+
+- `stream.version`は1。`chunks`はchunk通知数、`total_contents`はContent総数、`total_bytes`は各`ProviderContent`の符号化長の合計。開始要求の`contents`は空配列。
+- chunkは最大4096個、`seq`は0から連続。チャンク目標は符号化Content 768 KiBで、各メッセージは2 MiB以下。`end.seq`はchunk数と一致する。
+- Providerは`end`まで内容を蓄積してから結果を返す。途中で`interpreter.cancel`を受けた場合は破棄する。Provider SDK `ProviderClient::next`は自動的に蓄積し、完了した`InvokeParams`を返す。
+- 非ストリーミングの`interpreter.invoke`は`stream`フィールドを持たない。旧Provider実装はストリーミング呼び出しを受けない限り変更不要。
+
+### 4.4 キャンセル
 
 ノードからProviderへの通知:
 
@@ -137,7 +177,7 @@ grantはアプリ単位の`call`と`provide`、および`provide`時の任意の
 
 Providerは処理を中止するよう努める。応答はない。キャンセル後に届いた同じIDの応答は無視する。Providerがさらに実行を続けても、ノードは呼び出し元へ結果を返さない。純粋性・即時停止はProvider実装の契約であり、v1はサンドボックスで強制しない。
 
-### 4.4 フレーミング
+### 4.5 フレーミング
 
 - テキストフレームだけを使う。バイナリフレームは1003で閉じる。
 - クライアントからサーバーへのフレームはマスク必須。サーバーからはマスクしない。
@@ -176,7 +216,7 @@ OAuth originでは、access tokenで同じticketを再発行できる。
 }
 ```
 
-- `contents[].token`は`get`/`query`等で得た編集トークン。ノードはトークンが固定したbasisのスナップショットをProviderへ渡す。トークン自体はProviderへ渡さない。同じContentを重複して指定できない。
+- `contents[].token`は`get`/`query`等で得た編集トークン。ノードはトークンが固定したbasisのスナップショットをProviderへ渡す。トークン自体はProviderへ渡さない。同じContentを重複して指定できない。件数上限はなく、1 MiBの本文とProviderの2 MiBフレームに収まる範囲で64件超も指定できる。
 - Contentは呼び出し元の現在のRead権限で可視でなければ404。トークン不明・回収済みは410 `token_expired`、Content不一致は400。
 - `timeout_ms`は省略時10000、100〜30000。範囲外は400。
 - 成功はHTTP 200で`{"invocation_id":"hex","status":"ok","data":...,"display":...}`。
@@ -185,7 +225,17 @@ OAuth originでは、access tokenで同じticketを再発行できる。
 - 呼び出し元のHTTPタスクが消えた場合、ノードはcancelを送り、待機状態を回収する。
 - 呼び出しは冪等ではない。同じ要求の再送は別のinvocationになり得る。request receiptはv1にない。
 
-### 5.4 キャンセル
+### 5.4 ストリーミング呼び出し
+
+`POST /app/v1/interpreter-call-stream`（`call`が必要）へ§4.3の`frame`を1要求ずつ送る。本文・応答・エラーの形は§4.3に定める。
+
+- `start`はProvider名・明示入力・`timeout_ms`だけを送り、Contentはchunkで送る。`start`時点で登録・grant・Provider可用性を検査するが、Contentの実体化は`end`時に行う。
+- アップロードは60秒以内。`start`・`chunk`・`cancel`は同じアプリだけが操作できる。別アプリのstream IDは403、未知・期限切れ・終了済みは`stream_not_found`/`stream_expired`。
+- 1つのstreamは`end`または`cancel`で単回消費される。`end`後のキャンセルは通常の`interpreter-cancel`（invocation ID）を使う。
+- 同時に開けるstreamはノード全体32件・アプリごと8件。超過は429 `interpreter_capacity`。staged入力はプロセス内だけに保持し、ノード再起動で失われる。
+- App APIの1要求上限（1 MiB）はフレーム単位で適用される。合計の論理上限は128 MiBで、超過は部分状態付きの明示エラーになる。
+
+### 5.5 キャンセル
 
 `POST /app/v1/interpreter-cancel`（`call`が必要）の本文は32バイトのinvocation ID。
 
@@ -278,4 +328,6 @@ App APIのエラー:
 | 503 | `interpreter_unavailable` | Provider未接続・利用不能 |
 | 504 | `interpreter_timeout` | 期限内の応答なし |
 
-v1の範囲外: 遠隔Interpreter、自動起動、ストリーミング/部分応答、実行サンドボックス、Providerごとのgrant・quota・監査、入力Contentのストリーム取得、表示の逆変換、管理UIからの呼び出し補助。これらを実装済みとして扱わない。
+ストリーミング入力では、上記に加えてHTTP 200の`status:"error"`本文で`stream_limit_exceeded`・`stream_not_found`・`stream_expired`・`stream_sequence`・`stream_duplicate_content`を返す。境界超過は無言に切り捨てず、`partial:true`と受理済みバイト数を含める。
+
+v1の範囲外: 遠隔Interpreter、自動起動、出力のストリーミング/部分応答、実行サンドボックス、Providerごとのgrant・quota・監査、入力Contentのストリーム取得（呼び出し元はIDと編集トークンを送る）、表示の逆変換、管理UIからの呼び出し補助。これらを実装済みとして扱わない。

@@ -3,9 +3,11 @@ pub use harmion_local::ProtectedDir;
 pub use harmion_protocol as protocol;
 mod export;
 mod export_directory;
+mod oauth;
 mod provider;
 mod resolution;
 mod subscription;
+pub use oauth::{OAuthTokenClient, OAuthTokens};
 pub use provider::{ProviderClient, ProviderEvent};
 pub use subscription::{Subscription, SubscriptionCheckpoint, SubscriptionNotification};
 
@@ -59,7 +61,11 @@ pub enum Error {
     Transport,
     Timeout,
     Http(u16),
-    ProviderAttachRejected { code: i64 },
+    /// OAuth token endpoint rejection code (for example `invalid_grant`).
+    OAuth(String),
+    ProviderAttachRejected {
+        code: i64,
+    },
     Signer(String),
 }
 

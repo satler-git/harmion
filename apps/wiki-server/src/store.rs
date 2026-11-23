@@ -99,9 +99,10 @@ impl State {
         })
     }
 
-    /// Dev-only read snapshot of a real node. See `backend.rs` for limits.
+    /// Node-backed store. Reads are a startup snapshot of `kind=wiki`; writes
+    /// go through the App API with OAuth credentials from `connect`.
     pub fn open_node(dir: PathBuf) -> Result<Self, String> {
-        let node = NodeAdapter::connect(&dir)?;
+        let mut node = NodeAdapter::connect(&dir)?;
         let contents = node.load_contents()?;
         Ok(Self {
             contents,
@@ -283,13 +284,7 @@ impl State {
         });
         recent.truncate(8);
 
-        let tags = page
-            .kinds
-            .iter()
-            .filter(|kind| kind.as_str() != "wiki")
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
+        let tags = page.tags.join(", ");
         Ok(Workspace {
             before,
             after,
@@ -362,6 +357,9 @@ impl State {
         };
         check_size(&content)?;
         let id = content.id.clone();
+        if let Backend::Node(node) = &mut self.backend {
+            node.create_content(&content)?;
+        }
         self.mutate(|contents| {
             contents.insert(id, content.clone());
             Ok(())
@@ -418,6 +416,9 @@ impl State {
         };
         check_size(&content)?;
         let id = content.id.clone();
+        if let Backend::Node(node) = &mut self.backend {
+            node.create_content(&content)?;
+        }
         self.mutate(|contents| {
             contents.insert(id, content.clone());
             Ok(())
@@ -426,8 +427,11 @@ impl State {
     }
 
     /// Convert exactly one loose `!` fenced block into a snippet + canonical
-    /// host body. The page and snippet are committed together; if validation,
-    /// size or persistence fails, neither the host nor the store changes.
+    /// host body. For the local JSON backend the page and snippet are committed
+    /// together. On a node backend they are two real App API writes; if the
+    /// snippet succeeds and the page edit fails, the snippet is kept and the
+    /// error reports the partial result instead of silently rolling back a
+    /// successful node write (§11, S24).
     pub fn convert_fence(
         &mut self,
         page_id: &str,
@@ -494,6 +498,7 @@ impl State {
                 (!title.is_empty()).then(|| title.to_owned())
             })
             .unwrap_or_else(|| derived_snippet_title(&block));
+        let snippet_was_existing = existing.is_some();
         let snippet = existing.unwrap_or_else(|| Content {
             id: self.fresh_id(),
             content_type: "snippet".to_owned(),
@@ -526,6 +531,44 @@ impl State {
         page.updated_label = "たった今".to_owned();
         check_size(&page)?;
         check_size(&snippet)?;
+
+        let node_page_result = if let Backend::Node(node) = &mut self.backend {
+            if !snippet_was_existing {
+                node.create_content(&snippet)?;
+            }
+            Some(node.save_body(page_id, &page.body, &before_page.body))
+        } else {
+            None
+        };
+        if let Some(Err(error)) = node_page_result {
+            if !snippet_was_existing {
+                let snippet_id = snippet.id.clone();
+                let kept = snippet.clone();
+                // Keep the successful side visible; the host still holds the
+                // loose fence so a later retry can reuse this snippet.
+                self.mutate(|contents| {
+                    contents.insert(snippet_id, kept);
+                    Ok(())
+                })?;
+            }
+            let mut data = error.data.clone().unwrap_or_else(|| json!({}));
+            data["type"] = json!("partial_conversion");
+            data["partial"] = json!(true);
+            data["snippet_created"] = json!(!snippet_was_existing);
+            data["snippet_id"] = json!(snippet.id);
+            data["page_id"] = json!(page_id);
+            data["node_error"] = json!(error.message);
+            data["resolution"] =
+                json!("the snippet was created; retry convert_fence to update the host page");
+            return Err(RpcError::new(
+                error.code,
+                format!(
+                    "snippet was saved but the host page update failed: {}",
+                    error.message
+                ),
+            )
+            .with_data(data));
+        }
 
         let snippet_id = snippet.id.clone();
         self.mutate(|contents| {
@@ -564,7 +607,7 @@ impl State {
         let previous_body = content.body.clone();
         content.body = body;
         check_size(&content)?;
-        if let Backend::Node(node) = &self.backend {
+        if let Backend::Node(node) = &mut self.backend {
             node.save_body(id, &content.body, &previous_body)?;
         }
         content.rev += 1;
@@ -673,6 +716,9 @@ impl State {
     pub fn delete(&mut self, id: &str) -> RpcResult<Content> {
         self.ensure_writable("delete")?;
         let content = self.open(id)?;
+        if let Backend::Node(node) = &mut self.backend {
+            node.delete_content(id, &content.body)?;
+        }
         self.mutate(|contents| {
             contents.remove(id);
             Ok(())
@@ -707,7 +753,14 @@ impl State {
 
     fn ensure_writable(&self, method: &str) -> RpcResult<()> {
         match &self.backend {
-            Backend::Node(node) if method == "save" => Ok(()),
+            Backend::Node(node)
+                if matches!(
+                    method,
+                    "save" | "create_page" | "create_snippet" | "convert_fence" | "delete"
+                ) =>
+            {
+                Ok(())
+            }
             Backend::Node(node) => Err(node.write_unsupported(method)),
             _ => Ok(()),
         }
@@ -1009,6 +1062,7 @@ fn fixtures() -> BTreeMap<String, Content> {
         ),
     );
     home.kinds = vec!["wiki".to_owned(), "ledger".to_owned()];
+    home.tags = vec!["家計".to_owned(), "毎月".to_owned(), "ledger".to_owned()];
     home.created = "2026-10-02".to_owned();
     home.updated_at = 202611221431;
     home.updated_label = "14:31".to_owned();
@@ -1021,6 +1075,7 @@ fn fixtures() -> BTreeMap<String, Content> {
         "# 2026年の目標\n\n家計の記録を毎週見直す。\n\n## 固定費\n\n- [[p-home|家計の記録]]\n- [[p-fixed|固定費の見直し]]\n- [[p-review|月次レビュー]]\n- [[p-reading|読書ノート]]\n- [[p-savings|貯金の目標]]\n".to_owned(),
     );
     goals.kinds = vec!["wiki".to_owned(), "ledger".to_owned()];
+    goals.tags = vec!["目標".to_owned(), "家計".to_owned()];
     goals.created = "2026-10-03".to_owned();
     goals.updated_at = 202611211800;
     goals.updated_label = "昨日".to_owned();
@@ -1033,6 +1088,7 @@ fn fixtures() -> BTreeMap<String, Content> {
         "# レシート処理\n\nレシートは週末にまとめて処理する。\n\n## 支払い方法\n\n- [[p-home|家計の記録]]\n- [[p-fixed|固定費の見直し]]\n- [[p-credit|クレジットカード]]\n- [[p-emoney|電子マネー]]\n- [[p-returns|返品・交換]]\n".to_owned(),
     );
     receipts.kinds = vec!["wiki".to_owned(), "ledger".to_owned()];
+    receipts.tags = vec!["レシート".to_owned(), "家計".to_owned()];
     receipts.created = "2026-10-05".to_owned();
     receipts.updated_at = 202611201200;
     receipts.updated_label = "11/20".to_owned();
@@ -1045,6 +1101,7 @@ fn fixtures() -> BTreeMap<String, Content> {
         "# 固定費の見直し\n\n毎月の固定費を一覧にする。\n\n## 内訳\n\n- [[p-home|家計の記録]]\n- [[p-goals|2026年の目標]]\n- [[p-electricity|電気代]]\n- [[p-gas|ガス代]]\n- [[p-rent|家賃]]\n- [[p-phone|通信費]]\n- [[p-sub|サブスク]]\n".to_owned(),
     );
     fixed.kinds = vec!["wiki".to_owned(), "ledger".to_owned()];
+    fixed.tags = vec!["固定費".to_owned(), "家計".to_owned()];
     fixed.created = "2026-10-06".to_owned();
     fixed.updated_at = 202611191100;
     fixed.updated_label = "11/19".to_owned();
@@ -1069,6 +1126,7 @@ fn fixtures() -> BTreeMap<String, Content> {
         "# 読書ノート\n\n読んだ本の要点を残す。\n\n## 最近の本\n\n- [[p-goals|2026年の目標]]\n- [[p-rust|Rustのメモ]]\n".to_owned(),
     );
     reading.kinds = vec!["wiki".to_owned(), "note".to_owned()];
+    reading.tags = vec!["読書".to_owned()];
     reading.created = "2026-10-12".to_owned();
     reading.updated_at = 202611182000;
     reading.updated_label = "昨日".to_owned();
@@ -1081,6 +1139,7 @@ fn fixtures() -> BTreeMap<String, Content> {
         "# Rustのメモ\n\n所有権と借用のメモ。\n\n```rust\nfn main() {\n    let s = String::from(\"hello\");\n    println!(\"{s}\");\n}\n```\n\n- [[p-reading|読書ノート]]\n".to_owned(),
     );
     rust.kinds = vec!["wiki".to_owned(), "code".to_owned()];
+    rust.tags = vec!["Rust".to_owned()];
     rust.created = "2026-10-15".to_owned();
     rust.updated_at = 202611171500;
     rust.updated_label = "11/17".to_owned();

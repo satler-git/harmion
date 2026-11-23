@@ -18,8 +18,31 @@ pub const MAX_PROVIDER_SCHEMA_BYTES: usize = 64 * 1024;
 pub const MAX_DEFAULT_QUERY_KINDS: usize = 32;
 pub const MAX_REGISTRATION_BYTES: usize = 160 * 1024;
 pub const MAX_CALL_REQUEST_BYTES: usize = 1024 * 1024;
-pub const MAX_CALL_CONTENTS: usize = 64;
 pub const MAX_CALL_INPUT_BYTES: usize = 128 * 1024;
+/// Streaming input is an additive v1 extension. It is negotiated per call by
+/// using the streaming frame API instead of the single-request `interpreter-call`
+/// body; providers that only implement the legacy request are unaffected.
+pub const STREAM_INPUT_VERSION: u32 = 1;
+/// Logical limit for one streamed invocation's Provider-visible Content items.
+/// This is counted over the encoded Provider Content JSON, not the caller's
+/// edit-token requests. Exceeding it fails the invocation explicitly; nothing is
+/// truncated.
+pub const MAX_STREAM_INPUT_BYTES: usize = 128 * 1024 * 1024;
+/// Target encoded Provider Content bytes per Provider chunk notification. The
+/// real frame also carries JSON-RPC envelope fields, so this leaves ample room
+/// under `MAX_PROVIDER_MESSAGE_BYTES`.
+pub const MAX_STREAM_CHUNK_CONTENT_BYTES: usize = 768 * 1024;
+/// Defensive bound on the number of Provider chunk notifications for one call.
+pub const MAX_STREAM_CHUNKS: u64 = 4096;
+/// Bounds on concurrently staged (not yet ended) streaming calls.
+pub const MAX_ACTIVE_INPUT_STREAMS: usize = 32;
+pub const MAX_ACTIVE_INPUT_STREAMS_PER_APP: usize = 8;
+/// A streamed upload must be completed or canceled within this window. The
+/// invocation `timeout_ms` starts when the stream ends, matching a legacy call.
+pub const INPUT_STREAM_TIMEOUT_MS: u64 = 60_000;
+/// App streaming frames are separate HTTP requests, each already bounded by the
+/// App API body cap; this is the decoder's own defensive upper bound.
+pub const MAX_STREAM_FRAME_BYTES: usize = 2 * 1024 * 1024;
 pub const MIN_CALL_TIMEOUT_MS: u64 = 100;
 pub const MAX_CALL_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_CALL_TIMEOUT_MS: u64 = 10_000;
@@ -38,6 +61,11 @@ pub const MAX_ACTIVE_INVOCATIONS_PER_PROVIDER: usize = 8;
 pub const RPC_VERSION: &str = "2.0";
 pub const RPC_ATTACH: &str = "interpreter.attach";
 pub const RPC_INVOKE: &str = "interpreter.invoke";
+/// A streamed invocation starts with `RPC_INVOKE` whose params carry a
+/// `stream` descriptor and empty `contents`, then follows with ordered chunk
+/// notifications and one end notification on the same Provider connection.
+pub const RPC_INVOKE_CHUNK: &str = "interpreter.invoke.chunk";
+pub const RPC_INVOKE_END: &str = "interpreter.invoke.end";
 pub const RPC_CANCEL: &str = "interpreter.cancel";
 
 pub const RPC_PARSE_ERROR: i64 = -32700;
@@ -56,6 +84,10 @@ pub const RPC_ALREADY_ATTACHED: i64 = -32012;
 pub struct ProviderId(pub [u8; 32]);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InvocationId(pub [u8; 32]);
+/// Caller-chosen identifier for a staged streaming input. It is scoped to the
+/// calling app and exists only while the upload is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StreamId(pub [u8; 32]);
 
 macro_rules! hex_id {
     ($ty:ident) => {
@@ -74,6 +106,7 @@ macro_rules! hex_id {
 }
 hex_id!(ProviderId);
 hex_id!(InvocationId);
+hex_id!(StreamId);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderStatus {
@@ -227,6 +260,88 @@ pub struct InvokeParams {
     pub contract_version: u32,
     pub input: Json,
     pub contents: Vec<ProviderContent>,
+    /// Present only when the node will follow this request with ordered
+    /// `interpreter.invoke.chunk` notifications and one
+    /// `interpreter.invoke.end` notification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<InvokeStream>,
+}
+
+/// Descriptor for a streamed invocation. `total_bytes` is the sum of the
+/// serialized `ProviderContent` item lengths.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvokeStream {
+    pub version: u32,
+    pub chunks: u64,
+    pub total_contents: u64,
+    pub total_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvokeChunkParams {
+    pub invocation_id: InvocationId,
+    /// Zero-based, strictly increasing, and contiguous.
+    pub seq: u64,
+    pub contents: Vec<ProviderContent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvokeEndParams {
+    pub invocation_id: InvocationId,
+    /// Number of chunks sent, i.e. one past the final chunk sequence.
+    pub seq: u64,
+    pub total_contents: u64,
+    pub total_bytes: u64,
+}
+
+/// One framed request to the App API's `interpreter-call-stream` operation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StreamFrame {
+    Start(StreamStart),
+    Chunk(StreamChunk),
+    End(StreamEnd),
+    Cancel(StreamCancel),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamStart {
+    pub stream_id: StreamId,
+    pub provider: String,
+    pub input: Json,
+    pub timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamChunk {
+    pub stream_id: StreamId,
+    pub seq: u64,
+    pub contents: Vec<ContentSelection>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamEnd {
+    pub stream_id: StreamId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StreamCancel {
+    pub stream_id: StreamId,
+}
+
+pub fn validate_invoke_stream(stream: &InvokeStream) -> Result<(), CodecError> {
+    if stream.version != STREAM_INPUT_VERSION {
+        return Err(CodecError::UnsupportedVersion(stream.version));
+    }
+    if stream.chunks > MAX_STREAM_CHUNKS {
+        return Err(CodecError::TooManyItems);
+    }
+    if stream.total_bytes as usize > MAX_STREAM_INPUT_BYTES {
+        return Err(CodecError::TooLarge);
+    }
+    Ok(())
 }
 
 pub fn validate_provider_name(name: &str) -> Result<(), CodecError> {
@@ -309,14 +424,11 @@ pub fn decode_call_request(bytes: &[u8]) -> Result<CallRequest, CodecError> {
     let value = decode_app_json_strict(bytes)?;
     let json: CallRequestJson =
         serde_json::from_value(value).map_err(|_| CodecError::InvalidJson)?;
-    let timeout_ms = json.timeout_ms.unwrap_or(DEFAULT_CALL_TIMEOUT_MS);
-    if !(MIN_CALL_TIMEOUT_MS..=MAX_CALL_TIMEOUT_MS).contains(&timeout_ms) {
-        return Err(CodecError::InvalidFieldValue);
-    }
+    let timeout_ms = decode_timeout(json.timeout_ms)?;
     validate_provider_name(&json.provider)?;
-    if json.contents.len() > MAX_CALL_CONTENTS {
-        return Err(CodecError::TooManyItems);
-    }
+    // The legacy item cap is intentionally gone. The request body and Provider
+    // frame caps still bound a non-streaming call; larger inputs must use the
+    // streaming frames below, which have their own logical 128 MiB limit.
     validate_json_shape(&json.input)?;
     let input_bytes = serde_json::to_vec(&json.input)
         .map_err(|_| CodecError::InvalidJson)?
@@ -324,9 +436,21 @@ pub fn decode_call_request(bytes: &[u8]) -> Result<CallRequest, CodecError> {
     if input_bytes > MAX_CALL_INPUT_BYTES {
         return Err(CodecError::TooLarge);
     }
-    let mut contents = Vec::with_capacity(json.contents.len());
+    let contents = decode_content_selections(json.contents)?;
+    Ok(CallRequest {
+        provider: json.provider,
+        input: json.input,
+        contents,
+        timeout_ms,
+    })
+}
+
+fn decode_content_selections(
+    items: Vec<ContentSelectionJson>,
+) -> Result<Vec<ContentSelection>, CodecError> {
+    let mut contents = Vec::with_capacity(items.len());
     let mut seen = std::collections::BTreeSet::new();
-    for item in json.contents {
+    for item in items {
         let content = ContentId(crate::unhex(&item.id).map_err(|_| CodecError::InvalidHex)?);
         let token = EditToken(crate::unhex(&item.token).map_err(|_| CodecError::InvalidHex)?);
         if !seen.insert(content) {
@@ -334,12 +458,108 @@ pub fn decode_call_request(bytes: &[u8]) -> Result<CallRequest, CodecError> {
         }
         contents.push(ContentSelection { content, token });
     }
-    Ok(CallRequest {
-        provider: json.provider,
-        input: json.input,
-        contents,
-        timeout_ms,
-    })
+    Ok(contents)
+}
+
+fn decode_timeout(timeout: Option<u64>) -> Result<u64, CodecError> {
+    let timeout_ms = timeout.unwrap_or(DEFAULT_CALL_TIMEOUT_MS);
+    if !(MIN_CALL_TIMEOUT_MS..=MAX_CALL_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(CodecError::InvalidFieldValue);
+    }
+    Ok(timeout_ms)
+}
+
+/// Decode one App API streaming frame. Frames are ordinary JSON objects with a
+/// `frame` discriminator; the unknown-field and duplicate-Content checks mirror
+/// `decode_call_request`, so a malformed stream cannot be partially accepted.
+pub fn decode_stream_frame(bytes: &[u8]) -> Result<StreamFrame, CodecError> {
+    if bytes.len() > MAX_STREAM_FRAME_BYTES {
+        return Err(CodecError::TooLarge);
+    }
+    let value = decode_app_json_strict(bytes)?;
+    let object = value.as_object().ok_or(CodecError::InvalidJson)?;
+    let frame = object
+        .get("frame")
+        .and_then(Json::as_str)
+        .ok_or(CodecError::InvalidFieldValue)?;
+    match frame {
+        "start" => {
+            let json: StreamStartJson =
+                serde_json::from_value(value).map_err(|_| CodecError::InvalidJson)?;
+            validate_provider_name(&json.provider)?;
+            let timeout_ms = decode_timeout(json.timeout_ms)?;
+            validate_json_shape(&json.input)?;
+            if serde_json::to_vec(&json.input)
+                .map_err(|_| CodecError::InvalidJson)?
+                .len()
+                > MAX_CALL_INPUT_BYTES
+            {
+                return Err(CodecError::TooLarge);
+            }
+            Ok(StreamFrame::Start(StreamStart {
+                stream_id: json.stream_id,
+                provider: json.provider,
+                input: json.input,
+                timeout_ms,
+            }))
+        }
+        "chunk" => {
+            let json: StreamChunkJson =
+                serde_json::from_value(value).map_err(|_| CodecError::InvalidJson)?;
+            let contents = decode_content_selections(json.contents)?;
+            Ok(StreamFrame::Chunk(StreamChunk {
+                stream_id: json.stream_id,
+                seq: json.seq,
+                contents,
+            }))
+        }
+        "end" => {
+            let json: StreamIdFrameJson =
+                serde_json::from_value(value).map_err(|_| CodecError::InvalidJson)?;
+            Ok(StreamFrame::End(StreamEnd {
+                stream_id: json.stream_id,
+            }))
+        }
+        "cancel" => {
+            let json: StreamIdFrameJson =
+                serde_json::from_value(value).map_err(|_| CodecError::InvalidJson)?;
+            Ok(StreamFrame::Cancel(StreamCancel {
+                stream_id: json.stream_id,
+            }))
+        }
+        _ => Err(CodecError::InvalidFieldValue),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamStartJson {
+    #[allow(dead_code)]
+    frame: String,
+    stream_id: StreamId,
+    provider: String,
+    #[serde(default)]
+    input: Json,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamChunkJson {
+    #[allow(dead_code)]
+    frame: String,
+    stream_id: StreamId,
+    seq: u64,
+    contents: Vec<ContentSelectionJson>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamIdFrameJson {
+    #[allow(dead_code)]
+    frame: String,
+    stream_id: StreamId,
 }
 
 #[derive(Deserialize)]
@@ -638,6 +858,11 @@ impl fmt::Display for ProviderId {
     }
 }
 impl fmt::Display for InvocationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&hex(&self.0))
+    }
+}
+impl fmt::Display for StreamId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&hex(&self.0))
     }

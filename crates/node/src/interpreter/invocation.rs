@@ -6,8 +6,8 @@ use crate::storage::{Store, read_content_graph};
 use harmion_domain::Life;
 use harmion_protocol::AppId;
 use harmion_protocol::interpreter::{
-    CONTRACT_VERSION, CallRequest, InvocationId, MAX_PROVIDER_MESSAGE_BYTES, ProviderContent,
-    ProviderId, provider_content_json,
+    CONTRACT_VERSION, CallRequest, InvocationId, MAX_PROVIDER_MESSAGE_BYTES,
+    MAX_STREAM_INPUT_BYTES, ProviderContent, ProviderId, provider_content_json,
 };
 use serde_json::Value as Json;
 use std::collections::BTreeMap;
@@ -19,82 +19,197 @@ pub struct PreparedCall {
     pub contract_version: u32,
     pub input: Json,
     pub contents: Vec<ProviderContent>,
+    /// Sum of the serialized Provider Content item lengths. This is the value
+    /// streamed in `InvokeStream::total_bytes` and checked against the logical
+    /// 128 MiB limit.
+    pub content_bytes: u64,
     pub timeout_ms: u64,
+}
+
+/// A prepared call either succeeds or reports the concrete byte accounting that
+/// exceeded the applicable limit. The streaming service uses this to emit an
+/// explicit partial/limit frame instead of silently truncating input.
+#[derive(Debug)]
+pub enum PrepareCallError {
+    Call(Error),
+    InputTooLarge { actual_bytes: u64, limit_bytes: u64 },
 }
 
 /// Resolve a caller's fixed Content snapshots and the approved Provider in one
 /// storage transaction. No network or Provider work happens inside the callback.
+///
+/// This keeps the legacy single-frame cap: at most 64 items are no longer
+/// required, but the Provider-visible contents must still fit one bounded
+/// Provider message.
 pub fn prepare_call(
     store: &mut impl Store,
     host: &mut impl Host,
     credential: &Credential,
     request: &CallRequest,
 ) -> Result<PreparedCall, Error> {
-    store.transaction(|tx| {
-        let principal = authenticate(tx, credential, host.now_micros())?;
-        let caller = principal.app.id;
-        if !principal.app.grants.can_call() {
-            return Err(Error::Forbidden);
-        }
-        let registration = match tx.approved_interpreter_by_name(&request.provider)? {
-            Some(registration) => registration,
-            None => {
-                return if tx
-                    .interpreter_registrations()?
-                    .iter()
-                    .any(|registration| registration.name == request.provider)
-                {
-                    Err(Error::InterpreterUnavailable)
-                } else {
-                    Err(Error::NotFound)
-                };
-            }
-        };
-        let provider_app = tx
-            .app_by_id(registration.app)?
-            .ok_or(Error::InterpreterUnavailable)?;
-        if provider_app.revoked
-            || host.now_micros() >= provider_app.expires_at
-            || !provider_app.grants.allows_provider_name(&registration.name)
-        {
-            return Err(Error::InterpreterUnavailable);
-        }
-        let manifest = registration.decoded()?;
-        if manifest.contract_version != CONTRACT_VERSION {
-            return Err(Error::InterpreterUnavailable);
-        }
-        let mut contents = Vec::with_capacity(request.contents.len());
-        for selection in &request.contents {
-            let state = tx.token(selection.token)?.ok_or(Error::TokenExpired)?;
-            if state.content_id != selection.content {
-                return Err(Error::InvalidToken);
-            }
-            let snapshot = read_content_graph(tx, selection.content)?
-                .snapshot_at(selection.content, &state.basis)
-                .map_err(|_| Error::InvalidToken)?;
-            let visible = snapshot.visible_content().ok_or(Error::NotFound)?;
-            if !principal.app.grants.can_read(visible) {
-                return Err(Error::NotFound);
-            }
-            contents.push(ProviderContent {
-                content: provider_content_json(visible),
-                conflict: snapshot.life == Life::Conflict,
-            });
-        }
-        let encoded = serde_json::to_vec(&contents).map_err(|_| Error::InvalidRequest)?;
-        // Leave room for the invocation envelope; the WS frame cap is authoritative.
-        if encoded.len() > MAX_PROVIDER_MESSAGE_BYTES - 64 * 1024 {
-            return Err(Error::InterpreterInputTooLarge);
-        }
-        Ok(PreparedCall {
-            caller,
-            provider: registration.provider,
-            provider_name: registration.name,
-            contract_version: registration.contract_version,
-            input: request.input.clone(),
-            contents,
-            timeout_ms: request.timeout_ms,
+    match prepare_call_bounded(store, host, credential, request, None) {
+        Ok(prepared) => Ok(prepared),
+        Err(PrepareCallError::Call(error)) => Err(error),
+        Err(PrepareCallError::InputTooLarge { .. }) => Err(Error::InterpreterInputTooLarge),
+    }
+}
+
+/// Resolve a streamed call. The only difference from `prepare_call` is that the
+/// Provider-visible contents are checked against the 128 MiB streaming logical
+/// limit instead of the legacy single-frame cap; the node then chunks them.
+pub fn prepare_stream_call(
+    store: &mut impl Store,
+    host: &mut impl Host,
+    credential: &Credential,
+    request: &CallRequest,
+) -> Result<PreparedCall, PrepareCallError> {
+    prepare_call_bounded(
+        store,
+        host,
+        credential,
+        request,
+        Some(MAX_STREAM_INPUT_BYTES),
+    )
+}
+
+/// Variant with an explicit logical content limit. Production streaming uses
+/// `prepare_stream_call`; this keeps the accounting path directly testable
+/// without materializing 128 MiB fixtures.
+pub fn prepare_call_with_content_limit(
+    store: &mut impl Store,
+    host: &mut impl Host,
+    credential: &Credential,
+    request: &CallRequest,
+    limit_bytes: usize,
+) -> Result<PreparedCall, PrepareCallError> {
+    prepare_call_bounded(store, host, credential, request, Some(limit_bytes))
+}
+
+fn prepare_call_bounded(
+    store: &mut impl Store,
+    host: &mut impl Host,
+    credential: &Credential,
+    request: &CallRequest,
+    stream_limit: Option<usize>,
+) -> Result<PreparedCall, PrepareCallError> {
+    store
+        .transaction(|tx| {
+            Ok(prepare_call_in_tx(
+                tx,
+                host,
+                credential,
+                request,
+                stream_limit,
+            ))
         })
+        .map_err(PrepareCallError::Call)?
+}
+
+fn prepare_call_in_tx(
+    tx: &mut dyn crate::storage::Transaction,
+    host: &mut impl Host,
+    credential: &Credential,
+    request: &CallRequest,
+    stream_limit: Option<usize>,
+) -> Result<PreparedCall, PrepareCallError> {
+    let principal =
+        authenticate(tx, credential, host.now_micros()).map_err(PrepareCallError::Call)?;
+    let caller = principal.app.id;
+    if !principal.app.grants.can_call() {
+        return Err(PrepareCallError::Call(Error::Forbidden));
+    }
+    let registration = match tx
+        .approved_interpreter_by_name(&request.provider)
+        .map_err(PrepareCallError::Call)?
+    {
+        Some(registration) => registration,
+        None => {
+            return if tx
+                .interpreter_registrations()
+                .map_err(PrepareCallError::Call)?
+                .iter()
+                .any(|registration| registration.name == request.provider)
+            {
+                Err(PrepareCallError::Call(Error::InterpreterUnavailable))
+            } else {
+                Err(PrepareCallError::Call(Error::NotFound))
+            };
+        }
+    };
+    let provider_app = tx
+        .app_by_id(registration.app)
+        .map_err(PrepareCallError::Call)?
+        .ok_or(PrepareCallError::Call(Error::InterpreterUnavailable))?;
+    if provider_app.revoked
+        || host.now_micros() >= provider_app.expires_at
+        || !provider_app.grants.allows_provider_name(&registration.name)
+    {
+        return Err(PrepareCallError::Call(Error::InterpreterUnavailable));
+    }
+    let manifest = registration.decoded().map_err(PrepareCallError::Call)?;
+    if manifest.contract_version != CONTRACT_VERSION {
+        return Err(PrepareCallError::Call(Error::InterpreterUnavailable));
+    }
+    let mut contents = Vec::with_capacity(request.contents.len());
+    for selection in &request.contents {
+        let state = tx
+            .token(selection.token)
+            .map_err(PrepareCallError::Call)?
+            .ok_or(PrepareCallError::Call(Error::TokenExpired))?;
+        if state.content_id != selection.content {
+            return Err(PrepareCallError::Call(Error::InvalidToken));
+        }
+        let snapshot = read_content_graph(tx, selection.content)
+            .map_err(PrepareCallError::Call)?
+            .snapshot_at(selection.content, &state.basis)
+            .map_err(|_| PrepareCallError::Call(Error::InvalidToken))?;
+        let visible = snapshot
+            .visible_content()
+            .ok_or(PrepareCallError::Call(Error::NotFound))?;
+        if !principal.app.grants.can_read(visible) {
+            return Err(PrepareCallError::Call(Error::NotFound));
+        }
+        contents.push(ProviderContent {
+            content: provider_content_json(visible),
+            conflict: snapshot.life == Life::Conflict,
+        });
+    }
+    let encoded =
+        serde_json::to_vec(&contents).map_err(|_| PrepareCallError::Call(Error::InvalidRequest))?;
+    let content_bytes = contents.iter().try_fold(0u64, |total, item| {
+        let bytes =
+            serde_json::to_vec(item).map_err(|_| PrepareCallError::Call(Error::InvalidRequest))?;
+        Ok::<u64, PrepareCallError>(total.saturating_add(bytes.len() as u64))
+    })?;
+    match stream_limit {
+        Some(limit) => {
+            if content_bytes > limit as u64 {
+                return Err(PrepareCallError::InputTooLarge {
+                    actual_bytes: content_bytes,
+                    limit_bytes: limit as u64,
+                });
+            }
+        }
+        None => {
+            // Leave room for the invocation envelope; the WS frame cap remains
+            // authoritative for a non-streaming invoke.
+            if encoded.len() > MAX_PROVIDER_MESSAGE_BYTES - 64 * 1024 {
+                return Err(PrepareCallError::InputTooLarge {
+                    actual_bytes: encoded.len() as u64,
+                    limit_bytes: (MAX_PROVIDER_MESSAGE_BYTES - 64 * 1024) as u64,
+                });
+            }
+        }
+    }
+    Ok(PreparedCall {
+        caller,
+        provider: registration.provider,
+        provider_name: registration.name,
+        contract_version: registration.contract_version,
+        input: request.input.clone(),
+        contents,
+        content_bytes,
+        timeout_ms: request.timeout_ms,
     })
 }
 

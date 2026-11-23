@@ -175,9 +175,9 @@ v1の具体化:
 
 - `provide`と`call`はアプリ単位の独立したgrantで、名前単位のgrantはv1に含めない。承認済みの名前はノード内で一意。同名の未承認登録は共存でき、所有者が`replace`を明示したときだけ既存の承認を置換する。
 - registryはnodeのstorage portとSQLite schema v14に永続化する。接続・invocation・deadline・キャンセルなどの実行時状態はhost（net-native）が所有し、nodeは同期transaction内で検証・スナップショット生成・上限判定を行う。
-- 提供元セッションは`/provider/v1/connect`への認証付きloopback WebSocket。JSON-RPC 2.0の`interpreter.attach`・`interpreter.invoke`・`interpreter.cancel`を使う。同じProvider IDの新セッションは旧セッションを置換し、旧セッションの呼び出しは利用不能として終了する。
+- 提供元セッションは`/provider/v1/connect`への認証付きloopback WebSocket。JSON-RPC 2.0の`interpreter.attach`・`interpreter.invoke`・`interpreter.invoke.chunk`・`interpreter.invoke.end`・`interpreter.cancel`を使う。同じProvider IDの新セッションは旧セッションを置換し、旧セッションの呼び出しは利用不能として終了する。
 - 呼び出し元が渡す編集トークンはbasisを固定するためだけに使い、Providerへ渡さない。ProviderはContent IDから最新値を取り直せない。brokerは渡された入力以外を取得しない。
-- 入力Content 64件、呼び出し全体2 MiB、data 1 MiB、display 64 KiB、timeout 100〜30,000 ms、同時呼び出し32件（アプリごと8件）を上限とする。
+- 非ストリーミング入力はContent件数上限なしで、呼び出し全体2 MiB（Providerフレーム）、data 1 MiB、display 64 KiB、timeout 100〜30,000 ms、同時呼び出し32件（アプリごと8件）を上限とする。ストリーミング入力は`interpreter-call-stream`で論理上限128 MiB、アップロード期限60秒、同時入力32件（アプリごと8件）とし、超過は部分状態付きの明示エラーにする。
 - Rust SDKはApp用のInterpreter操作、接続要求、Provider用の`ProviderClient`を持つ。管理UIは一覧・定義表示・承認と「接続」画面を提供し、呼び出し画面は設けない。WebアプリはOAuth originの`/connect`ヘルパーで承認を`postMessage`できる。
 
 デフォルトQueryは入力候補の宣言。brokerは勝手にデータを取り足さない。ユーザー条件とは通常ANDで結合し、上書きは明示指定とする。Content以外の明示入力だけで呼べるInterpreterにRead権限を要求しない。

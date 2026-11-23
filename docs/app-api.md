@@ -197,17 +197,18 @@ nativeのApp APIは次の操作を提供する。証明書固定のloopback HTTP
 | `interpreter-describe` | 認証済み | 32バイトのprovider ID。スキーマ・デフォルトQuery・接続状態を返す。 |
 | `interpreter-register` | `provide` | 登録JSON。`provider_id`と`status`を返す。同名の別登録は承認まで共存する。 |
 | `interpreter-approve` | `manage_apps` | `{"provider_id":"hex","replace":bool}`。同名の承認済みProviderの明示置換だけを許す。 |
-| `interpreter-call` | `call` | Provider名、明示入力、固定したContentのIDと編集トークン、timeout。成功時は`invocation_id`・`status`・`data`・`display`。 |
+| `interpreter-call` | `call` | Provider名、明示入力、固定したContentのIDと編集トークン、timeout。Content件数上限はなく、64件超も1回で渡せる。成功時は`invocation_id`・`status`・`data`・`display`。 |
+| `interpreter-call-stream` | `call` | `frame`（`start`/`chunk`/`end`/`cancel`）を1要求ずつ送るストリーミング入力。論理上限128 MiB、アップロード期限60秒。成功時は`stream_id`付きの通常の呼び出し結果。 |
 | `interpreter-cancel` | `call`（開始したアプリのみ） | 32バイトのinvocation ID。Providerへ通知し、待機中の呼び出しを409で終了する。 |
 | `interpreter-ticket` | `provide` | 32バイトのprovider ID（または`{"provider_id":"hex"}`）。ブラウザ用の単回ticketとOAuth originの`websocket_url`を返す。WebはOAuth originの`/connect/ticket`でaccess tokenから再発行できる。 |
 
-Providerは`GET /provider/v1/connect`へアプリ資格情報付きのloopback WebSocketを開き、`interpreter.attach`で接続する。ブラウザProviderは`interpreter-ticket`または統合接続の完了応答が返す`wss://.../provider/connect?ticket=...`を使う。ticketを失った場合やWebSocket接続に失敗した場合は、OAuth originの`POST /connect/ticket`へ`Authorization: Bearer <access token>`と`{"provider_id":"hex"}`を送って再発行する。ticketは30秒・単回・アプリごと8件・全体128件。ノード再起動でメモリ上のticketは失効する。ノードは現在の`provide`・`provide_names`と承認状態をDBで再検査する。callの本文は`get`/`query`で得た編集トークンが固定したスナップショットを使い、ProviderへトークンやRead権限を渡さない。Content入力は最大64件、呼び出し全体は2 MiB、`data`は1 MiB、`display.text`は64 KiBまで。timeoutは100〜30,000 ms（既定10,000 ms）。ノード全体32件・アプリごと8件・Providerごと8件の同時上限を持つ。ノードはProviderへ20秒ごとにPingを送る。
+Providerは`GET /provider/v1/connect`へアプリ資格情報付きのloopback WebSocketを開き、`interpreter.attach`で接続する。ブラウザProviderは`interpreter-ticket`または統合接続の完了応答が返す`wss://.../provider/connect?ticket=...`を使う。ticketを失った場合やWebSocket接続に失敗した場合は、OAuth originの`POST /connect/ticket`へ`Authorization: Bearer <access token>`と`{"provider_id":"hex"}`を送って再発行する。ticketは30秒・単回・アプリごと8件・全体128件。ノード再起動でメモリ上のticketは失効する。ノードは現在の`provide`・`provide_names`と承認状態をDBで再検査する。callの本文は`get`/`query`で得た編集トークンが固定したスナップショットを使い、ProviderへトークンやRead権限を渡さない。非ストリーミングのContent件数上限は撤廃し、1 MiBのApp本文と2 MiBのProviderフレームに収まる範囲で64件超も1回の`interpreter.invoke`で送る。より大きい入力は`interpreter-call-stream`の`start`/`chunk`/`end`/`cancel`フレームで送り、論理上限は128 MiB、アップロード期限は60秒。超過は`stream_limit_exceeded`と`partial:true`を含む明示エラーで、無言の切り捨てはない。ノードはProviderへ`interpreter.invoke`の`stream`記述子、`interpreter.invoke.chunk`、`interpreter.invoke.end`を順に送り、Provider SDKは完了した入力を組み立てる。`data`は1 MiB、`display.text`は64 KiBまで。timeoutは100〜30,000 ms（既定10,000 ms）で`end`後から適用。ノード全体32件・アプリごと8件・Providerごと8件の同時実行上限と、全体32件・アプリごと8件のストリーミング入力上限を持つ。ノードはProviderへ20秒ごとにPingを送る。
 
 未接続は503 `interpreter_unavailable`、タイムアウトは504 `interpreter_timeout`、キャンセルは409 `interpreter_cancelled`、Providerのアプリケーションエラーは200で`status:"error"`を返す。呼び出しは冪等ではなく、v1にrequest receiptはない。capabilitiesは`interpreter: true`と契約バージョン・上限を返す。
 
 grant JSONの`call`と`provide`、`provide_names`は追加フィールドで、false・空のときは従来どおり出力しない。`provide_names`を列挙したアプリが同じ名前のProviderを登録すると、所有者承認を待たずにapprovedになる。grant変更で外れた名前の登録はsupersededになる。`call`/`provide`はRead/Writeを含意せず、所有者の管理権限判定は従来のread/write/manageで維持する。
 
-Rust SDKは`Client::interpreter_list`・`interpreter_describe`・`interpreter_register`・`interpreter_approve`・`interpreter_call`・`interpreter_cancel`と、Provider用の`ProviderClient`を提供する。CLIは`interpreter-list`・`interpreter-describe`・`interpreter-register`・`interpreter-approve`・`interpreter-call`・`interpreter-cancel`を提供する。管理UIは一覧・定義表示・承認だけを行う。
+Rust SDKは`Client::interpreter_list`・`interpreter_describe`・`interpreter_register`・`interpreter_approve`・`interpreter_call`・`interpreter_cancel`と、Provider用の`ProviderClient`を提供する。ストリーミング入力は`Client::call("interpreter-call-stream", frame_json)`で`start`/`chunk`/`end`/`cancel`を送る。CLIは`interpreter-list`・`interpreter-describe`・`interpreter-register`・`interpreter-approve`・`interpreter-call`・`interpreter-cancel`を提供する。管理UIは一覧・定義表示・承認だけを行う。
 
 ### 統合接続
 

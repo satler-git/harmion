@@ -213,18 +213,18 @@ kindは所属の有無とその更新関係を扱う。初期に検討したカ�
 - 登録情報: 1〜128バイトの名前、契約バージョン（v1は1）、入力・出力スキーマ（JSON object、各64 KiB以下）、任意のデフォルトQuery。スキーマはv1ではノードが解釈せず、呼び出し元向けの宣言として扱う。
 - デフォルトQueryはv1では`{"kinds": [...]}`だけを宣言できる。ノードは実行せず、呼び出し元が自分のQuery条件とANDで結合し、選んだContentのIDと編集トークンを`call`へ渡す。これによってInterpreter自身にデータアクセス権限を与えるものではない。
 - 承認済みの名前はノード内で一つ。未承認の同名登録は複数あり得て、所有者が承認時に選ぶ。承認時に明示的な置換だけを許す。grantから外れた名前の登録はsupersededになる。
-- 入力: 呼び出し元が固定したContentスナップショット（最大64件）と、JSONの明示入力（深さ128、要素合計32,768、128 KiB以下）。Contentは通常値だけで、編集トークン・basis・履歴・競合候補をProviderへ渡さない。ノードはQueryやSubscribeを暗黙に実行しない。
+- 入力: 呼び出し元が固定したContentスナップショット（件数上限なし。非ストリーミングはProviderフレーム2 MiB、ストリーミングは論理128 MiBまで）と、JSONの明示入力（深さ128、要素合計32,768、128 KiB以下）。Contentは通常値だけで、編集トークン・basis・履歴・競合候補をProviderへ渡さない。ノードはQueryやSubscribeを暗黙に実行しない。
 - 成功: 任意のJSON `data`（1 MiB以下）と、任意の表示用`display`（media typeと64 KiB以下の文字列）。
 - 失敗: code（1〜64バイトの小文字英数字と`. _ -`）、message（1024バイト以下）、任意のdetails（256 KiB以下）。
-- displayは表示専用。編集して逆変換する契約は含めない。ストリーミング・部分応答はv1に含めない。
+- displayは表示専用。編集して逆変換する契約は含めない。入力のストリーミングはv1に含み、出力のストリーミング・部分応答はv1に含めない。
 - 呼び出しのタイムアウトは100〜30,000 ms、省略時10,000 ms。キャンセルは呼び出し元アプリだけが行え、ノードはProviderへ通知して待機を終了する。キャンセル後の遅延応答は破棄する。
 - ノード全体32件、アプリごと8件の同時呼び出し上限を設ける。
 
 ### 7.3 IPC
 
-- App APIは証明書固定のloopback HTTPSで、`interpreter-list`・`describe`・`register`・`approve`・`call`・`cancel`・`ticket`と、統合接続の`connect-list`・`connect-approve`を提供する。呼び出しには`call`、登録には`provide`、承認には`manage_apps`を要する。`connect-start`・`connect-status`・`connect-complete`は要求secretで認可する。
+- App APIは証明書固定のloopback HTTPSで、`interpreter-list`・`describe`・`register`・`approve`・`call`・`call-stream`・`cancel`・`ticket`と、統合接続の`connect-list`・`connect-approve`を提供する。呼び出しには`call`、登録には`provide`、承認には`manage_apps`を要する。`connect-start`・`connect-status`・`connect-complete`は要求secretで認可する。
 - Interpreter提供元はノードへアプリ資格情報付きのloopback WebSocketを開き、JSON-RPC 2.0の`interpreter.attach`で接続する。ノードは承認済み登録と現在の`provide`・`provide_names`をDBで検査する。ブラウザProviderはOAuth originの単回・30秒ticketで接続する。
-- ノードからProviderへは`interpreter.invoke`要求と`interpreter.cancel`通知を送る。Providerは同じ接続でJSON-RPC結果を返す。メッセージはテキストフレーム、2 MiB以下。拡張・サブプロトコルは使わない。
+- ノードからProviderへは`interpreter.invoke`要求と`interpreter.cancel`通知を送る。ストリーミング入力では`interpreter.invoke`の`stream`記述子に続けて`interpreter.invoke.chunk`と`interpreter.invoke.end`通知を送る。Providerは同じ接続でJSON-RPC結果を返す。メッセージはテキストフレーム、2 MiB以下。拡張・サブプロトコルは使わない。
 - 同じProvider IDに接続できるセッションは一つ。新しい接続は古い接続を置換し、古い接続の実行中呼び出しは利用不能として終了する。未接続・再起動・提供元交代時の挙動はこの契約に従う。
 - これはノード間同期の通信路とは別。ノード間をHTTPポーリングから始める方針と矛盾しない。
 - 各OS、とくにAndroidでの実行・接続方式、Provider SDKの常駐方法は引き続き検証が必要。

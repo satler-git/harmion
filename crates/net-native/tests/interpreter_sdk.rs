@@ -156,6 +156,63 @@ async fn provider_sdk_attaches_invokes_and_observes_timeout_cancel() {
     assert_eq!(result["status"], "ok");
     assert_eq!(result["data"]["balance"], "1.00");
 
+    let stream_id = "ab".repeat(32);
+    let started = caller_client
+        .call(
+            "interpreter-call-stream",
+            &serde_json::to_vec(&json!({
+                "frame": "start",
+                "stream_id": "ab".repeat(32),
+                "provider": "ledger/balance",
+                "input": {"surface": "stream"},
+                "timeout_ms": 5_000,
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started["status"], "open");
+    let accepted = caller_client
+        .call(
+            "interpreter-call-stream",
+            &serde_json::to_vec(&json!({
+                "frame": "chunk",
+                "stream_id": "ab".repeat(32),
+                "seq": 0,
+                "contents": [{"id": hex(&content.0), "token": view["edit_token"]}],
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted["status"], "accepted");
+    let end_task = {
+        let client = Client::new(info.clone(), caller_credential).unwrap();
+        tokio::spawn(async move {
+            client
+                .call(
+                    "interpreter-call-stream",
+                    &serde_json::to_vec(&json!({"frame": "end", "stream_id": "ab".repeat(32)}))
+                        .unwrap(),
+                )
+                .await
+        })
+    };
+    let ProviderEvent::Invocation { invocation, params } = sdk.next().await.unwrap() else {
+        panic!("expected streamed invocation");
+    };
+    assert_eq!(params.provider, "ledger/balance");
+    assert_eq!(params.contents.len(), 1);
+    assert_eq!(params.contents[0].content["body"], "one");
+    assert!(params.stream.is_none());
+    sdk.succeed(invocation, json!({"streamed": true}), None)
+        .await
+        .unwrap();
+    let result = end_task.await.unwrap().unwrap();
+    assert_eq!(result["stream_id"], stream_id);
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["data"]["streamed"], true);
+
     let replacement =
         ProviderClient::connect(info.clone(), provider_credential, ProviderId(provider_id))
             .await

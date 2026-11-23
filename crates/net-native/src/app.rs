@@ -652,6 +652,7 @@ async fn dispatch<S: Store + Send + 'static>(
             | "interpreter-register"
             | "interpreter-approve"
             | "interpreter-call"
+            | "interpreter-call-stream"
             | "interpreter-cancel"
     ) {
         return interpreter
@@ -972,12 +973,16 @@ async fn dispatch<S: Store + Send + 'static>(
                     },
                     "permissions" => json!(GrantSpec::from(permissions)),
                     _ => {
-                        let mut methods = vec!["get","query","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","provision-manifest","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants","interpreter-list","interpreter-describe","interpreter-register","interpreter-approve","interpreter-call","interpreter-cancel"];
+                        let mut methods = vec!["get","query","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","provision-manifest","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants","interpreter-list","interpreter-describe","interpreter-register","interpreter-approve","interpreter-call","interpreter-call-stream","interpreter-cancel"];
                         methods.extend(["metrics", "sync-status", "owner-status", "owner-challenge", "owner-enroll", "owner-revoke", "owner-recover", "owner-enforce"]);
                         if oauth.is_some() { methods.extend(["oauth-register","oauth-consent","oauth-preview"]); }
                         json!({"version":1,"oauth":oauth.is_some(),"query":true,"subscriptions":true,
                         "interpreter":true,
                         "interpreter_contract_version":harmion_protocol::interpreter::CONTRACT_VERSION,
+                        "interpreter_stream_input_version":harmion_protocol::interpreter::STREAM_INPUT_VERSION,
+                        "interpreter_max_stream_input_bytes":harmion_protocol::interpreter::MAX_STREAM_INPUT_BYTES,
+                        "interpreter_stream_timeout_ms":harmion_protocol::interpreter::INPUT_STREAM_TIMEOUT_MS,
+                        "interpreter_max_active_streams":harmion_protocol::interpreter::MAX_ACTIVE_INPUT_STREAMS,
                         "interpreter_max_active":harmion_protocol::interpreter::MAX_ACTIVE_INVOCATIONS,
                         "interpreter_max_active_per_app":harmion_protocol::interpreter::MAX_ACTIVE_INVOCATIONS_PER_APP,
                         "interpreter_default_timeout_ms":harmion_protocol::interpreter::DEFAULT_CALL_TIMEOUT_MS,

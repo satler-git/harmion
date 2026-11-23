@@ -4,15 +4,22 @@ use crate::{Error, SharedStore, SystemHost, transport};
 use harmion_node::access::{Credential, Grants};
 use harmion_node::application::Host;
 use harmion_node::interpreter::{
-    invocation::{self, ActiveInvocation, BeginError, CancelOutcome},
+    invocation::{
+        self, ActiveInvocation, BeginError, CancelOutcome, PrepareCallError, PreparedCall,
+    },
     provider_session::SessionTable,
     registry,
+    stream::{
+        self as input_stream, CancelOutcome as StreamCancelOutcome, ChunkError, OpenError,
+        StreamTable,
+    },
 };
 use harmion_node::storage::Store;
 use harmion_protocol::AppId;
 use harmion_protocol::interpreter::{
-    self as wire, AttachParams, CallRequest, Display, InvocationId, InvokeParams, ProviderFailure,
-    ProviderId, ProviderOutcome, RpcMessage,
+    self as wire, AttachParams, CallRequest, Display, InvocationId, InvokeChunkParams,
+    InvokeEndParams, InvokeParams, InvokeStream, ProviderFailure, ProviderId, ProviderOutcome,
+    RpcMessage, StreamCancel, StreamChunk, StreamEnd, StreamFrame, StreamId, StreamStart,
 };
 use hyper::upgrade::Upgraded;
 use serde_json::{Value as Json, json};
@@ -46,6 +53,7 @@ enum Outcome {
 struct Inner {
     sessions: SessionTable,
     invocations: invocation::InvocationTable,
+    streams: StreamTable,
     senders: BTreeMap<ProviderId, SenderEntry>,
     waiters: BTreeMap<InvocationId, oneshot::Sender<Outcome>>,
 }
@@ -59,6 +67,7 @@ impl Default for Inner {
         Self {
             sessions: SessionTable::new(),
             invocations: invocation::InvocationTable::default_limits(),
+            streams: StreamTable::default_limits(),
             senders: Default::default(),
             waiters: Default::default(),
         }
@@ -118,6 +127,8 @@ impl Service {
             }
         }
         if revoked || !grants.can_call() {
+            // Staged input has not reached a Provider yet; dropping it is enough.
+            inner.streams.remove_app(app);
             for invocation in inner.invocations.remove_app(app) {
                 if let Some(waiter) = inner.waiters.remove(&invocation.id) {
                     failed.push((
@@ -172,6 +183,10 @@ impl Service {
             "interpreter-call" => {
                 let request = wire::decode_call_request(&body)?;
                 self.call(store, credential, request).await
+            }
+            "interpreter-call-stream" => {
+                let frame = wire::decode_stream_frame(&body)?;
+                self.stream(store, credential, frame).await
             }
             "interpreter-cancel" => {
                 let id: [u8; 32] = body
@@ -248,24 +263,254 @@ impl Service {
         let prepared = store
             .run(move |s| invocation::prepare_call(s, &mut SystemHost, &credential, &request))
             .await?;
-        let id = InvocationId(SystemHost.random_bytes()?);
-        let timeout = Duration::from_millis(prepared.timeout_ms);
+        self.dispatch(prepared, None).await
+    }
+
+    async fn stream<S: Store + Send + 'static>(
+        &self,
+        store: &SharedStore<S>,
+        credential: Credential,
+        frame: StreamFrame,
+    ) -> Result<Json, Error> {
+        match frame {
+            StreamFrame::Start(start) => self.stream_start(store, credential, start).await,
+            StreamFrame::Chunk(chunk) => self.stream_chunk(store, credential, chunk).await,
+            StreamFrame::End(end) => self.stream_end(store, credential, end).await,
+            StreamFrame::Cancel(cancel) => self.stream_cancel(store, credential, cancel).await,
+        }
+    }
+
+    async fn stream_start<S: Store + Send + 'static>(
+        &self,
+        store: &SharedStore<S>,
+        credential: Credential,
+        start: StreamStart,
+    ) -> Result<Json, Error> {
+        // Validate the Provider registration and the caller's grants before any
+        // bytes are staged. Contents are materialized only when the stream ends.
+        let request = CallRequest {
+            provider: start.provider,
+            input: start.input,
+            contents: Vec::new(),
+            timeout_ms: start.timeout_ms,
+        };
+        let prepared = store
+            .run(move |s| invocation::prepare_call(s, &mut SystemHost, &credential, &request))
+            .await?;
         let now = SystemHost.now_micros();
-        let deadline = now.saturating_add((prepared.timeout_ms as i64).saturating_mul(1000));
+        let staged = input_stream::StagedStream {
+            id: start.stream_id,
+            app: prepared.caller,
+            provider: prepared.provider,
+            provider_name: prepared.provider_name,
+            contract_version: prepared.contract_version,
+            input: prepared.input,
+            timeout_ms: prepared.timeout_ms,
+            started_at: now,
+            deadline: now
+                .saturating_add((wire::INPUT_STREAM_TIMEOUT_MS as i64).saturating_mul(1000)),
+            next_seq: 0,
+            contents: Vec::new(),
+            seen: Default::default(),
+            accepted_bytes: 0,
+            accepted_contents: 0,
+        };
+        {
+            let mut inner = self.lock()?;
+            // Reclaim abandoned uploads so expired slots do not hold capacity.
+            inner.streams.expire(now);
+            inner.streams.open(staged).map_err(|error| match error {
+                OpenError::NodeCapacity | OpenError::AppCapacity => {
+                    Error::from(harmion_node::Error::InterpreterCapacity)
+                }
+                OpenError::Duplicate => Error::from(harmion_node::Error::InvalidRequest),
+            })?;
+        }
+        Ok(json!({
+            "stream_id": start.stream_id,
+            "status": "open",
+            "limit_bytes": wire::MAX_STREAM_INPUT_BYTES,
+            "expires_in_ms": wire::INPUT_STREAM_TIMEOUT_MS,
+        }))
+    }
+
+    async fn stream_chunk<S: Store + Send + 'static>(
+        &self,
+        store: &SharedStore<S>,
+        credential: Credential,
+        chunk: StreamChunk,
+    ) -> Result<Json, Error> {
+        let caller = store
+            .run(move |s| registry::caller(s, &credential, SystemHost.now_micros()))
+            .await?;
+        if !caller.grants.can_call() {
+            return Err(harmion_node::Error::Forbidden.into());
+        }
+        let chunk_bytes = serde_json::to_vec(&chunk.contents)
+            .map_err(|_| harmion_node::Error::InvalidRequest)?
+            .len() as u64;
+        let result = {
+            let mut inner = self.lock()?;
+            inner.streams.chunk(
+                chunk.stream_id,
+                caller.app,
+                chunk.seq,
+                chunk.contents,
+                chunk_bytes,
+                SystemHost.now_micros(),
+            )
+        };
+        match result {
+            Ok((next_seq, accepted_contents, accepted_bytes)) => Ok(json!({
+                "stream_id": chunk.stream_id,
+                "status": "accepted",
+                "seq": chunk.seq,
+                "next_seq": next_seq,
+                "accepted_contents": accepted_contents,
+                "accepted_bytes": accepted_bytes,
+                "limit_bytes": wire::MAX_STREAM_INPUT_BYTES,
+            })),
+            Err(error) => chunk_error(chunk.stream_id, error),
+        }
+    }
+
+    async fn stream_end<S: Store + Send + 'static>(
+        &self,
+        store: &SharedStore<S>,
+        credential: Credential,
+        end: StreamEnd,
+    ) -> Result<Json, Error> {
+        let auth = credential.clone();
+        let caller = store
+            .run(move |s| registry::caller(s, &auth, SystemHost.now_micros()))
+            .await?;
+        if !caller.grants.can_call() {
+            return Err(harmion_node::Error::Forbidden.into());
+        }
+        let taken = {
+            let mut inner = self.lock()?;
+            inner
+                .streams
+                .take(end.stream_id, caller.app, SystemHost.now_micros())
+        };
+        let staged = match taken {
+            Ok(staged) => staged,
+            Err(error) => return chunk_error(end.stream_id, error),
+        };
+        let stream_id = staged.id;
+        let accepted_contents = staged.accepted_contents;
+        let accepted_bytes = staged.accepted_bytes;
+        let request = CallRequest {
+            provider: staged.provider_name,
+            input: staged.input,
+            contents: staged.contents,
+            timeout_ms: staged.timeout_ms,
+        };
+        let prepared = store
+            .run(move |s| {
+                Ok::<_, harmion_node::Error>(invocation::prepare_stream_call(
+                    s,
+                    &mut SystemHost,
+                    &credential,
+                    &request,
+                ))
+            })
+            .await?;
+        match prepared {
+            Ok(prepared) => self.dispatch(prepared, Some(stream_id)).await,
+            Err(PrepareCallError::InputTooLarge {
+                actual_bytes,
+                limit_bytes,
+            }) => Ok(stream_error(
+                stream_id,
+                "stream_limit_exceeded",
+                "streamed Provider input exceeds the logical limit",
+                json!({
+                    "partial": true,
+                    "actual_bytes": actual_bytes,
+                    "limit_bytes": limit_bytes,
+                    "accepted_contents": accepted_contents,
+                    "accepted_bytes": accepted_bytes,
+                }),
+            )),
+            Err(PrepareCallError::Call(error)) => Err(error.into()),
+        }
+    }
+
+    async fn stream_cancel<S: Store + Send + 'static>(
+        &self,
+        store: &SharedStore<S>,
+        credential: Credential,
+        cancel: StreamCancel,
+    ) -> Result<Json, Error> {
+        let caller = store
+            .run(move |s| registry::caller(s, &credential, SystemHost.now_micros()))
+            .await?;
+        if !caller.grants.can_call() {
+            return Err(harmion_node::Error::Forbidden.into());
+        }
+        let outcome = {
+            let mut inner = self.lock()?;
+            inner.streams.cancel(cancel.stream_id, caller.app)
+        };
+        match outcome {
+            StreamCancelOutcome::Canceled(id) => Ok(json!({
+                "stream_id": id,
+                "status": "canceled",
+                "canceled": true,
+            })),
+            StreamCancelOutcome::NotFound => Ok(stream_error(
+                cancel.stream_id,
+                "stream_not_found",
+                "stream is unknown, expired, or already ended",
+                Json::Null,
+            )),
+            StreamCancelOutcome::Forbidden => Err(harmion_node::Error::Forbidden.into()),
+        }
+    }
+
+    async fn dispatch(
+        &self,
+        prepared: PreparedCall,
+        stream_id: Option<StreamId>,
+    ) -> Result<Json, Error> {
+        let id = InvocationId(SystemHost.random_bytes()?);
+        let PreparedCall {
+            caller,
+            provider,
+            provider_name,
+            contract_version,
+            input,
+            contents,
+            content_bytes,
+            timeout_ms,
+        } = prepared;
+        let messages = invoke_messages(
+            id,
+            provider_name,
+            contract_version,
+            input,
+            contents,
+            content_bytes,
+            stream_id.is_some(),
+        )?;
+        let timeout = Duration::from_millis(timeout_ms);
+        let now = SystemHost.now_micros();
+        let deadline = now.saturating_add((timeout_ms as i64).saturating_mul(1000));
         let (out_tx, mut out_rx) = oneshot::channel();
         let sender = {
             let mut inner = self.lock()?;
             let sender = inner
                 .senders
-                .get(&prepared.provider)
+                .get(&provider)
                 .cloned()
                 .ok_or(harmion_node::Error::InterpreterUnavailable)?;
             inner
                 .invocations
                 .begin(ActiveInvocation {
                     id,
-                    app: prepared.caller,
-                    provider: prepared.provider,
+                    app: caller,
+                    provider,
                     started_at: now,
                     deadline,
                 })
@@ -273,21 +518,11 @@ impl Service {
             inner.waiters.insert(id, out_tx);
             sender
         };
-        let message = wire::rpc_request(
-            &serde_json::to_value(id).map_err(|_| harmion_node::Error::InvalidRequest)?,
-            wire::RPC_INVOKE,
-            serde_json::to_value(InvokeParams {
-                invocation_id: id,
-                provider: prepared.provider_name,
-                contract_version: prepared.contract_version,
-                input: prepared.input,
-                contents: prepared.contents,
-            })
-            .map_err(|_| harmion_node::Error::InvalidRequest)?,
-        );
-        if sender.tx.send(ProviderCommand::Send(message)).is_err() {
-            self.abort_local(id);
-            return Err(harmion_node::Error::InterpreterUnavailable.into());
+        for message in messages {
+            if sender.tx.send(ProviderCommand::Send(message)).is_err() {
+                self.abort_local(id);
+                return Err(harmion_node::Error::InterpreterUnavailable.into());
+            }
         }
         let mut lease = Lease {
             service: self,
@@ -298,7 +533,7 @@ impl Service {
         match result {
             Ok(Ok(outcome)) => {
                 lease.armed = false;
-                self.respond(id, outcome)
+                self.respond(id, outcome, stream_id)
             }
             Ok(Err(_)) => {
                 lease.armed = false;
@@ -310,31 +545,42 @@ impl Service {
                     return Err(harmion_node::Error::InterpreterTimeout.into());
                 }
                 match out_rx.await {
-                    Ok(outcome) => self.respond(id, outcome),
+                    Ok(outcome) => self.respond(id, outcome, stream_id),
                     Err(_) => Err(harmion_node::Error::InterpreterUnavailable.into()),
                 }
             }
         }
     }
 
-    fn respond(&self, id: InvocationId, outcome: Outcome) -> Result<Json, Error> {
-        match outcome {
-            Outcome::Success { data, display } => Ok(json!({
+    fn respond(
+        &self,
+        id: InvocationId,
+        outcome: Outcome,
+        stream_id: Option<StreamId>,
+    ) -> Result<Json, Error> {
+        let mut value = match outcome {
+            Outcome::Success { data, display } => json!({
                 "invocation_id": id,
                 "status": "ok",
                 "data": data,
                 "display": display,
-            })),
-            Outcome::Failure(error) => Ok(json!({
+            }),
+            Outcome::Failure(error) => json!({
                 "invocation_id": id,
                 "status": "error",
                 "error": error,
-            })),
-            Outcome::Unavailable => Err(harmion_node::Error::InterpreterUnavailable.into()),
-            Outcome::Cancelled => Err(harmion_node::Error::InterpreterCancelled.into()),
-            Outcome::Unauthorized => Err(harmion_node::Error::Unauthenticated.into()),
-            Outcome::InvalidResponse => Err(harmion_node::Error::InterpreterInvalidResponse.into()),
+            }),
+            Outcome::Unavailable => return Err(harmion_node::Error::InterpreterUnavailable.into()),
+            Outcome::Cancelled => return Err(harmion_node::Error::InterpreterCancelled.into()),
+            Outcome::Unauthorized => return Err(harmion_node::Error::Unauthenticated.into()),
+            Outcome::InvalidResponse => {
+                return Err(harmion_node::Error::InterpreterInvalidResponse.into());
+            }
+        };
+        if let Some(stream_id) = stream_id {
+            value["stream_id"] = json!(stream_id);
         }
+        Ok(value)
     }
 
     pub(crate) fn close_provider(&self, provider: ProviderId) {
@@ -667,6 +913,182 @@ impl Service {
             RpcMessage::Notification { .. } => Ok(true),
         }
     }
+}
+
+fn invoke_messages(
+    id: InvocationId,
+    provider_name: String,
+    contract_version: u32,
+    input: Json,
+    contents: Vec<wire::ProviderContent>,
+    content_bytes: u64,
+    streamed: bool,
+) -> Result<Vec<Json>, Error> {
+    let id_json = serde_json::to_value(id).map_err(invalid_request)?;
+    let total_contents = contents.len() as u64;
+    if !streamed {
+        let message = wire::rpc_request(
+            &id_json,
+            wire::RPC_INVOKE,
+            serde_json::to_value(InvokeParams {
+                invocation_id: id,
+                provider: provider_name,
+                contract_version,
+                input,
+                contents,
+                stream: None,
+            })
+            .map_err(invalid_request)?,
+        );
+        check_provider_message(&message)?;
+        return Ok(vec![message]);
+    }
+
+    // Group by encoded item size so each Provider chunk stays well below the
+    // Provider WebSocket frame cap. Order is preserved exactly.
+    let mut chunks: Vec<Vec<wire::ProviderContent>> = Vec::new();
+    let mut current = Vec::new();
+    let mut current_bytes = 0usize;
+    for item in contents {
+        let item_bytes = serde_json::to_vec(&item).map_err(invalid_request)?.len();
+        if !current.is_empty()
+            && current_bytes.saturating_add(item_bytes) > wire::MAX_STREAM_CHUNK_CONTENT_BYTES
+        {
+            chunks.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        current.push(item);
+        current_bytes = current_bytes.saturating_add(item_bytes);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    let chunk_count = chunks.len() as u64;
+    if chunk_count > wire::MAX_STREAM_CHUNKS {
+        return Err(harmion_node::Error::InterpreterInputTooLarge.into());
+    }
+    let start = wire::rpc_request(
+        &id_json,
+        wire::RPC_INVOKE,
+        serde_json::to_value(InvokeParams {
+            invocation_id: id,
+            provider: provider_name,
+            contract_version,
+            input,
+            contents: Vec::new(),
+            stream: Some(InvokeStream {
+                version: wire::STREAM_INPUT_VERSION,
+                chunks: chunk_count,
+                total_contents,
+                total_bytes: content_bytes,
+            }),
+        })
+        .map_err(invalid_request)?,
+    );
+    check_provider_message(&start)?;
+    let mut messages = Vec::with_capacity(chunks.len() + 2);
+    messages.push(start);
+    for (seq, chunk) in chunks.into_iter().enumerate() {
+        let message = wire::rpc_notification(
+            wire::RPC_INVOKE_CHUNK,
+            serde_json::to_value(InvokeChunkParams {
+                invocation_id: id,
+                seq: seq as u64,
+                contents: chunk,
+            })
+            .map_err(invalid_request)?,
+        );
+        check_provider_message(&message)?;
+        messages.push(message);
+    }
+    let end = wire::rpc_notification(
+        wire::RPC_INVOKE_END,
+        serde_json::to_value(InvokeEndParams {
+            invocation_id: id,
+            seq: chunk_count,
+            total_contents,
+            total_bytes: content_bytes,
+        })
+        .map_err(invalid_request)?,
+    );
+    check_provider_message(&end)?;
+    messages.push(end);
+    Ok(messages)
+}
+
+fn check_provider_message(message: &Json) -> Result<(), Error> {
+    let bytes = serde_json::to_vec(message).map_err(invalid_request)?;
+    if bytes.len() > wire::MAX_PROVIDER_MESSAGE_BYTES {
+        return Err(harmion_node::Error::InterpreterInputTooLarge.into());
+    }
+    Ok(())
+}
+
+fn invalid_request(_: serde_json::Error) -> Error {
+    harmion_node::Error::InvalidRequest.into()
+}
+
+fn chunk_error(id: StreamId, error: ChunkError) -> Result<Json, Error> {
+    match error {
+        ChunkError::NotFound => Ok(stream_error(
+            id,
+            "stream_not_found",
+            "stream is unknown, expired, or already ended",
+            Json::Null,
+        )),
+        ChunkError::Forbidden => Err(harmion_node::Error::Forbidden.into()),
+        ChunkError::Expired {
+            accepted_contents,
+            accepted_bytes,
+        } => Ok(stream_error(
+            id,
+            "stream_expired",
+            "the streaming upload deadline passed",
+            json!({
+                "partial": true,
+                "accepted_contents": accepted_contents,
+                "accepted_bytes": accepted_bytes,
+                "limit_bytes": wire::MAX_STREAM_INPUT_BYTES,
+            }),
+        )),
+        ChunkError::Sequence { expected, received } => Ok(stream_error(
+            id,
+            "stream_sequence",
+            "chunk sequence is not contiguous",
+            json!({"expected_seq": expected, "received_seq": received}),
+        )),
+        ChunkError::Duplicate => Ok(stream_error(
+            id,
+            "stream_duplicate_content",
+            "a Content id is repeated within the stream",
+            Json::Null,
+        )),
+        ChunkError::Limit {
+            accepted_contents,
+            accepted_bytes,
+            limit_bytes,
+        } => Ok(stream_error(
+            id,
+            "stream_limit_exceeded",
+            "streamed input exceeds the logical limit",
+            json!({
+                "partial": true,
+                "accepted_contents": accepted_contents,
+                "accepted_bytes": accepted_bytes,
+                "limit_bytes": limit_bytes,
+            }),
+        )),
+    }
+}
+
+fn stream_error(id: StreamId, code: &str, message: &str, details: Json) -> Json {
+    let mut error = json!({"code": code, "message": message});
+    if let (Some(target), Json::Object(details)) = (error.as_object_mut(), details) {
+        for (key, value) in details {
+            target.insert(key, value);
+        }
+    }
+    json!({"stream_id": id, "status": "error", "error": error})
 }
 
 struct Lease<'a> {

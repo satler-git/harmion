@@ -5,6 +5,7 @@
 //! M1/M3 adds persistence and the `status`, `create_page`, `create_snippet`,
 //! `convert_fence`, `delete`, `transclude`, `export` and `conflicts` methods.
 
+mod auth;
 mod backend;
 mod error;
 mod export;
@@ -23,8 +24,14 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use clap::{Parser, Subcommand};
+use harmion_client::Client;
+use harmion_client::protocol::GrantSpec;
+use harmion_client::protocol::connect::{
+    ConnectionCompleteRequest, ConnectionOffer, ConnectionStatusRequest,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::time::{Duration, Instant};
 
 use error::{
     RpcError, RpcResult, optional_bool, optional_str, optional_str_array, optional_u64,
@@ -51,10 +58,52 @@ enum Command {
         /// Omit for an in-memory server seeded with fixtures.
         #[arg(long, conflicts_with = "node")]
         data: Option<PathBuf>,
-        /// Dev-only: load a read snapshot of `kind=wiki` Contents from a real
-        /// node directory (requires connection.json + admin.secret).
+        /// Use OAuth credentials from `<DIR>/credentials.json` and read
+        /// `kind=wiki` Contents from a real local node. Run
+        /// `wiki-server connect --node DIR` once first.
         #[arg(long, conflicts_with = "data")]
         node: Option<PathBuf>,
+    },
+    /// Connect this Wiki app to a local node through the integrated OAuth flow.
+    ///
+    /// Prints the verification URL. Approve the request in Harmion Admin
+    /// (Connect), then the command stores access/refresh tokens in
+    /// `<DIR>/credentials.json` (mode 0600) without printing them.
+    Connect {
+        #[arg(long)]
+        node: PathBuf,
+        #[arg(long, default_value = "Harmion Wiki")]
+        name: String,
+        /// Loopback callback registered with the node. It is not opened or
+        /// served by this command; owner approval happens in Harmion Admin.
+        #[arg(long, default_value = "http://127.0.0.1:53682/wiki/callback")]
+        redirect_uri: String,
+        /// Read kind grants; defaults to `wiki`.
+        #[arg(long = "read-kind", value_delimiter = ',')]
+        read_kind: Vec<String>,
+        /// Write kind grants; defaults to `wiki,snippet`. Snippet conversion
+        /// kinds from `!` fences must be included here.
+        #[arg(long = "write-kind", value_delimiter = ',')]
+        write_kind: Vec<String>,
+        #[arg(long)]
+        read_all: bool,
+        #[arg(long)]
+        write_all: bool,
+        /// Request Interpreter `call` (default; use --no-call to omit).
+        #[arg(long)]
+        no_call: bool,
+        /// Request Provider registration (default; use --no-provide to omit).
+        #[arg(long)]
+        no_provide: bool,
+        /// Provider names to request; defaults to the three built-in Wiki
+        /// providers.
+        #[arg(long = "provide-name", value_delimiter = ',')]
+        provide_name: Vec<String>,
+        /// Maximum wait for owner approval, in seconds.
+        #[arg(long, default_value_t = 300)]
+        timeout_secs: u64,
+        #[arg(long, default_value_t = 1)]
+        poll_secs: u64,
     },
     List {
         #[arg(long, default_value = SOCKET_DEFAULT)]
@@ -172,6 +221,33 @@ enum Command {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
         Command::Serve { socket, data, node } => serve(&socket, data, node),
+        Command::Connect {
+            node,
+            name,
+            redirect_uri,
+            read_kind,
+            write_kind,
+            read_all,
+            write_all,
+            no_call,
+            no_provide,
+            provide_name,
+            timeout_secs,
+            poll_secs,
+        } => connect(ConnectOptions {
+            node,
+            name,
+            redirect_uri,
+            read_kind,
+            write_kind,
+            read_all,
+            write_all,
+            call: !no_call,
+            provide: !no_provide,
+            provide_name,
+            timeout_secs,
+            poll_secs,
+        }),
         Command::List { socket } => print_call(&socket, "list", json!({})),
         Command::Open { id, socket } => print_call(&socket, "open", json!({ "id": id })),
         Command::Workspace { id, socket } => print_call(&socket, "workspace", json!({ "id": id })),
@@ -279,6 +355,228 @@ fn read_stdin_body() -> std::io::Result<String> {
     let mut body = String::new();
     std::io::stdin().read_to_string(&mut body)?;
     Ok(body)
+}
+
+struct ConnectOptions {
+    node: PathBuf,
+    name: String,
+    redirect_uri: String,
+    read_kind: Vec<String>,
+    write_kind: Vec<String>,
+    read_all: bool,
+    write_all: bool,
+    call: bool,
+    provide: bool,
+    provide_name: Vec<String>,
+    timeout_secs: u64,
+    poll_secs: u64,
+}
+
+fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let info = auth::connection_info(&options.node)?;
+    if info.oauth_origin.is_none() {
+        eprintln!(
+            "warning: this node has no OAuth origin; connect will still issue tokens, \
+             but they cannot be refreshed and `serve --node` will require a new connect"
+        );
+    }
+    let client = Client::anonymous(info.clone())?;
+    let pkce = auth::generate_pkce()?;
+    let state = auth::random_state()?;
+
+    let read_kind = if options.read_kind.is_empty() {
+        vec!["wiki".to_owned()]
+    } else {
+        options.read_kind
+    };
+    let write_kind = if options.write_kind.is_empty() {
+        vec!["wiki".to_owned(), "snippet".to_owned()]
+    } else {
+        options.write_kind
+    };
+    let provide_name = if options.provide_name.is_empty() {
+        vec![
+            "wiki/backlinks".to_owned(),
+            "wiki/outline".to_owned(),
+            "wiki/transclude".to_owned(),
+        ]
+    } else {
+        options.provide_name
+    };
+    let grants = GrantSpec {
+        read: auth::filter_spec(options.read_all, read_kind.clone()),
+        write: auth::filter_spec(options.write_all, write_kind.clone()),
+        call: options.call,
+        provide: options.provide,
+        provide_names: if options.provide {
+            provide_name
+        } else {
+            Vec::new()
+        },
+        manage_apps: false,
+        manage_nodes: false,
+    };
+    let offer = ConnectionOffer {
+        version: 1,
+        name: options.name,
+        redirect_uri: options.redirect_uri,
+        web_origin: None,
+        client_id: None,
+        challenge: pkce.challenge,
+        state,
+        grants,
+        provider: None,
+        provider_replace: false,
+    };
+    // Fail before creating a pending request if the offer violates the same
+    // validation the node applies.
+    harmion_client::protocol::connect::validate_offer(&offer)
+        .map_err(|error| format!("invalid connection offer: {error}"))?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("cannot build connect runtime: {error}"))?;
+    let completion = runtime.block_on(connect_async(
+        &client,
+        &offer,
+        &pkce.verifier,
+        options.timeout_secs,
+        options.poll_secs,
+    ))?;
+
+    let now = auth::now_seconds();
+    let expires_in = completion
+        .get("expires_in")
+        .and_then(Value::as_i64)
+        .filter(|seconds| *seconds > 0)
+        .ok_or("node connect-complete returned no valid expires_in")?;
+    let credentials = auth::Credentials {
+        version: 1,
+        client_id: json_string(&completion, "client_id")?,
+        access_token: json_string(&completion, "access_token")?,
+        refresh_token: json_string(&completion, "refresh_token")?,
+        expires_at: now.saturating_add(expires_in),
+        scope: completion
+            .get("scope")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        oauth_origin: info.oauth_origin.clone(),
+    };
+    credentials.save(&options.node)?;
+    let missing = credentials.missing_write_kinds(write_kind.iter());
+    if !missing.is_empty() {
+        eprintln!(
+            "warning: the approved scope does not allow Write for kind(s): {}; \
+             re-run connect with matching --write-kind values",
+            missing.join(", ")
+        );
+    }
+    println!("connected {} to {}", offer.name, info.endpoint);
+    println!(
+        "credentials: {} (mode 0600)",
+        options.node.join(auth::CREDENTIALS_FILE).display()
+    );
+    println!("client_id: {}", credentials.client_id);
+    println!(
+        "access token expires at {} (unix seconds); it will refresh automatically",
+        credentials.expires_at
+    );
+    if credentials.oauth_origin.is_none() {
+        eprintln!("warning: no OAuth origin was published; automatic refresh is unavailable");
+    }
+    Ok(())
+}
+
+async fn connect_async(
+    client: &Client,
+    offer: &ConnectionOffer,
+    verifier: &str,
+    timeout_secs: u64,
+    poll_secs: u64,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let started = client
+        .connect_start(offer)
+        .await
+        .map_err(|error| format!("connect-start failed: {error}"))?;
+    let connection_id = json_string(&started, "connection_id")?;
+    let request_secret = json_string(&started, "request_secret")?;
+    println!("connection: {connection_id}");
+    match started.get("verification_url").and_then(Value::as_str) {
+        Some(url) => {
+            println!("Open this URL, then approve the request in Harmion Admin > Connect:");
+            println!("  {url}");
+        }
+        None => println!(
+            "Approve this request in Harmion Admin > Connect (no OAuth verification URL was published)."
+        ),
+    }
+    println!(
+        "Waiting for owner approval (up to {timeout_secs}s; no browser is opened automatically)..."
+    );
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+    let mut last_status = String::new();
+    loop {
+        let request = ConnectionStatusRequest {
+            connection_id: connection_id.clone(),
+            request_secret: request_secret.clone(),
+        };
+        let view = client
+            .connect_status(&request)
+            .await
+            .map_err(|error| format!("connect-status failed: {error}"))?;
+        let status = view
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or("connect-status returned no status")?
+            .to_owned();
+        if status != last_status {
+            println!("status: {status}");
+            last_status = status.clone();
+        }
+        match status.as_str() {
+            "approved" => break,
+            "denied" => return Err("the owner denied the connection request".into()),
+            "expired" => {
+                return Err(
+                    "the connection request expired before approval; run connect again".into(),
+                );
+            }
+            "completed" => {
+                return Err(
+                    "the connection was already completed without the tokens being saved; run connect again"
+                        .into(),
+                );
+            }
+            "pending" => {}
+            other => return Err(format!("unexpected connection status {other:?}").into()),
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out after {timeout_secs}s waiting for owner approval; the request expires after 5 minutes"
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_secs(poll_secs.max(1))).await;
+    }
+    let request = ConnectionCompleteRequest {
+        connection_id,
+        request_secret,
+        code_verifier: verifier.to_owned(),
+    };
+    client
+        .connect_complete(&request)
+        .await
+        .map_err(|error| format!("connect-complete failed: {error}").into())
+}
+
+fn json_string(value: &Value, key: &str) -> Result<String, String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("node response is missing string field {key:?}"))
 }
 
 fn print_call(

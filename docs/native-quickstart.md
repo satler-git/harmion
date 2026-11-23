@@ -341,6 +341,8 @@ harmion --node NODE_DIR interpreter-cancel INVOCATION_ID
 }
 ```
 
+`contents`の件数上限はなく、64件超も1回の`interpreter-call`で送れる（1 MiB本文と2 MiB Providerフレームの範囲）。それを超える入力は`interpreter-call-stream`へ`{"frame":"start"}`、`{"frame":"chunk","seq":0,...}`、`{"frame":"end"}`を順に送る。論理上限は128 MiB、アップロード期限は60秒で、超過・順序違反・期限切れは部分状態付きの明示エラーになる。Provider SDKの`next()`はchunkを自動で蓄積して完全な`InvokeParams`を返す。
+
 Providerが未接続なら503、timeoutなら504、明示cancelなら409を返す。callは冪等ではない。管理UIは一覧・定義表示・承認と「接続」画面を提供し、callの入力組み立ては行わない。
 ## Export
 

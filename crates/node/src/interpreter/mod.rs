@@ -6,9 +6,11 @@
 pub mod invocation;
 pub mod provider_session;
 pub mod registry;
+pub mod stream;
 
 pub use invocation::{InvocationTable, PreparedCall};
 pub use provider_session::SessionTable;
+pub use stream::{StagedStream, StreamTable};
 
 use crate::Error;
 use harmion_protocol::AppId;

@@ -591,3 +591,67 @@ fn manual_registration_and_approval_respect_provide_names() {
         allowed_app
     );
 }
+
+#[test]
+fn stream_prepare_accounts_exact_content_bytes_and_reports_limits() {
+    let mut t = Test::new();
+    let provider = t.issue(provide_only());
+    let caller = t.issue(read_and_call());
+    let registration = registry::register(
+        &mut t.store,
+        &mut t.host,
+        &provider,
+        manifest("ledger/balance"),
+    )
+    .unwrap();
+    registry::approve(
+        &mut t.store,
+        &mut t.host,
+        &t.admin.clone(),
+        registration.provider,
+        false,
+    )
+    .unwrap();
+    let content = t.create();
+    let token = app::get(&mut t.store, &mut t.host, &caller, content)
+        .unwrap()
+        .edit_token;
+    let request = CallRequest {
+        provider: "ledger/balance".into(),
+        input: json!(null),
+        contents: vec![ContentSelection { content, token }],
+        timeout_ms: 5_000,
+    };
+    let prepared =
+        invocation::prepare_stream_call(&mut t.store, &mut t.host, &caller, &request).unwrap();
+    assert_eq!(prepared.contents.len(), 1);
+    assert!(prepared.content_bytes > 0);
+    let actual = prepared.content_bytes;
+    match invocation::prepare_call_with_content_limit(
+        &mut t.store,
+        &mut t.host,
+        &caller,
+        &request,
+        (actual - 1) as usize,
+    ) {
+        Err(invocation::PrepareCallError::InputTooLarge {
+            actual_bytes,
+            limit_bytes,
+        }) => {
+            assert_eq!(actual_bytes, actual);
+            assert_eq!(limit_bytes, actual - 1);
+        }
+        Ok(_) => panic!("expected explicit limit error, got a prepared call"),
+        Err(other) => panic!("expected explicit limit error, got {other:?}"),
+    }
+    // The streaming path is not constrained by the legacy single-frame cap when
+    // its logical limit is larger, and zero contents remains valid.
+    let empty = CallRequest {
+        contents: Vec::new(),
+        ..request
+    };
+    let prepared =
+        invocation::prepare_stream_call(&mut t.store, &mut t.host, &caller, &empty).unwrap();
+    assert!(prepared.contents.is_empty());
+    assert_eq!(prepared.content_bytes, 0);
+}

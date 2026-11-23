@@ -81,6 +81,10 @@ pub struct Summary {
     pub format: Option<String>,
     pub language: Option<String>,
     pub kinds: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
     pub rev: u64,
     pub updated_label: String,
     pub excerpt: String,
@@ -95,6 +99,8 @@ impl From<&Content> for Summary {
             format: content.format.clone(),
             language: content.language.clone(),
             kinds: content.kinds.clone(),
+            tags: content.tags.clone(),
+            aliases: content.aliases.clone(),
             rev: content.rev,
             updated_label: content.updated_label.clone(),
             excerpt: excerpt(&content.body),

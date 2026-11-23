@@ -6,9 +6,10 @@ use http_body_util::Full;
 use hyper::{Request, header, upgrade::on};
 use hyper_util::rt::TokioIo;
 use protocol::interpreter::{
-    Display, InvocationId, InvokeParams, ProviderFailure, ProviderId, RPC_ATTACH, RPC_CANCEL,
-    RPC_INVOKE, RPC_METHOD_NOT_FOUND, RpcMessage, decode_provider_result, decode_rpc, rpc_error,
-    rpc_request, rpc_result,
+    Display, InvocationId, InvokeChunkParams, InvokeEndParams, InvokeParams, InvokeStream,
+    ProviderFailure, ProviderId, RPC_ATTACH, RPC_CANCEL, RPC_INVOKE, RPC_INVOKE_CHUNK,
+    RPC_INVOKE_END, RPC_METHOD_NOT_FOUND, RpcMessage, decode_provider_result, decode_rpc,
+    rpc_error, rpc_request, rpc_result, validate_invoke_stream,
 };
 use protocol::websocket::{Frame, MAX_FRAME_PAYLOAD, Opcode, encode_frame, parse_frame};
 use protocol::{ConnectionInfo, TLS_NAME};
@@ -157,19 +158,27 @@ impl ProviderClient {
         Ok(provider)
     }
     /// Wait for the next invocation or cancel notification. Returns Closed after
-    /// a close frame. Unknown request methods are answered and skipped.
+    /// a close frame. Unknown request methods are answered and skipped. A
+    /// streamed invocation is assembled from its ordered chunk notifications and
+    /// is returned only after the end notification.
     pub async fn next(&mut self) -> Result<ProviderEvent, Error> {
         loop {
-            let Some(text) = self.read_text().await? else {
+            let Some(message) = self.read_rpc().await? else {
                 return Ok(ProviderEvent::Closed);
             };
-            match decode_rpc(text.as_bytes()).map_err(|_| Error::InvalidResponse)? {
+            match message {
                 RpcMessage::Request { id, method, params } if method == RPC_INVOKE => {
-                    let params: InvokeParams =
+                    let mut params: InvokeParams =
                         serde_json::from_value(params).map_err(|_| Error::InvalidResponse)?;
                     let invocation = decode_invocation(&id)?;
                     if params.invocation_id != invocation {
                         return Err(Error::InvalidResponse);
+                    }
+                    if let Some(stream) = params.stream.take()
+                        && let Some(event) =
+                            self.read_stream(invocation, stream, &mut params).await?
+                    {
+                        return Ok(event);
                     }
                     return Ok(ProviderEvent::Invocation { invocation, params });
                 }
@@ -187,6 +196,85 @@ impl ProviderClient {
                     return Ok(ProviderEvent::Cancel { invocation });
                 }
                 RpcMessage::Notification { .. } | RpcMessage::Response { .. } => {}
+            }
+        }
+    }
+
+    /// Assemble a streamed invocation. `None` means the complete invocation is
+    /// ready; `Some` is a Cancel or Closed event that ended the stream.
+    async fn read_stream(
+        &mut self,
+        invocation: InvocationId,
+        stream: InvokeStream,
+        params: &mut InvokeParams,
+    ) -> Result<Option<ProviderEvent>, Error> {
+        validate_invoke_stream(&stream).map_err(|_| Error::InvalidResponse)?;
+        let mut contents = Vec::new();
+        let mut total_bytes = 0u64;
+        let mut seq = 0u64;
+        loop {
+            let Some(message) = self.read_rpc().await? else {
+                return Ok(Some(ProviderEvent::Closed));
+            };
+            match message {
+                RpcMessage::Notification {
+                    method,
+                    params: value,
+                } if method == RPC_INVOKE_CHUNK => {
+                    let chunk: InvokeChunkParams =
+                        serde_json::from_value(value).map_err(|_| Error::InvalidResponse)?;
+                    if chunk.invocation_id != invocation || chunk.seq != seq {
+                        return Err(Error::InvalidResponse);
+                    }
+                    for item in &chunk.contents {
+                        total_bytes = total_bytes.saturating_add(
+                            serde_json::to_vec(item)
+                                .map_err(|_| Error::InvalidResponse)?
+                                .len() as u64,
+                        );
+                    }
+                    if total_bytes > stream.total_bytes
+                        || contents.len() as u64 + chunk.contents.len() as u64
+                            > stream.total_contents
+                    {
+                        return Err(Error::InvalidResponse);
+                    }
+                    contents.extend(chunk.contents);
+                    seq = seq.saturating_add(1);
+                }
+                RpcMessage::Notification {
+                    method,
+                    params: value,
+                } if method == RPC_INVOKE_END => {
+                    let end: InvokeEndParams =
+                        serde_json::from_value(value).map_err(|_| Error::InvalidResponse)?;
+                    if end.invocation_id != invocation
+                        || end.seq != seq
+                        || end.seq != stream.chunks
+                        || end.total_contents != contents.len() as u64
+                        || end.total_bytes != total_bytes
+                    {
+                        return Err(Error::InvalidResponse);
+                    }
+                    params.contents = contents;
+                    return Ok(None);
+                }
+                RpcMessage::Notification { method, params } if method == RPC_CANCEL => {
+                    let value = params
+                        .get("invocation_id")
+                        .cloned()
+                        .ok_or(Error::InvalidResponse)?;
+                    let invocation: InvocationId =
+                        serde_json::from_value(value).map_err(|_| Error::InvalidResponse)?;
+                    return Ok(Some(ProviderEvent::Cancel { invocation }));
+                }
+                RpcMessage::Request { id, .. } => {
+                    self.send_json(&rpc_error(&id, RPC_METHOD_NOT_FOUND, "method not found"))
+                        .await?;
+                }
+                RpcMessage::Notification { .. } | RpcMessage::Response { .. } => {
+                    return Err(Error::InvalidResponse);
+                }
             }
         }
     }
@@ -320,6 +408,14 @@ impl ProviderClient {
             return Err(Error::InvalidResponse);
         };
         protocol::decode_app_json(text.as_bytes()).map_err(|_| Error::InvalidResponse)
+    }
+    async fn read_rpc(&mut self) -> Result<Option<RpcMessage>, Error> {
+        let Some(text) = self.read_text().await? else {
+            return Ok(None);
+        };
+        decode_rpc(text.as_bytes())
+            .map(Some)
+            .map_err(|_| Error::InvalidResponse)
     }
 }
 fn retryable(error: &Error) -> bool {

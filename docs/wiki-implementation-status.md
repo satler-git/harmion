@@ -37,7 +37,7 @@ Last updated: 2026-11-23
 - Dev-only `--node DIR` snapshot using `harmion-client::Client::from_directory`
   (admin secret). `save` is body-only and refuses if the node body changed since
   the snapshot; create/convert/delete still return 501.
-- 36 + 2 tests pass (unit + integration)
+- 46 + 2 tests pass (unit + integration); client 7
 
 ### `apps/wiki-lsp`
 
@@ -76,9 +76,9 @@ Last updated: 2026-11-23
   the integrated connect flow also needs a redirect/listener and credential store.
 - **No app-visible full-text Search**; local substring search is used.
 - **No app-level kind/delete conflict resolution**; those are owner/admin only.
-- **Interpreter v1 caps** (64 contents / 2 MiB / 128 KiB input) do not satisfy
-  the Wiki all-content 128 MiB streaming requirement; the platform contract
-  change is still pending.
+- **Interpreter streaming v1 is implemented**: >64 items, chunked input,
+  128 MiB explicit limit, cancellation and tests. Output streaming remains out
+  of scope.
 - **No atomic host+snippet save**; fence conversion is two saves and reports
   partial failure.
 - Git commit signing may be skipped when the GPG passphrase is unavailable.

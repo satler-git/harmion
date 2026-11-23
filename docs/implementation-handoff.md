@@ -99,7 +99,7 @@ quota節約のため、**Cloudflareレプリカ本体・Android・Windowsの新�
 
 - Provider SDKは単一接続を扱うが、自動再接続・常駐・バックオフのループはアプリ側。idle heartbeatは送らない。
 - 管理UIは一覧・定義表示・承認のみで、callの入力組み立て・実行画面はない。callはSDK/CLIから行う。
-- Worker/DOはInterpreterを提供せず、App APIはfail closed。遠隔Interpreter・自動起動・サンドボックス・ストリーミング・入力Contentのページ取得・request receipt・Provider単位のgrant/quota/監査はv1対象外。
+- Worker/DOはInterpreterを提供せず、App APIはfail closed。遠隔Interpreter・自動起動・サンドボックス・出力ストリーミング・入力Contentのページ取得・request receipt・Provider単位のgrant/quota/監査はv1対象外。入力のストリーミングは`interpreter-call-stream`（論理128 MiB、60秒）として実装済みだが、Worker/DOでは提供しない。
 - Android/WindowsのProvider常駐・実行、実Cloudflare、実daemonを設定から起動する通しE2Eは未検証。
 
 次にInterpreterで進めるなら、Provider SDKの再接続ループ、実アプリでのcall統合、必要になった時点の名前単位grant・監査、Androidの実行方式の順が自然である。Workersの本番運用準備を優先する場合は、R39〜R52の未実施範囲を先に扱う。
