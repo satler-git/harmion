@@ -58,7 +58,9 @@ local function lsp_start()
   if vim.g.wiki_lsp == false then
     return
   end
-  local cmd = vim.g.wiki_lsp_cmd or { "wiki-lsp" }
+  local cmd = vim.g.wiki_lsp_cmd
+    or (vim.env.WIKI_LSP_CMD and { vim.env.WIKI_LSP_CMD })
+    or { "wiki-lsp" }
   local ok, client = pcall(vim.lsp.start, {
     name = "wiki",
     cmd = cmd,
