@@ -20,6 +20,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::sync::OnceLock;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -322,7 +324,17 @@ struct EditorState {
 }
 
 #[derive(Clone)]
+struct PollGuard(Arc<AtomicBool>);
+
+impl Drop for PollGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+#[derive(Clone)]
 struct PollState {
+    alive: Arc<AtomicBool>,
     source: Signal<Source>,
     summaries: Signal<Vec<Summary>>,
     tabs: Signal<Vec<Tab>>,
@@ -337,6 +349,7 @@ struct AppState {
     summaries: Signal<Vec<Summary>>,
     providers: Signal<Vec<String>>,
     cache: Rc<RefCell<CacheFile>>,
+    poll_guard: Rc<PollGuard>,
     tag_filter: Signal<Option<String>>,
     tabs: Signal<Vec<Tab>>,
     active: Signal<usize>,
@@ -1054,29 +1067,51 @@ fn load_summaries() -> Result<Vec<Summary>, String> {
     serde_json::from_value(items).map_err(|error| format!("list の解釈に失敗: {error}"))
 }
 
-fn start_polling(state: &AppState) {
+fn start_polling(state: &AppState, alive: Arc<AtomicBool>) {
     let poll = PollState {
+        alive: alive.clone(),
         source: state.source,
         summaries: state.summaries,
         tabs: state.tabs,
         active: state.active,
     };
+    let mut since = 0u64;
     thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(Duration::from_millis(250));
+        if !alive.load(Ordering::SeqCst) {
+            break;
+        }
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if poll.source.get_untracked() != Source::Server {
             if let Ok(items) = load_summaries() {
                 let source = poll.source;
                 let summaries = poll.summaries;
+                let guard = alive.clone();
                 request_frame(move |_| {
+                    if !guard.load(Ordering::SeqCst) {
+                        return;
+                    }
                     source.set(Source::Server);
                     summaries.set(items);
                 });
             }
-            continue;
+            return;
         }
-        if let Ok(items) = load_summaries() {
-            let summaries = poll.summaries;
-            request_frame(move |_| summaries.set(items));
+        if let Ok(value) = rpc("watch", json!({ "since": since, "timeout_ms": 20_000 })) {
+            if let Some(generation) = value.get("generation").and_then(Value::as_u64) {
+                since = generation;
+            }
+            if let Ok(items) = serde_json::from_value::<Vec<Summary>>(
+                value.get("items").cloned().unwrap_or(Value::Null),
+            ) {
+                let summaries = poll.summaries;
+                let guard = alive.clone();
+                request_frame(move |_| {
+                    if guard.load(Ordering::SeqCst) {
+                        summaries.set(items);
+                    }
+                });
+            }
         }
         let active = poll.active.get_untracked();
         let tabs = poll.tabs.get_untracked();
@@ -1090,7 +1125,11 @@ fn start_polling(state: &AppState) {
             let changed = tab.workspace.as_ref().map(|current| current.page.rev) != Some(workspace.page.rev);
             if changed {
                 let tabs = poll.tabs;
+                let guard = alive.clone();
                 request_frame(move |_| {
+                    if !guard.load(Ordering::SeqCst) {
+                        return;
+                    }
                     tabs.update(|items| {
                         if let Some(tab) = items.get_mut(index) {
                             tab.workspace = Some(workspace);
@@ -1098,6 +1137,10 @@ fn start_polling(state: &AppState) {
                     });
                 });
             }
+        }
+        }));
+        if outcome.is_err() {
+            break;
         }
     });
 }
@@ -1138,6 +1181,8 @@ fn boot(snapshot: bool) -> AppState {
     }
 
     let manager = Rc::new(RefCell::new(neovide::Manager::detect()));
+    let poll_alive = Arc::new(AtomicBool::new(true));
+    let poll_guard = Rc::new(PollGuard(poll_alive.clone()));
     let attached = manager.borrow().has_server();
     let detail = manager.borrow().status_label();
     let root = node_ref();
@@ -1148,6 +1193,7 @@ fn boot(snapshot: bool) -> AppState {
         summaries: signal(summaries),
         providers: signal(load_providers()),
         cache: Rc::new(RefCell::new(cached)),
+        poll_guard,
         tag_filter: signal(None),
         tabs: signal(tabs),
         active: signal(0),
@@ -1182,7 +1228,7 @@ fn boot(snapshot: bool) -> AppState {
         state.push_history(Some(id));
     }
     if !snapshot {
-        start_polling(&state);
+        start_polling(&state, poll_alive);
     }
     state
 }
@@ -2378,6 +2424,9 @@ fn render_markdown_body(state: &AppState, workspace: &Workspace) -> Div {
                     None
                 };
                 if let Some(body) = body {
+                    let mut nested = workspace.clone();
+                    nested.page.body = body;
+                    nested.page.title.clear();
                     out = out.child(
                         div()
                             .mt(18.0_f32)
@@ -2386,8 +2435,7 @@ fn render_markdown_body(state: &AppState, workspace: &Workspace) -> Div {
                             .bg(theme().surface_muted)
                             .border(1.0_f32)
                             .border_color(theme().border)
-                            .child(ui_text(strip_inline(&body), 13.0, theme().text_muted))
-                            .line_height(LineHeight::Relative(1.6_f32)),
+                            .child(render_markdown_body(state, &nested)),
                     );
                 } else {
                     out = out.child(

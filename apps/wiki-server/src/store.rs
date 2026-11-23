@@ -7,7 +7,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use harmion_wiki_core::{
     EmbeddedBlock, LinkIndex, canonical_block, outline, parse_links, scan_embedded_blocks,
@@ -70,6 +71,7 @@ pub struct State {
     contents: BTreeMap<String, Content>,
     backend: Backend,
     search: RefCell<Option<crate::search::SearchIndex>>,
+    watch: Arc<(Mutex<u64>, Condvar)>,
 }
 
 impl State {
@@ -82,6 +84,7 @@ impl State {
                 contents: fixtures(),
                 backend: Backend::Memory,
                 search: RefCell::new(None),
+                watch: Arc::new((Mutex::new(0), Condvar::new())),
             });
         };
         if path.exists() {
@@ -92,6 +95,7 @@ impl State {
                 contents,
                 backend: Backend::Json { path },
                 search: RefCell::new(None),
+                watch: Arc::new((Mutex::new(0), Condvar::new())),
             });
         }
         let contents = fixtures();
@@ -101,6 +105,7 @@ impl State {
             contents,
             backend: Backend::Json { path },
             search: RefCell::new(None),
+        watch: Arc::new((Mutex::new(0), Condvar::new())),
         })
     }
 
@@ -113,6 +118,7 @@ impl State {
             contents,
             backend: Backend::Node(node),
             search: RefCell::new(None),
+            watch: Arc::new((Mutex::new(0), Condvar::new())),
         })
     }
 
@@ -122,6 +128,7 @@ impl State {
             contents,
             backend: Backend::Memory,
             search: RefCell::new(None),
+            watch: Arc::new((Mutex::new(0), Condvar::new())),
         }
     }
 
@@ -313,6 +320,29 @@ impl State {
             },
             page,
         })
+    }
+
+    pub fn watch_since(&self, since: u64, timeout: Duration) -> u64 {
+        let (generation, changed) = &*self.watch;
+        let mut current = generation.lock().expect("watch lock");
+        while *current == since {
+            let (next, wait) = changed
+                .wait_timeout(current, timeout)
+                .expect("watch lock");
+            current = next;
+            if wait.timed_out() {
+                break;
+            }
+        }
+        *current
+    }
+
+    pub fn watch_handle(&self) -> Arc<(Mutex<u64>, Condvar)> {
+        self.watch.clone()
+    }
+
+    pub fn current_generation(&self) -> u64 {
+        *self.watch.0.lock().expect("watch lock")
     }
 
     pub fn search(&self, query: &str) -> Vec<Summary> {
@@ -843,6 +873,9 @@ impl State {
         }
         self.contents = candidate;
         *self.search.borrow_mut() = None;
+        let (generation, changed) = &*self.watch;
+        *generation.lock().expect("watch lock") += 1;
+        changed.notify_all();
         Ok(value)
     }
 
@@ -1817,6 +1850,32 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn watch_generation_advances_on_mutation() {
+        let mut state = State::load(None).unwrap();
+        let generation = state.current_generation();
+        let watch = state.watch_handle();
+        let waiter = std::thread::spawn(move || {
+            let (lock, changed) = &*watch;
+            let mut current = lock.lock().unwrap();
+            while *current == generation {
+                let (next, _) = changed
+                    .wait_timeout(current, Duration::from_secs(2))
+                    .unwrap();
+                current = next;
+            }
+            *current
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        state
+            .mutate(|contents| {
+                contents.get_mut("p-home").unwrap().tags.push("watch".to_owned());
+                Ok(())
+            })
+            .unwrap();
+        assert!(waiter.join().unwrap() > generation);
+    }
+
     fn raw_export_import_round_trip() {
         let source = State::load(None).unwrap();
         let dir = temp_dir("roundtrip-import");

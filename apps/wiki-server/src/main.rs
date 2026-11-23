@@ -462,6 +462,7 @@ fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
         state,
         grants,
         provider: registration,
+        providers: Vec::new(),
         provider_replace: false,
     };
     // Fail before creating a pending request if the offer violates the same
@@ -920,6 +921,29 @@ fn dispatch_result(state: &Arc<Mutex<State>>, request: &Request) -> RpcResult<Va
             let mut state = state.lock().expect("state lock");
             Ok(serde_json::to_value(state.import_dir(Path::new(&dir))?)
                 .expect("import report serializes"))
+        }
+        "watch" => {
+            let since = optional_u64(params, "since")?.unwrap_or(0);
+            let timeout_ms = optional_u64(params, "timeout_ms")?.unwrap_or(20_000);
+            let timeout = Duration::from_millis(timeout_ms.clamp(100, 30_000));
+            let watch = state.lock().expect("state lock").watch_handle();
+            let (generation, changed) = &*watch;
+            let mut current = generation.lock().expect("watch lock");
+            while *current == since {
+                let (next, wait) = changed.wait_timeout(current, timeout).expect("watch lock");
+                current = next;
+                if wait.timed_out() {
+                    break;
+                }
+            }
+            let generation = *current;
+            drop(current);
+            let state = state.lock().expect("state lock");
+            Ok(json!({
+                "generation": generation,
+                "changed": generation != since,
+                "items": state.list(),
+            }))
         }
         "conflicts" => {
             let id = required_str(params, "id")?;
