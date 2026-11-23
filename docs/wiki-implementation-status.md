@@ -91,6 +91,12 @@ WebSocket subscription path is still pending.
 
 ## Remaining app gaps
 
+- WebSocket subscription is still replaced by 2s polling; no server push.
+- One OAuth connection registers one provider manifest; the other two Wiki
+  names need `interpreter-register` or a second connection.
+- Conflict merge is a 2-way diff; no common-ancestor 3-way merge.
+- Node backend `update_meta` remains 501.
+
 - Cache/subscription follow-up, offline snapshot and permission-loss handling (FR-19, FR-23).
 - Tag list/filter pages and workspace filters (FR-22, FR-34).
 - GUI rendering of transclusions and interpreter results (FR-12, FR-18).
