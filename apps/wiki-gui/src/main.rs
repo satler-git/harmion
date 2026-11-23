@@ -22,6 +22,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use anti_webui::prelude::*;
+use harmion_wiki_core::parse_interpreter_calls;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -130,6 +131,10 @@ struct Summary {
     #[serde(default)]
     kinds: Vec<String>,
     #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
     rev: u64,
     #[serde(default)]
     updated_label: String,
@@ -190,6 +195,8 @@ impl From<&Content> for Summary {
             format: content.format.clone(),
             language: content.language.clone(),
             kinds: content.kinds.clone(),
+            tags: content.tags.clone(),
+            aliases: content.aliases.clone(),
             rev: content.rev,
             updated_label: content.updated_label.clone(),
             excerpt: excerpt(&content.body),
@@ -309,6 +316,7 @@ struct AppState {
     boot_error: Option<String>,
     socket: String,
     summaries: Signal<Vec<Summary>>,
+    tag_filter: Signal<Option<String>>,
     tabs: Signal<Vec<Tab>>,
     active: Signal<usize>,
     inspector: Signal<Inspector>,
@@ -323,6 +331,9 @@ struct AppState {
     editor: Signal<EditorState>,
     history: Signal<Vec<String>>,
     history_index: Signal<usize>,
+    outline_active: Signal<usize>,
+    delete_armed: Signal<bool>,
+    article_ref: NodeRef,
     root: NodeRef,
     manager: Rc<RefCell<neovide::Manager>>,
 }
@@ -438,6 +449,8 @@ impl AppState {
             format: content.format.clone(),
             language: content.language.clone(),
             kinds: content.kinds.clone(),
+            tags: content.tags.clone(),
+            aliases: content.aliases.clone(),
             rev: content.rev,
             updated_label: "たった今".to_owned(),
             excerpt: "# 無題のページ".to_owned(),
@@ -710,6 +723,61 @@ impl AppState {
         }
     }
 
+    fn delete_content(&self, id: &str) {
+        if !matches!(self.source.get_untracked(), Source::Server) {
+            self.set_editor_error("削除: wiki-server に接続していません".to_owned());
+            return;
+        }
+        if let Err(error) = rpc("delete", json!({ "id": id })) {
+            self.set_editor_error(format!("削除できません: {error}"));
+            return;
+        }
+        self.summaries
+            .update(|items| items.retain(|item| item.id != id));
+        self.tabs
+            .update(|tabs| tabs.retain(|tab| tab.id.as_deref() != Some(id)));
+        self.delete_armed.set(false);
+        if self.tabs.get_untracked().is_empty() {
+            self.editor.update(|editor| {
+                editor.error = Some("削除しました。タブがありません。".to_owned())
+            });
+        } else {
+            let index = self
+                .active
+                .get_untracked()
+                .min(self.tabs.get_untracked().len() - 1);
+            self.active.set(index);
+            self.ensure_workspace(index);
+        }
+    }
+
+    fn refresh(&self) {
+        if matches!(self.source.get_untracked(), Source::Server) {
+            match load_summaries() {
+                Ok(items) => self.summaries.set(items),
+                Err(error) => {
+                    self.editor
+                        .update(|editor| editor.error = Some(format!("再読み込み: {error}")));
+                }
+            }
+        }
+        let index = self.active_index();
+        self.tabs.update(|tabs| {
+            if let Some(tab) = tabs.get_mut(index) {
+                tab.workspace = None;
+                tab.error = None;
+            }
+        });
+        self.ensure_workspace(index);
+        self.outline_active.set(0);
+    }
+
+    fn scroll_to_line(&self, line: usize) {
+        let y = (line.saturating_sub(1) as f32 * 24.0) as i32;
+        let article = self.article_ref;
+        request_frame(move |_| article.scroll_to_after_layout(0, y));
+    }
+
     fn request_root_focus(&self) {
         let root = self.root;
         request_frame(move |_| root.focus());
@@ -835,6 +903,7 @@ fn boot(snapshot: bool) -> AppState {
         boot_error,
         socket,
         summaries: signal(summaries),
+        tag_filter: signal(None),
         tabs: signal(tabs),
         active: signal(0),
         inspector: signal(Inspector::Links),
@@ -855,6 +924,9 @@ fn boot(snapshot: bool) -> AppState {
         }),
         history: signal(Vec::new()),
         history_index: signal(0),
+        outline_active: signal(0),
+        delete_armed: signal(false),
+        article_ref: node_ref(),
         root,
         manager,
     };
@@ -1127,6 +1199,9 @@ fn handle_key(state: &AppState, event: &KeyboardEvent) {
         event.prevent_default();
         state.inspector.set(Inspector::Info);
         state.inspector_visible.set(true);
+    } else if event.key.is_char('r') {
+        event.prevent_default();
+        state.refresh();
     } else if event.key.is_char('w') {
         event.prevent_default();
         let index = state.active_index();
@@ -1314,14 +1389,25 @@ fn sidebar(state: &AppState) -> Div {
         .unwrap_or_default()
         .to_owned();
     let workspace = state.active_workspace();
+    let tag_filter = state.tag_filter.get();
+    let matches_tag = |summary: &Summary| {
+        tag_filter.as_ref().is_none_or(|tag| {
+            summary.tags.iter().any(|candidate| candidate == tag)
+                || summary.kinds.iter().any(|candidate| candidate == tag)
+        })
+    };
     let pages = summaries
         .iter()
-        .filter(|summary| summary.is_page())
+        .filter(|summary| summary.is_page() && matches_tag(summary))
         .collect::<Vec<_>>();
     let snippets = summaries
         .iter()
-        .filter(|summary| summary.is_snippet())
+        .filter(|summary| summary.is_snippet() && matches_tag(summary))
         .collect::<Vec<_>>();
+    let tags = summaries
+        .iter()
+        .flat_map(|summary| summary.tags.iter().cloned())
+        .collect::<BTreeSet<_>>();
     let mut recent = workspace
         .as_ref()
         .map(|workspace| workspace.recent.clone())
@@ -1355,6 +1441,10 @@ fn sidebar(state: &AppState) -> Div {
                     div()
                         .hover(|style| style.bg(theme().surface_muted))
                         .rounded(4.0_f32)
+                        .on_click({
+                            let state = state.clone();
+                            move |_| state.new_page()
+                        })
                         .child(ui_text("＋", 17.0, theme().accent)),
                 ),
         )
@@ -1373,10 +1463,68 @@ fn sidebar(state: &AppState) -> Div {
             let state = state.clone();
             move || state.open_palette(PaletteMode::Search)
         }))
-        .child(nav_row("☆", "お気に入り", Some(3), false, || {}))
-        .child(side_section("ページ"));
+        .child(side_section("タグ"));
 
-    for summary in pages.iter().take(6) {
+    if tags.is_empty() {
+        column = column.child(
+            ui_text(
+                "タグ付きページはまだありません。",
+                10.5,
+                theme().text_disabled,
+            )
+            .px(10.0_f32)
+            .py(3.0_f32),
+        );
+    } else {
+        let mut tag_row = div()
+            .px(8.0_f32)
+            .pb(3.0_f32)
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap(4.0_f32);
+        for tag in tags.iter().take(12) {
+            let active = tag_filter.as_deref() == Some(tag.as_str());
+            tag_row = tag_row.child(
+                div()
+                    .px(7.0_f32)
+                    .py(3.0_f32)
+                    .rounded(4.0_f32)
+                    .bg(if active {
+                        theme().accent_muted
+                    } else {
+                        theme().surface_muted
+                    })
+                    .border(1.0_f32)
+                    .border_color(if active {
+                        theme().accent
+                    } else {
+                        theme().border
+                    })
+                    .hover(|style| style.bg(theme().hover))
+                    .on_click({
+                        let state = state.clone();
+                        let tag = tag.clone();
+                        move |_| {
+                            let next = if state.tag_filter.get_untracked().as_deref()
+                                == Some(tag.as_str())
+                            {
+                                None
+                            } else {
+                                Some(tag.clone())
+                            };
+                            state.tag_filter.set(next);
+                        }
+                    })
+                    .child(ui_text(format!("#{tag}"), 10.0, theme().text_muted)),
+            );
+        }
+        column = column.child(tag_row);
+    }
+
+    column = column.child(side_section("ページ"));
+
+    for summary in &pages {
         let is_active = summary.id == active_id;
         column = column.child(page_row(state, summary, is_active));
     }
@@ -1684,14 +1832,19 @@ fn article_scroll(state: &AppState) -> Div {
             .p(40.0_f32)
             .child(ui_text("タブがありません。", 13.0, theme().text_muted)),
     };
-    div().w_full().flex().justify_center().child(
-        div()
-            .w_full()
-            .max_w(700.0_f32)
-            .px(48.0_f32)
-            .py(44.0_f32)
-            .child(body),
-    )
+    div()
+        .w_full()
+        .node_ref(state.article_ref)
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .w_full()
+                .max_w(700.0_f32)
+                .px(48.0_f32)
+                .py(44.0_f32)
+                .child(body),
+        )
 }
 
 fn placeholder(state: &AppState, index: usize, tab: &Tab) -> Div {
@@ -1752,12 +1905,6 @@ fn article(state: &AppState, workspace: &Workspace) -> Div {
     } else {
         tag_text(&page.tags.join(", "))
     };
-    let is_home = page.id == HOME_ID || page.title == "家計の記録";
-    let code_blocks = extract_fences(&page.body);
-    let code_lines = code_blocks
-        .iter()
-        .flat_map(|(_, code)| code.lines().map(str::trim).collect::<Vec<_>>())
-        .collect::<Vec<_>>();
 
     let mut body = div()
         .flex()
@@ -1812,129 +1959,469 @@ fn article(state: &AppState, workspace: &Workspace) -> Div {
                 )),
         );
 
-    let mut lead_index = 0;
-    for paragraph in &workspace.before {
-        if paragraph.trim_start().starts_with('>')
-            || code_lines.iter().any(|code| *code == paragraph.trim())
-        {
-            continue;
-        }
-        let margin = if lead_index == 0 { 24.0 } else { 12.0 };
-        body = body.child(
-            ui_text(paragraph, 15.5, theme().text)
-                .mt(margin)
-                .line_height(LineHeight::Relative(1.68_f32)),
-        );
-        lead_index += 1;
-    }
+    body = body.child(render_markdown_body(state, workspace));
 
-    for (language, code) in &code_blocks {
-        let lines = code.lines().collect::<Vec<_>>();
-        body = body.child(
-            div()
-                .mt(22.0_f32)
-                .rounded(10.0_f32)
-                .bg(theme().surface_muted)
-                .overflow_hidden()
-                .child(
-                    div()
-                        .px(14.0_f32)
-                        .py(8.0_f32)
-                        .flex()
-                        .justify_between()
-                        .child(mono_text(language, 10.0, theme().text_disabled)),
-                )
-                .child(
-                    div()
-                        .px(14.0_f32)
-                        .pb(11.0_f32)
-                        .child(code_block(&lines, language)),
-                ),
-        );
-    }
+    body
+}
 
-    if let Some((quote, cite)) = quote_for(workspace) {
-        body = body.child(
-            div()
-                .mt(22.0_f32)
-                .pl(14.0_f32)
-                .border_l(2.0_f32)
-                .border_color(theme().border)
-                .child(
-                    ui_text(quote, 14.0, theme().text_muted)
-                        .line_height(LineHeight::Relative(1.65_f32)),
-                )
-                .child(ui_text(cite, 10.0, theme().text_disabled).mt(3.0_f32)),
-        );
-    }
+#[derive(Debug)]
+enum MdBlock {
+    Heading(u8, String),
+    Paragraph(String),
+    List(bool, Vec<String>),
+    Quote(Vec<String>),
+    Code(String, Vec<String>),
+    Table(Vec<Vec<String>>),
+    Rule,
+    Embed(String),
+    Transclude(String),
+    Interpreter(String, String),
+}
 
-    if !workspace.embeds.is_empty() {
-        for (index, embedded) in workspace.embeds.iter().enumerate() {
-            if index > 0 {
-                for paragraph in &embedded.before {
-                    if paragraph.trim().is_empty() {
-                        continue;
-                    }
-                    body = body.child(
-                        ui_text(paragraph, 15.5, theme().text)
-                            .mt(24.0_f32)
-                            .line_height(LineHeight::Relative(1.68_f32)),
-                    );
-                }
-            }
-            body = body.child(embed(state, &embedded.snippet));
-        }
-    } else if page.content_type == "snippet" {
+fn render_markdown_body(state: &AppState, workspace: &Workspace) -> Div {
+    let page = &workspace.page;
+    let mut out = div().flex().flex_col();
+    if page.content_type == "snippet" {
         let language = page
             .language
             .clone()
             .or_else(|| page.format.clone())
             .unwrap_or_else(|| "text".to_owned());
         let lines = page.body.lines().collect::<Vec<_>>();
-        body = body.child(
-            div()
-                .mt(22.0_f32)
-                .rounded(10.0_f32)
-                .bg(theme().surface_muted)
-                .child(div().p(14.0_f32).child(code_block(&lines, &language))),
-        );
+        return out.child(code_panel(&language, &lines).mt(24.0_f32));
     }
-
-    if workspace.embeds.is_empty() && workspace.snippet.is_some() {
-        body = body.child(embed(state, workspace.snippet.as_ref().unwrap()));
-    }
-    // Balance/provenance is rendered only when a real interpreter result exists.
-    // The shell must not show a fabricated amount or connection state.
-
-    for paragraph in &workspace.after {
-        if paragraph.trim().is_empty() {
-            continue;
+    for block in parse_markdown(&page.body, &page.title) {
+        match block {
+            MdBlock::Heading(level, text) => {
+                let size = match level {
+                    2 => 24.0,
+                    3 => 19.0,
+                    4 => 16.0,
+                    _ => 15.0,
+                };
+                out = out.child(
+                    ui_text(text, size, theme().text)
+                        .mt(if level <= 2 { 26.0_f32 } else { 20.0_f32 })
+                        .font_weight(FontWeight::SEMIBOLD),
+                );
+            }
+            MdBlock::Paragraph(text) => {
+                out = out.child(
+                    ui_text(strip_inline(&text), 15.5, theme().text)
+                        .mt(14.0_f32)
+                        .line_height(LineHeight::Relative(1.68_f32)),
+                );
+            }
+            MdBlock::List(ordered, items) => {
+                let mut list = div().mt(12.0_f32).flex().flex_col().gap(5.0_f32);
+                for (index, item) in items.iter().enumerate() {
+                    let marker = if ordered {
+                        format!("{}.", index + 1)
+                    } else {
+                        "•".to_owned()
+                    };
+                    list = list.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap(8.0_f32)
+                            .child(ui_text(marker, 14.0, theme().text_disabled).min_w(18.0_f32))
+                            .child(
+                                ui_text(strip_inline(item), 14.5, theme().text)
+                                    .line_height(LineHeight::Relative(1.6_f32)),
+                            ),
+                    );
+                }
+                out = out.child(list);
+            }
+            MdBlock::Quote(lines) => {
+                out = out.child(
+                    div()
+                        .mt(18.0_f32)
+                        .pl(14.0_f32)
+                        .border_l(2.0_f32)
+                        .border_color(theme().border)
+                        .child(
+                            ui_text(strip_inline(&lines.join("\n")), 14.0, theme().text_muted)
+                                .line_height(LineHeight::Relative(1.65_f32)),
+                        ),
+                );
+            }
+            MdBlock::Code(language, lines) => {
+                let refs = lines.iter().map(String::as_str).collect::<Vec<_>>();
+                out = out.child(code_panel(&language, &refs));
+            }
+            MdBlock::Table(rows) => {
+                if rows.is_empty() {
+                    continue;
+                }
+                let mut table = div()
+                    .mt(16.0_f32)
+                    .rounded(8.0_f32)
+                    .border(1.0_f32)
+                    .border_color(theme().border)
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col();
+                for (row_index, row) in rows.iter().enumerate() {
+                    let mut table_row = div()
+                        .flex()
+                        .flex_row()
+                        .border_b(1.0_f32)
+                        .border_color(theme().border);
+                    for cell in row {
+                        table_row =
+                            table_row.child(div().flex_1().px(9.0_f32).py(6.0_f32).child(ui_text(
+                                strip_inline(cell),
+                                11.5,
+                                if row_index == 0 {
+                                    theme().text
+                                } else {
+                                    theme().text_muted
+                                },
+                            )));
+                    }
+                    table = table.child(table_row);
+                }
+                out = out.child(table);
+            }
+            MdBlock::Rule => {
+                out = out.child(div().h(1.0_f32).my(20.0_f32).bg(theme().border));
+            }
+            MdBlock::Embed(id) => {
+                let snippet = workspace
+                    .embeds
+                    .iter()
+                    .map(|embed| &embed.snippet)
+                    .find(|snippet| snippet.id == id)
+                    .or_else(|| {
+                        workspace
+                            .snippet
+                            .as_ref()
+                            .filter(|snippet| snippet.id == id)
+                    })
+                    .cloned();
+                if let Some(snippet) = snippet {
+                    out = out.child(embed(state, &snippet));
+                } else {
+                    out = out.child(
+                        ui_text(
+                            format!("埋め込みを表示できません: {id}"),
+                            12.0,
+                            theme().text_disabled,
+                        )
+                        .mt(16.0_f32),
+                    );
+                }
+            }
+            MdBlock::Transclude(target) => {
+                let body = if matches!(state.source.get_untracked(), Source::Server) {
+                    rpc("transclude", json!({ "id": target, "depth": 1 }))
+                        .ok()
+                        .and_then(|value| {
+                            value.get("body").and_then(Value::as_str).map(str::to_owned)
+                        })
+                } else {
+                    None
+                };
+                if let Some(body) = body {
+                    out = out.child(
+                        div()
+                            .mt(18.0_f32)
+                            .p(12.0_f32)
+                            .rounded(8.0_f32)
+                            .bg(theme().surface_muted)
+                            .border(1.0_f32)
+                            .border_color(theme().border)
+                            .child(ui_text(strip_inline(&body), 13.0, theme().text_muted))
+                            .line_height(LineHeight::Relative(1.6_f32)),
+                    );
+                } else {
+                    out = out.child(
+                        ui_text(
+                            format!("参照を解決できません: {target}"),
+                            13.0,
+                            theme().text_disabled,
+                        )
+                        .mt(14.0_f32),
+                    );
+                }
+            }
+            MdBlock::Interpreter(provider, args) => {
+                out = out.child(render_interpreter(state, workspace, &provider, &args));
+            }
         }
-        body = body.child(
-            ui_text(paragraph, 15.5, theme().text)
-                .mt(24.0_f32)
-                .line_height(LineHeight::Relative(1.68_f32)),
-        );
     }
-
-    if is_home && workspace.snippet.is_none() {
-        body = body.child(
-            div()
-                .mt(24.0_f32)
-                .p(16.0_f32)
-                .rounded(8.0_f32)
-                .bg(theme().surface_muted)
-                .child(ui_text(
-                    "このページにはまだ埋め込みジャーナルがありません。",
-                    12.5,
-                    theme().text_muted,
-                )),
-        );
-    }
-
-    body
+    out
 }
 
+fn render_interpreter(state: &AppState, workspace: &Workspace, provider: &str, args: &str) -> Div {
+    let mut params = json!({
+        "name": provider,
+        "id": workspace.page.id,
+    });
+    if let Some(depth) = args
+        .split([',', ' '])
+        .find_map(|part| part.strip_prefix("depth:"))
+    {
+        if let Ok(depth) = depth.trim().parse::<u64>() {
+            params["depth"] = json!(depth.min(3));
+        }
+    }
+    let display = if matches!(state.source.get_untracked(), Source::Server) {
+        rpc("provider_call", params).ok().and_then(|value| {
+            value
+                .get("display")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+    } else {
+        None
+    };
+    let body = display.unwrap_or_else(|| format!("provider {provider} の結果は取得できません"));
+    div()
+        .mt(18.0_f32)
+        .rounded(8.0_f32)
+        .border(1.0_f32)
+        .border_color(theme().border)
+        .overflow_hidden()
+        .child(
+            div()
+                .px(12.0_f32)
+                .py(6.0_f32)
+                .bg(theme().surface_muted)
+                .child(mono_text(provider, 10.0, theme().text_disabled)),
+        )
+        .child(
+            div()
+                .p(12.0_f32)
+                .child(ui_text(strip_inline(&body), 12.5, theme().text_muted)),
+        )
+}
+
+fn code_panel(language: &str, lines: &[&str]) -> Div {
+    div()
+        .mt(22.0_f32)
+        .rounded(10.0_f32)
+        .bg(theme().surface_muted)
+        .overflow_hidden()
+        .child(
+            div()
+                .px(14.0_f32)
+                .py(8.0_f32)
+                .flex()
+                .justify_between()
+                .child(mono_text(language, 10.0, theme().text_disabled)),
+        )
+        .child(
+            div()
+                .px(14.0_f32)
+                .pb(11.0_f32)
+                .child(code_block(lines, language)),
+        )
+}
+
+fn parse_markdown(body: &str, title: &str) -> Vec<MdBlock> {
+    let lines = body.lines().collect::<Vec<_>>();
+    let calls = parse_interpreter_calls(body);
+    let mut blocks = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let raw = lines[index].trim_end_matches('\r');
+        let line = raw.trim();
+        if line.is_empty() {
+            index += 1;
+            continue;
+        }
+        if let Some(info) = line.strip_prefix("!```") {
+            let id = info.split("||").nth(1).map(str::trim).unwrap_or_default();
+            index += 1;
+            while index < lines.len() && !lines[index].trim_start().starts_with("```") {
+                index += 1;
+            }
+            index += 1;
+            if !id.is_empty() {
+                blocks.push(MdBlock::Embed(id.to_owned()));
+            }
+            continue;
+        }
+        if let Some(info) = line.strip_prefix("```") {
+            let language = info.split('|').next().unwrap_or("text").trim().to_owned();
+            index += 1;
+            let mut code = Vec::new();
+            while index < lines.len() && !lines[index].trim_start().starts_with("```") {
+                code.push(lines[index].trim_end_matches('\r').to_owned());
+                index += 1;
+            }
+            index += 1;
+            blocks.push(MdBlock::Code(language, code));
+            continue;
+        }
+        if let Some(call) = calls.iter().find(|call| call.line == index + 1) {
+            blocks.push(MdBlock::Interpreter(
+                call.provider.clone(),
+                call.args.clone(),
+            ));
+            index += 1;
+            continue;
+        }
+        if let Some((level, text)) = heading(line) {
+            index += 1;
+            if level == 1 && text == title {
+                continue;
+            }
+            blocks.push(MdBlock::Heading(level, text.to_owned()));
+            continue;
+        }
+        if line.starts_with('>') {
+            let mut quote = Vec::new();
+            while index < lines.len() {
+                let candidate = lines[index].trim();
+                let Some(text) = candidate.strip_prefix('>') else {
+                    break;
+                };
+                quote.push(text.trim_start().to_owned());
+                index += 1;
+            }
+            blocks.push(MdBlock::Quote(quote));
+            continue;
+        }
+        if let Some((ordered, items)) = list_block(&lines, index) {
+            let consumed = items.len();
+            index += consumed;
+            blocks.push(MdBlock::List(ordered, items));
+            continue;
+        }
+        if line.contains('|') && index + 1 < lines.len() && is_table_separator(lines[index + 1]) {
+            let mut rows = Vec::new();
+            while index < lines.len() && lines[index].contains('|') {
+                let cells = table_cells(lines[index]);
+                if !is_table_separator(lines[index]) {
+                    rows.push(cells);
+                }
+                index += 1;
+            }
+            blocks.push(MdBlock::Table(rows));
+            continue;
+        }
+        if matches!(line, "---" | "***" | "___") {
+            index += 1;
+            blocks.push(MdBlock::Rule);
+            continue;
+        }
+        if let Some(target) = line.strip_prefix("![[") {
+            if let Some(target) = target.strip_suffix("]]") {
+                index += 1;
+                blocks.push(MdBlock::Transclude(target.to_owned()));
+                continue;
+            }
+        }
+        let mut paragraph = Vec::new();
+        while index < lines.len() {
+            let candidate = lines[index].trim();
+            if candidate.is_empty()
+                || candidate.starts_with('#')
+                || candidate.starts_with("```")
+                || candidate.starts_with("!```")
+                || candidate.starts_with('>')
+                || heading(candidate).is_some()
+                || list_block(&lines, index).is_some()
+            {
+                break;
+            }
+            paragraph.push(candidate.to_owned());
+            index += 1;
+        }
+        if paragraph.is_empty() {
+            index += 1;
+        } else {
+            blocks.push(MdBlock::Paragraph(paragraph.join(" ")));
+        }
+    }
+    blocks
+}
+
+fn heading(line: &str) -> Option<(u8, &str)> {
+    let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = line[hashes..].strip_prefix(' ')?;
+    Some((hashes as u8, rest.trim()))
+}
+
+fn list_block(lines: &[&str], start: usize) -> Option<(bool, Vec<String>)> {
+    let first = lines.get(start)?.trim();
+    let ordered = first.split_once('.').is_some_and(|(number, rest)| {
+        !number.is_empty()
+            && number.bytes().all(|byte| byte.is_ascii_digit())
+            && rest.starts_with(' ')
+    });
+    let bullet = first.starts_with("- ") || first.starts_with("* ") || ordered;
+    if !bullet {
+        return None;
+    }
+    let mut items = Vec::new();
+    let mut index = start;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            items.push(item.to_owned());
+            index += 1;
+            continue;
+        }
+        if let Some((number, rest)) = line.split_once('.')
+            && !number.is_empty()
+            && number.bytes().all(|byte| byte.is_ascii_digit())
+            && let Some(item) = rest.strip_prefix(' ')
+        {
+            items.push(item.to_owned());
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    (!items.is_empty()).then_some((ordered, items))
+}
+
+fn is_table_separator(line: &str) -> bool {
+    let line = line.trim();
+    line.contains('-')
+        && line
+            .chars()
+            .all(|character| matches!(character, '-' | ':' | '|' | ' '))
+}
+
+fn table_cells(line: &str) -> Vec<String> {
+    line.trim()
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| cell.trim().to_owned())
+        .collect()
+}
+
+fn strip_inline(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("]]") else {
+            out.push_str(&rest[start..]);
+            return out.replace("**", "").replace('`', "");
+        };
+        let inner = &after[..end];
+        let label = inner
+            .rsplit_once('|')
+            .map(|(_, label)| label)
+            .unwrap_or(inner);
+        out.push_str(label);
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out.replace("**", "").replace('`', "")
+}
 fn quote_for(workspace: &Workspace) -> Option<(String, String)> {
     for line in &workspace.before {
         if let Some(quote) = line.trim_start().strip_prefix('>') {
@@ -2085,8 +2572,9 @@ fn outline_column(state: &AppState) -> Div {
         items = outline.iter().collect();
     }
     let mut nav = div().flex().flex_col().gap(1.0_f32);
+    let active_outline = state.outline_active.get();
     for (index, item) in items.iter().enumerate() {
-        let active = index == 0;
+        let active = index == active_outline;
         nav = nav.child(
             div()
                 .py(5.0_f32)
@@ -2100,6 +2588,15 @@ fn outline_column(state: &AppState) -> Div {
                 })
                 .rounded(4.0_f32)
                 .hover(|style| style.bg(theme().surface_muted))
+                .on_click({
+                    let state = state.clone();
+                    let line = item.line;
+                    let index = index;
+                    move |_| {
+                        state.outline_active.set(index);
+                        state.scroll_to_line(line);
+                    }
+                })
                 .child(ui_text(
                     truncate_chars(&item.title, 18),
                     if item.level >= 3 { 11.5 } else { 12.0 },
@@ -2650,6 +3147,46 @@ provider 接続は未取得",
                 .line_height(LineHeight::Relative(1.45_f32)),
         );
     }
+    if let Some(workspace) = state.active_workspace() {
+        let id = workspace.page.id.clone();
+        let armed = state.delete_armed.get();
+        content = content.child(divider()).child(
+            div()
+                .h(28.0_f32)
+                .px(9.0_f32)
+                .rounded(5.0_f32)
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(if armed {
+                    rgb(0x5a1d1d)
+                } else {
+                    theme().surface_muted
+                })
+                .border(1.0_f32)
+                .border_color(if armed { rgb(0xff453a) } else { theme().border })
+                .hover(|style| style.bg(if armed { rgb(0x7a2424) } else { theme().hover }))
+                .on_click({
+                    let state = state.clone();
+                    move |_| {
+                        if state.delete_armed.get_untracked() {
+                            state.delete_content(&id);
+                        } else {
+                            state.delete_armed.set(true);
+                        }
+                    }
+                })
+                .child(ui_text(
+                    if armed { "本当に削除" } else { "削除" },
+                    11.5,
+                    if armed {
+                        rgb(0xffb4b4)
+                    } else {
+                        theme().text_muted
+                    },
+                )),
+        );
+    }
     content
 }
 
@@ -3103,6 +3640,8 @@ fn fixture_summaries() -> Vec<Summary> {
             format: None,
             language: None,
             kinds: vec!["wiki".to_owned(), kind.to_owned()],
+            tags: Vec::new(),
+            aliases: Vec::new(),
             rev: 1,
             updated_label: updated.to_owned(),
             excerpt: excerpt.to_owned(),
@@ -3246,6 +3785,8 @@ fn fixture_summaries() -> Vec<Summary> {
             kinds: std::iter::once("wiki".to_owned())
                 .chain(kinds.iter().map(|kind| (*kind).to_owned()))
                 .collect(),
+            tags: Vec::new(),
+            aliases: Vec::new(),
             rev: 1,
             updated_label: updated.to_owned(),
             excerpt: excerpt.to_owned(),
@@ -3730,4 +4271,42 @@ fn main() {
         .size(WINDOW_WIDTH as i32, WINDOW_HEIGHT as i32)
         .run(move || layout(&state))
         .unwrap();
+}
+
+#[cfg(test)]
+mod gui_markdown_tests {
+    use super::*;
+
+    #[test]
+    fn parses_headings_lists_tables_and_embeds() {
+        let body = "# Title\n\n## Section\n\n- one\n- two\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n!```rust|code||abc\n```\n";
+        let blocks = parse_markdown(body, "Title");
+        assert!(
+            blocks
+                .iter()
+                .any(|block| matches!(block, MdBlock::Heading(2, title) if title == "Section"))
+        );
+        assert!(
+            blocks.iter().any(
+                |block| matches!(block, MdBlock::List(false, items) if items == &["one", "two"])
+            )
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|block| matches!(block, MdBlock::Table(rows) if rows.len() == 2))
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|block| matches!(block, MdBlock::Embed(id) if id == "abc"))
+        );
+    }
+
+    #[test]
+    fn strips_wiki_links_without_trailing_brackets() {
+        assert_eq!(strip_inline("see [[p-goals|目標]] now"), "see 目標 now");
+        assert_eq!(strip_inline("[[p-home]]"), "p-home");
+        assert_eq!(strip_inline("**bold** and `code`"), "bold and code");
+    }
 }
