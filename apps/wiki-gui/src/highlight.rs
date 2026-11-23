@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn every_highlighter_keeps_the_line_exactly() {
-        for line in [
+        for source in [
             "2026-11-16 * 買い物",
             "    支出:食費   1,200 JPY  ; 11月分",
             "fn main() { let s = String::from(\"hello\"); }",
@@ -421,7 +421,7 @@ mod tests {
             "未知の言語の行",
         ] {
             for language in ["ledger", "rust", "json", "unknown"] {
-                assert_eq!(texts(&line(line, language)), line);
+                assert_eq!(texts(&line(source, language)), source);
             }
         }
     }

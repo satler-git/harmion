@@ -11,7 +11,7 @@ use std::env;
 use std::fs;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -57,13 +57,15 @@ impl Manager {
         self.ensure_server()?;
         self.ensure_window()?;
 
-        let output = Command::new("nvim")
-            .args([
-                "--server",
-                &self.socket.display().to_string(),
-                "--remote-send",
-                &format!(":WikiOpen {id}<CR>"),
-            ])
+        let mut remote = Command::new("nvim");
+        remote.args([
+            "--server",
+            &self.socket.display().to_string(),
+            "--remote-send",
+            &format!(":WikiOpen {id}<CR>"),
+        ]);
+        sanitize_editor_env(&mut remote, &self.socket);
+        let output = remote
             .output()
             .map_err(|error| format!("nvim --server failed: {error}"))?;
         if !output.status.success() {
@@ -74,9 +76,9 @@ impl Manager {
             ));
         }
         let remote_stderr = String::from_utf8_lossy(&output.stderr);
-        if remote_stderr.contains("E247") {
+        if let Some(error) = editor_error(&remote_stderr) {
             return Err(format!(
-                "Neovim refused the buffer (E247): {}",
+                "Neovim refused the buffer ({error}): {}",
                 remote_stderr.trim()
             ));
         }
@@ -155,12 +157,14 @@ impl Manager {
             return Ok(());
         }
         // No window yet: attach one to the server. `--fork` keeps the GUI responsive.
-        let status = Command::new("neovide")
-            .args(["--fork", "--server", &self.socket.display().to_string()])
-            .status();
-        match status {
-            Ok(status) if status.success() => {
-                for _ in 0..20 {
+        let mut command = Command::new("neovide");
+        command.args(["--fork", "--server", &self.socket.display().to_string()]);
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        sanitize_editor_env(&mut command, &self.socket);
+        match command.spawn() {
+            Ok(_child) => {
+                let deadline = std::time::Instant::now() + LAUNCH_TIMEOUT;
+                while std::time::Instant::now() < deadline {
                     if self.focus_window("").is_ok() {
                         return Ok(());
                     }
@@ -168,7 +172,6 @@ impl Manager {
                 }
                 Ok(())
             }
-            Ok(status) => Err(format!("neovide --server exited with {status}")),
             Err(error) => Err(format!(
                 "Neovide を起動できません（{}）。`neovide` を PATH に置くか、既存の \
                  Neovim サーバーへ接続してください",
@@ -191,12 +194,15 @@ impl Manager {
             args.push("--cmd".to_owned());
             args.push(format!("set rtp+={}", plugin.display()));
         }
-        match Command::new("neovide").args(&args).status() {
-            Ok(status) if status.success() => {
+        let mut command = Command::new("neovide");
+        command.args(&args);
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        sanitize_editor_env(&mut command, &self.socket);
+        match command.spawn() {
+            Ok(_child) => {
                 self.launched = true;
                 Ok(())
             }
-            Ok(status) => Err(format!("neovide の起動に失敗しました（{status}）")),
             Err(error) => {
                 // No Neovide: fall back to a terminal Neovim with the same server socket.
                 self.launch_terminal()
@@ -233,7 +239,11 @@ impl Manager {
                 .map(|arg| (*arg).to_owned())
                 .collect::<Vec<_>>();
             args.extend(nvim_args.iter().cloned());
-            match Command::new(program).args(&args).spawn() {
+            let mut command = Command::new(program);
+            command.args(&args);
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+            sanitize_editor_env(&mut command, &self.socket);
+            match command.spawn() {
                 Ok(_child) => {
                     self.launched = true;
                     return Ok(());
@@ -256,6 +266,54 @@ impl Manager {
             "Neovide · 未起動".to_owned()
         }
     }
+}
+
+fn sanitize_editor_env(command: &mut Command, editor_socket: &Path) {
+    for key in [
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+    ] {
+        if let Some(value) = env::var_os(key) {
+            let value = value.to_string_lossy();
+            if value.contains("/target/nix-") || value.contains("/target/cargo-home") {
+                command.env_remove(key);
+            }
+        }
+    }
+    if let Ok(value) = env::var("WIKI_SOCKET") {
+        let path = PathBuf::from(value);
+        if path.is_relative() {
+            if let Ok(cwd) = env::current_dir() {
+                command.env("WIKI_SOCKET", cwd.join(path));
+            }
+        } else {
+            command.env("WIKI_SOCKET", path);
+        }
+    }
+    command.env("WIKI_NVIM_SERVER", editor_socket);
+    if let Some(lsp) = lsp_path() {
+        command.env("WIKI_LSP_CMD", lsp);
+    }
+}
+
+fn lsp_path() -> Option<PathBuf> {
+    if let Some(value) = env::var_os("WIKI_LSP_CMD") {
+        return Some(PathBuf::from(value));
+    }
+    let sibling = env::current_exe().ok()?.parent()?.join("wiki-lsp");
+    sibling.exists().then_some(sibling)
+}
+
+fn editor_error(stderr: &str) -> Option<String> {
+    stderr
+        .split_whitespace()
+        .find(|word| {
+            let mut chars = word.chars();
+            chars.next() == Some('E') && chars.next().is_some_and(|digit| digit.is_ascii_digit())
+        })
+        .map(str::to_owned)
 }
 
 fn plugin_path() -> Option<PathBuf> {
@@ -353,4 +411,37 @@ fn niri_windows() -> Result<Vec<serde_json::Value>, String> {
         .as_array()
         .cloned()
         .ok_or_else(|| "niri msg windows did not return an array".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "opens a real Neovide window"]
+    fn launches_and_opens_content() {
+        let mut manager = Manager::detect();
+        let outcome = manager.open("p-home", "家計の記録").expect("editor launch");
+        assert!(outcome.message.contains("Neovide"));
+        assert!(manager.has_server(), "editor socket should exist");
+
+        let output = Command::new("timeout")
+            .args([
+                "5s",
+                "nvim",
+                "--server",
+                &manager.socket.display().to_string(),
+                "--remote-expr",
+                "stdpath('cache')",
+            ])
+            .output()
+            .expect("query editor cache path");
+        let cache = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        eprintln!("editor cache: {cache}");
+        assert!(
+            !cache.contains("/target/nix-cache"),
+            "editor inherited the sandbox cache: {cache}"
+        );
+        assert!(cache.ends_with("/nvim"), "unexpected cache path: {cache}");
+    }
 }
