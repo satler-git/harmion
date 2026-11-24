@@ -1,8 +1,9 @@
 # Wiki app
 
-A local-first personal wiki on Harmion. The design is frozen in
-[docs/wiki-ui-design.html](../../docs/wiki-ui-design.html); the current
-implementation status and platform gaps are in
+A local-first personal wiki on Harmion. The current shell and reading surface
+are described in [docs/wiki-ui-refresh.md](../../docs/wiki-ui-refresh.md), which
+supersedes the older [v5 mockup](../../docs/wiki-ui-design.html); implementation
+status and platform gaps are in
 [docs/wiki-implementation-status.md](../../docs/wiki-implementation-status.md).
 
 ## Layout
@@ -25,7 +26,10 @@ WIKI_SOCKET=target/wiki.sock ./target/debug/wiki-gui
 ```
 
 If the GUI cannot create a window, run it inside `nix develop`; the devShell
-sets the Vulkan/EGL paths. `wiki-gui --snapshot PATH` renders offscreen.
+sets the Vulkan/EGL paths. `wiki-gui --snapshot PATH` renders offscreen;
+`--search`, `--query TEXT`, `--shelf`, `--info`, `--outline`, `--shortcuts`,
+`--empty`, `--tab N`, `--page TITLE`, `--width N` and `--height N` capture the
+palette, shelf, inspector, empty and shortcut states at a chosen viewport.
 
 Neovim:
 

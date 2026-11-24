@@ -1,16 +1,38 @@
 # Wiki implementation status
 
-Last updated: 2026-11-23
+Last updated: 2026-11-24
 
-## Frozen design
+## Design
 
-- [Dark native design](wiki-ui-design.html) / [PNG](wiki-ui-design.png)
-- 4 columns: nav 236, article, outline 176 centered, inspector 340
-- Tabs, inspector `リンク`/`情報`, bottom 2-hop shelf
+The v5 mockup ([HTML](wiki-ui-design.html) / [PNG](wiki-ui-design.png)) is superseded by
+the refreshed shell and reading surface in [Wiki GUI refresh](wiki-ui-refresh.md). The
+refresh keeps the feature set but changes the visual system and layout: serif display
+type, a content-first reading block (article + 目次 rail), a separate on-demand
+ページ情報 inspector, and an explicit 2-hop shelf. Screenshots: [home](wiki-gui-home.png),
+[search](wiki-gui-search.png), [shelf](wiki-gui-shelf.png),
+[inspector](wiki-gui-info.png), [outline](wiki-gui-outline.png),
+[shortcuts](wiki-gui-shortcuts.png), [Markdown](wiki-gui-markdown.png),
+[empty](wiki-gui-empty.png), [1440 with properties](wiki-gui-1440-info.png).
+
+- Reading block: library 264 + `article (max 800) + 目次 (176)` centred as a unit;
+  the rail hides when the remaining block would be narrower than 900 px, then `Ctrl+3`
+  opens a standalone 目次 panel
+- Inspector is a 360 px on-demand column (Ctrl+I), hidden by default; it has only
+  `リンク` / `ページ情報`, so 目次 and properties never share a segmented control
+- 2-hop shelf is click/`Ctrl+Alt+L`, not hover; only its 36 px handle is visible
+- Tabs, backlink footer, rich inline Markdown, copyable code blocks
 - Ctrl shortcuts: `Ctrl+K` search, `Ctrl+E` Neovide, `Ctrl+I` info,
-  `Ctrl+N` new, `Ctrl+P` quick open, `Ctrl+W` close tab,
-  `Ctrl+1`/`Ctrl+2` inspector mode, `Ctrl+Alt+L` 2-hop shelf
+  `Ctrl+N` new, `Ctrl+P` quick open, `Ctrl+W` close tab, `Ctrl+[`/`Ctrl+]`
+  history, `Ctrl+1`/`Ctrl+2`/`Ctrl+3` inspector mode, `Ctrl+\` sidebar,
+  `Ctrl+Alt+L` 2-hop shelf, `?` shortcut sheet
 - Code snippets must be syntax highlighted (FR-55)
+
+## Framework decision
+
+Stay on the pinned AntiWebUI revision. The audit found no framework capability that
+blocks the Wiki UI; the visible gaps were app code (hand-written Markdown, no link
+routing, always-open inspector) or unused APIs (`markdown`, SVG images, popups). See [the refresh document](wiki-ui-refresh.md#framework-decision) for the
+comparison and the maintenance caveat (git-only pin, single maintainer).
 
 ## Implemented and verified
 
@@ -59,13 +81,44 @@ Last updated: 2026-11-23
 
 ## GUI
 
-- Frozen v5 shell is implemented in AntiWebUI: 4 columns, tabs, inspector
-  `リンク`/`情報`, centered outline, bottom 2-hop shelf, Ctrl shortcuts,
-  syntax highlighting and the Neovide manager.
-- `target/wiki-final.png` is a 1600x1000 snapshot; the actual window was
-  launched on niri and the server-backed list/workspace path was verified.
+- Refreshed shell is implemented in AntiWebUI: pinned library header, a centred reading
+  block (`article ≤800 + 目次 176`), a separate on-demand ページ情報 inspector, explicit
+  2-hop shelf, palette, shortcut cheat sheet and the Neovide manager.
+- 目次 and ページ情報 are independent surfaces. Ctrl+3 collapses/restores the rail when it
+  fits, or opens a floating 目次 panel when it does not; Esc closes the topmost layer.
+- A wiki with no pages gets a real welcome state with retry/create guidance; fixtures are
+  snapshot-only, and the status bar no longer labels an empty wiki as a built-in sample.
+- Tab clicks and links to already-open pages switch the article; each tab keeps its own
+  scroll offset and active heading (persisted across launches), `Ctrl+Tab` cycles tabs with
+  a focus ring, and Space/PageUp/PageDown scroll the article without a pointer.
+- Search highlights matched text in titles and excerpts. The editor watcher polls the
+  active page revision every 2s while Neovide is attached and refreshes the article in
+  place without losing the scroll position. Outline clicks land the
+  heading below the top edge and scrolling updates the active outline entry. Outline and
+  fragment navigation also send `WikiGoTo` to Neovim, so the editor buffer and cursor
+  follow the GUI (one-way; see the gaps).
+- Reading surface: IBM Plex Sans JP + Noto Serif CJK JP, 800 px article,
+  inline bold/italic/strike/code/links, clickable `[[wiki links]]`, backlinks
+  footer, code copy button, quieter tables/quotes.
+- Material Symbols Outlined icons (one subset font per used glyph), tooltips
+  with shortcuts, and right-click menus on tabs, page/snippet rows, links,
+  2-hop rows and the article. Copy actions show a toast.
+- Prose, lists, tables and quotes go through `markdown_view`; headings, code, embeds,
+  transclusions and interpreters stay app-rendered so outline anchors and the code copy
+  button survive. Fenced code is coloured by `anti-webui-code` (tree-sitter, 14
+  languages); ledger/hledger keeps the app-specific highlighter.
+- `?` opens a shortcut cheat sheet; `Ctrl+\` toggles the library and `Ctrl+3` toggles the
+  目次 rail/panel. Tooltips carry the chords of icon-only controls.
+- The property panel shows aliases, a clickable backlink count opens links, and the
+  article header/footer expose backlinks instead of hiding them.
+- Offscreen snapshots are documented with `--snapshot`, `--search`, `--shelf`,
+  `--info`, `--outline`, `--shortcuts`, `--empty`, `--tab`, `--page`, `--width` and
+  `--height`; the 1600x1000 and 1280x800 layouts were both rendered.
 - New page is wired through `create_page` and `Ctrl+N`; suggestions choose
   distinct via groups.
+- `cargo test -p harmion-wiki-gui` (8 passed, 1 ignored) and
+  `cargo clippy -p harmion-wiki-gui --all-targets --no-deps -- -D warnings`
+  pass.
 
 ## Platform gaps / honest limits
 
@@ -98,6 +151,16 @@ Last updated: 2026-11-23
 - Import, block references, snapshots and layout presets (FR-29, FR-31, FR-35, FR-52).
 - 10k-page FTS5 performance and Japanese 2-character search (FR-21).
 - Provider uniqueness/replacement and registration approval (FR-43, FR-44).
+- GUI: keyboard focus rings on rows/tabs, local image/SVG embeds, AccessKit/AT-SPI.
+- Markdown segmentation is line-based: setext headings and fences nested in lists render
+  but do not reach the outline. A block scanner or the upstream heading-anchor API is the
+  next correctness step.
+- The watch loop flips the source to offline when the server connection drops, instead of
+  claiming a live connection while calls fail.
+- Neovim position sync is one-way: the GUI calls `:WikiGoTo <id> <line>` when the outline or
+  a fragment link is used. Neovim -> GUI scroll reporting still needs an `editor_state` RPC
+  and must yield to edits and conflicts.
+- Visual pass still owed for tab shape/overflow and the three-column 2-hop shelf.
 
 ## Next
 
@@ -121,12 +184,15 @@ filter pages/snippets, search uses the server, tabs load workspaces, outline
 entries scroll the article, links/2-hop rows open Content, new/rename/tags/
 delete/conflict routes call the server, and Markdown headings/lists/tables/
 quotes/code plus embeds/transclusions/interpreter panels are rendered from
-Content data. [Demo snapshot](wiki-demo.png) and [home snapshot](wiki-final.png)
-are generated from the live server.
+Content data. [Home](wiki-gui-home.png), [search](wiki-gui-search.png),
+[shelf](wiki-gui-shelf.png), [inspector](wiki-gui-info.png) and
+[Markdown](wiki-gui-markdown.png) snapshots show the refreshed shell.
 
 `target/debug/wiki-gui --page "Markdown 見本" --snapshot out.png` opens a page
 directly; the GUI polls every 2s, reconnects, and falls back to the 0600
-offline cache with an `オフラインキャッシュ` label.
+offline cache with an `オフラインキャッシュ` label. Add `--info` or `--shelf`
+to capture the drawer and shelf states, and `--width/--height` for a
+non-default viewport.
 
 ## UI/editor pass
 

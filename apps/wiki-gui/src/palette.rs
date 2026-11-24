@@ -33,47 +33,48 @@ fn palette_card_inner(state: &AppState) -> Div {
         request_frame(move |_| input.focus());
     }
     let mode = state.palette.get().unwrap_or(PaletteMode::Search);
+    let mode_icon = match mode {
+        PaletteMode::Search => icons::SEARCH,
+        PaletteMode::Rename => icons::EDIT,
+        PaletteMode::Tags => icons::TAG,
+        PaletteMode::QuickOpen => icons::KEYBOARD_COMMAND_KEY,
+    };
     let results_state = state.clone();
     div()
-        .w(560.0_f32)
+        .w(640.0_f32)
         .z_index(41)
-        .rounded(10.0_f32)
-        .bg(theme().surface)
+        .rounded(14.0_f32)
+        .bg(theme().overlay)
         .border(1.0_f32)
-        .border_color(theme().border)
+        .border_color(theme().border_strong)
         .shadow_lg()
-        .p(8.0_f32)
+        .p(10.0_f32)
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(7.0_f32)
-                .px(8.0_f32)
-                .child(ui_text(
-                    match mode {
-                        PaletteMode::Search => "◎",
-                        PaletteMode::Rename | PaletteMode::Tags => "✎",
-                        PaletteMode::QuickOpen => "›",
-                    },
-                    14.0,
-                    theme().text_muted,
-                ))
+                .gap(10.0_f32)
+                .h(46.0_f32)
+                .px(12.0_f32)
+                .rounded(9.0_f32)
+                .bg(theme().surface_muted)
+                .child(icon(mode_icon, 18.0).text_color(theme().text_muted))
                 .child(
                     text_input()
                         .value(state.query)
                         .placeholder(match mode {
-                            PaletteMode::Search => "検索 — タイトル・本文・タグ",
+                            PaletteMode::Search => "ページ・本文・タグを検索",
                             PaletteMode::Rename => "新しいタイトル",
                             PaletteMode::Tags => "タグをカンマ区切りで入力",
-                            PaletteMode::QuickOpen => "クイックオープン — ページ名",
+                            PaletteMode::QuickOpen => "ページ名で開く",
                         })
                         .font_family(sans())
-                        .text_size(12.5_f32)
+                        .text_size(14.0_f32)
                         .text_color(theme().text)
                         .w_full()
-                        .h(28.0_f32)
-                        .px(6.0_f32)
+                        .h(30.0_f32)
+                        .px(4.0_f32)
                         .node_ref(input)
                         .on_input({
                             let state = state.clone();
@@ -131,26 +132,45 @@ fn palette_card_inner(state: &AppState) -> Div {
             let results = results_state.results.get();
             let selected = results_state.palette_selected.get();
             let error = results_state.palette_error.get();
-            let mut list = div().flex().flex_col();
+            let query = results_state.query.get();
+            let mut list = div()
+                .flex()
+                .flex_col()
+                .mt(6.0_f32)
+                .max_h(560.0_f32)
+                .overflow_y_scroll();
             if let Some(error) = error {
-                list = list.child(ui_text(error, 10.5, rgb(0xe0af68)).px(10.0_f32).py(6.0_f32));
+                list = list.child(ui_text(error, 11.0, rgb(0xe0af68)).px(12.0_f32).py(7.0_f32));
             }
             if results.is_empty() {
                 list = list.child(
-                    ui_text("一致する項目はありません。", 12.0, theme().text_disabled)
-                        .px(10.0_f32)
-                        .py(8.0_f32),
+                    div()
+                        .px(14.0_f32)
+                        .py(22.0_f32)
+                        .flex()
+                        .flex_col()
+                        .gap(3.0_f32)
+                        .child(ui_text(
+                            "一致する項目はありません。",
+                            12.5,
+                            theme().text_muted,
+                        ))
+                        .child(ui_text(
+                            "別の語で試してください。",
+                            11.0,
+                            theme().text_disabled,
+                        )),
                 );
             }
             for (index, summary) in results.iter().take(20).enumerate() {
                 let is_selected = index == selected;
                 list = list.child(
                     div()
-                        .px(10.0_f32)
-                        .py(7.0_f32)
-                        .rounded(6.0_f32)
+                        .px(12.0_f32)
+                        .py(8.0_f32)
+                        .rounded(8.0_f32)
                         .bg(if is_selected {
-                            theme().surface_muted
+                            theme().accent_muted
                         } else {
                             Color::TRANSPARENT
                         })
@@ -161,9 +181,8 @@ fn palette_card_inner(state: &AppState) -> Div {
                             Color::TRANSPARENT
                         })
                         .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(9.0_f32)
+                        .flex_col()
+                        .gap(3.0_f32)
                         .hover(|style| style.bg(theme().surface_muted))
                         .cursor(CursorIcon::Pointer)
                         .on_click({
@@ -172,26 +191,56 @@ fn palette_card_inner(state: &AppState) -> Div {
                             move |_| state.open_summary(&summary)
                         })
                         .child(
-                            ui_text(truncate_chars(&summary.title, 32), 12.5, theme().text)
-                                .flex_1(),
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(9.0_f32)
+                                .child(
+                                    icon(
+                                        if summary.is_snippet() {
+                                            icons::CODE
+                                        } else {
+                                            icons::DESCRIPTION
+                                        },
+                                        16.0,
+                                    )
+                                    .text_color(theme().text_disabled),
+                                )
+                                .child(
+                                    highlighted_text(
+                                        &truncate_chars(&summary.title, 40),
+                                        &query,
+                                        13.0,
+                                        theme().text,
+                                        theme().accent_text,
+                                    )
+                                    .flex_1(),
+                                )
+                                .child(mono_text(summary.kind_label(), 9.0, theme().text_disabled))
+                                .child(ui_text(&summary.updated_label, 9.5, theme().text_disabled)),
                         )
-                        .child(mono_text(summary.kind_label(), 9.0, theme().text_disabled))
-                        .child(ui_text(&summary.updated_label, 10.0, theme().text_disabled)),
+                        .child(highlighted_text(
+                            &truncate_chars(&summary.excerpt, 72),
+                            &query,
+                            10.5,
+                            theme().text_disabled,
+                            theme().accent_text,
+                        )),
                 );
             }
             list
         }))
         .child(
             div()
-                .px(10.0_f32)
-                .pt(5.0_f32)
+                .px(12.0_f32)
+                .pt(8.0_f32)
+                .pb(2.0_f32)
                 .flex()
                 .justify_between()
-                .child(ui_text("↑↓ 移動 · Enter 開く", 9.0, theme().text_disabled))
-                .child(ui_text("Esc 閉じる", 9.0, theme().text_disabled))
                 .child(ui_text(
-                    "Ctrl+K 検索 · Ctrl+P クイックオープン",
-                    9.0,
+                    "↑↓ 移動 · Enter 開く · Esc 閉じる",
+                    9.5,
                     theme().text_disabled,
                 )),
         )

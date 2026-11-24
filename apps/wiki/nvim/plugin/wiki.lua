@@ -280,6 +280,18 @@ end, { nargs = "?" })
 vim.api.nvim_create_user_command("WikiNew", function(args)
   new_page(args.args)
 end, { nargs = "?" })
+
+-- Called by the GUI when the outline or a fragment link is used. It opens the same buffer the
+-- GUI shows and moves the cursor without taking focus.
+vim.api.nvim_create_user_command("WikiGoTo", function(args)
+  local id, line = args.args:match("^(%S+)%s+(%d+)$")
+  if not id then
+    error("WikiGoTo: expected <id> <line>")
+  end
+  open(id)
+  vim.api.nvim_win_set_cursor(0, { math.max(1, tonumber(line)), 0 })
+  vim.cmd("normal! zz")
+end, { nargs = 1 })
 local function current_id()
   local id = vim.b.wiki_id
   if not id then

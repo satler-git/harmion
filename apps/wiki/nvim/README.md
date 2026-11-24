@@ -31,6 +31,7 @@ if it fails, the plugin keeps editing and saving through JSON-RPC.
 | `:WikiList` | Quickfix list of pages and snippets |
 | `:WikiSearch <query>` | Quickfix search |
 | `:WikiWorkspace <id-or-title>` | Quickfix outline + 2-hop links |
+| `:WikiGoTo <id> <line>` | Switch to the page and move the cursor (used by the GUI outline) |
 | `:WikiLspStart` | Start/attach the LSP explicitly |
 
 The LSP starts automatically when a Wiki buffer is opened. It provides

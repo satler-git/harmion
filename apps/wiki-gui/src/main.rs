@@ -20,12 +20,16 @@ mod ui;
 use palette::palette;
 use shelf::shelf;
 use toolbar::toolbar;
-use ui::{chip, divider, dot, icon_button, kbd, mono_text, nav_row, section_label, ui_text, vdiv};
+use ui::{
+    chip, divider, dot, icon, icon_button, icon_text_button, kbd, mono_text, nav_row,
+    section_label, ui_text, vdiv,
+};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::ops::Range;
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -36,6 +40,8 @@ use std::thread;
 use std::time::Duration;
 
 use anti_webui::prelude::*;
+use anti_webui_markdown::{MarkdownTheme, markdown_view};
+use anti_webui_symbols_outlined as icons;
 use harmion_wiki_core::parse_interpreter_calls;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -49,7 +55,7 @@ const READING_ID: &str = "p-reading";
 const RUST_ID: &str = "p-rust";
 const WINDOW_WIDTH: u32 = 1600;
 const WINDOW_HEIGHT: u32 = 1000;
-const SHELF_HEIGHT: f32 = 430.0;
+const SHELF_HEIGHT: f32 = 404.0;
 const SHELF_HANDLE: f32 = 36.0;
 
 mod bundled {
@@ -63,7 +69,9 @@ mod bundled {
 fn fonts() -> &'static (String, String) {
     static FONTS: OnceLock<(String, String)> = OnceLock::new();
     FONTS.get_or_init(|| {
-        let mut sans = "Noto Sans CJK JP".to_owned();
+        // The design language is IBM Plex Sans for chrome and Noto Serif for the reading
+        // surface. Both are installed with the Nix devShell; the bundled font wins when set.
+        let mut sans = "IBM Plex Sans JP".to_owned();
         let mut mono = "JetBrains Mono".to_owned();
         if !bundled::SANS.is_empty() {
             match register_font(bundled::SANS) {
@@ -101,29 +109,37 @@ fn mono() -> &'static str {
     &fonts().1
 }
 
+/// The display face: page titles and section headings. Kept separate from the UI face so the
+/// reading surface has an editorial voice without making every control serif.
+fn display() -> &'static str {
+    "Noto Serif CJK JP"
+}
+
 fn app_theme() -> Theme {
     Theme {
-        page: rgb(0x1e1e1e),
-        surface: rgb(0x252527),
-        surface_muted: rgb(0x2c2c2e),
-        overlay: rgb(0x2c2c2e),
-        hover: rgb(0x2c2c2e),
-        pressed: rgb(0x3a3a3c),
-        selected: rgb(0x0a84ff),
-        text: rgb(0xf5f5f7),
-        text_muted: rgb(0xa1a1a6),
-        text_disabled: rgb(0x6e6e73),
+        // A warm-neutral graphite rather than pure black: long reading sessions are easier on
+        // the eye and the article surface separates from the chrome without hard lines.
+        page: rgb(0x1b1c1f),
+        surface: rgb(0x202126),
+        surface_muted: rgb(0x292a30),
+        overlay: rgb(0x24252a),
+        hover: rgb(0x2e3037),
+        pressed: rgb(0x383a42),
+        selected: rgb(0x3b7df0),
+        text: rgb(0xf2f2f5),
+        text_muted: rgb(0xa4a6ae),
+        text_disabled: rgb(0x72747d),
         on_accent: rgb(0xffffff),
-        border: rgb(0x3a3a3c),
-        border_strong: rgb(0x48484a),
-        accent: rgb(0x0a84ff),
-        accent_hover: rgb(0x409cff),
-        accent_pressed: rgb(0x0070e0),
-        accent_text: rgb(0x409cff),
-        accent_muted: rgb(0x1c3a5e),
-        success: rgb(0x30d158),
+        border: rgb(0x2f3138),
+        border_strong: rgb(0x3e4048),
+        accent: rgb(0x4c8dff),
+        accent_hover: rgb(0x6ba1ff),
+        accent_pressed: rgb(0x3574dd),
+        accent_text: rgb(0x7db0ff),
+        accent_muted: rgb(0x1d3350),
+        success: rgb(0x3ecf72),
         success_muted: rgb(0x17351f),
-        success_text: rgb(0x30d158),
+        success_text: rgb(0x3ecf72),
         ..Theme::dark()
     }
 }
@@ -292,6 +308,23 @@ struct Workspace {
 struct CacheFile {
     summaries: Vec<Summary>,
     workspaces: BTreeMap<String, Workspace>,
+    #[serde(default)]
+    session: Option<SessionFile>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionFile {
+    tabs: Vec<SessionTab>,
+    active: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SessionTab {
+    id: String,
+    title: String,
+    kind: String,
+    scroll: f32,
+    outline: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -301,6 +334,8 @@ struct Tab {
     kind: String,
     workspace: Option<Workspace>,
     error: Option<String>,
+    scroll: f32,
+    outline: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,6 +343,7 @@ enum Source {
     Server,
     Offline,
     Fallback,
+    Empty,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,11 +387,13 @@ impl Drop for PollGuard {
 enum PollUpdate {
     Summaries(Vec<Summary>),
     Reconnected(Vec<Summary>),
+    Disconnected,
     Ping,
 }
 
 #[derive(Clone)]
 struct AppState {
+    snapshot: bool,
     source: Signal<Source>,
     boot_error: Option<String>,
     socket: String,
@@ -382,10 +420,20 @@ struct AppState {
     palette_error: Signal<Option<String>>,
     next_selected: Signal<usize>,
     editor: Signal<EditorState>,
+    editor_watch: Signal<bool>,
     history: Signal<Vec<String>>,
     history_index: Signal<usize>,
     outline_active: Signal<usize>,
+    /// Width of the window in logical pixels, updated from the root's resize listener. Used to
+    /// drop the outline rail before it would overlap the article.
+    viewport: Signal<f32>,
     delete_armed: Signal<bool>,
+    toast: Signal<Option<String>>,
+    shortcuts: Signal<bool>,
+    outline_open: Signal<bool>,
+    outline_collapsed: Signal<bool>,
+    outline_keyboard: Signal<bool>,
+    tab_focus: Signal<bool>,
     article_ref: NodeRef,
     heading_refs: Rc<RefCell<Vec<NodeRef>>>,
     root: NodeRef,
@@ -394,20 +442,14 @@ struct AppState {
 
 impl AppState {
     fn active_tab(&self) -> Option<Tab> {
-        let tabs = self.tabs.get_untracked();
-        tabs.get(
-            self.active
-                .get_untracked()
-                .min(tabs.len().saturating_sub(1)),
-        )
-        .cloned()
+        let tabs = self.tabs.get();
+        tabs.get(self.active.get().min(tabs.len().saturating_sub(1)))
+            .cloned()
     }
 
     fn active_index(&self) -> usize {
-        let tabs = self.tabs.get_untracked();
-        self.active
-            .get_untracked()
-            .min(tabs.len().saturating_sub(1))
+        let tabs = self.tabs.get();
+        self.active.get().min(tabs.len().saturating_sub(1))
     }
 
     fn active_workspace(&self) -> Option<Workspace> {
@@ -432,6 +474,7 @@ impl AppState {
                 .ok_or_else(|| "オフラインキャッシュにこのページがありません。".to_owned()),
             (Some(id), Source::Fallback) => fixture_workspace(id, &tab.title)
                 .ok_or_else(|| "フォールバックにこのページのデータがありません。".to_owned()),
+            (Some(_), Source::Empty) => Err("ページがありません。".to_owned()),
             (Some(id), Source::Server) => rpc("workspace", json!({ "id": id }))
                 .and_then(|value| {
                     serde_json::from_value::<Workspace>(value)
@@ -461,16 +504,78 @@ impl AppState {
         });
     }
 
-    fn switch_tab(&self, index: usize) {
-        let length = self.tabs.get_untracked().len();
-        if index >= length {
+    fn save_active_reading_state(&self) {
+        let index = self.active_index();
+        let scroll = self.article_ref.scroll_offset().y;
+        let outline = self.outline_active.get_untracked();
+        self.tabs.update(|tabs| {
+            if let Some(tab) = tabs.get_mut(index) {
+                tab.scroll = scroll;
+                tab.outline = outline;
+            }
+        });
+    }
+
+    fn apply_reading_state(&self, scroll: f32, outline: usize) {
+        self.outline_active.set(outline);
+        let article = self.article_ref;
+        let y = scroll.max(0.0).round() as i32;
+        request_frame(move |_| article.scroll_to_after_layout(0, y));
+    }
+
+    fn save_session(&self) {
+        if self.snapshot {
             return;
         }
-        self.active.set(index);
-        self.ensure_workspace(index);
-        if let Some(tab) = self.active_tab() {
-            self.push_history(tab.id);
+        let tabs = self
+            .tabs
+            .get_untracked()
+            .iter()
+            .filter_map(|tab| {
+                tab.id.as_ref().map(|id| SessionTab {
+                    id: id.clone(),
+                    title: tab.title.clone(),
+                    kind: tab.kind.clone(),
+                    scroll: tab.scroll,
+                    outline: tab.outline,
+                })
+            })
+            .collect::<Vec<_>>();
+        if tabs.is_empty() {
+            return;
         }
+        let session = SessionFile {
+            tabs,
+            active: self.active_index(),
+        };
+        let mut cache = self.cache.borrow_mut();
+        cache.session = Some(session);
+        let _ = write_cache(&cache);
+    }
+
+    fn restore_active_reading_state(&self) {
+        if let Some(tab) = self.active_tab() {
+            self.apply_reading_state(tab.scroll, tab.outline);
+        }
+    }
+
+    fn switch_tab(&self, index: usize) {
+        let length = self.tabs.get_untracked().len();
+        if index >= length || index == self.active_index() {
+            return;
+        }
+        self.save_active_reading_state();
+        self.tab_focus.set(false);
+        let Some(target) = self.tabs.get_untracked().get(index).cloned() else {
+            return;
+        };
+        self.active.set(index);
+        self.outline_active.set(target.outline);
+        self.outline_open.set(false);
+        self.delete_armed.set(false);
+        self.ensure_workspace(index);
+        self.apply_reading_state(target.scroll, target.outline);
+        self.save_session();
     }
 
     fn open_summary(&self, summary: &Summary) {
@@ -594,11 +699,10 @@ impl AppState {
                         if let Some(tab) = tabs
                             .iter_mut()
                             .find(|tab| tab.id.as_deref() == Some(id.as_str()))
+                            && let Some(workspace) = tab.workspace.as_mut()
                         {
-                            if let Some(workspace) = tab.workspace.as_mut() {
-                                workspace.page = content.clone();
-                                workspace.info.tags = content.tags.join(", ");
-                            }
+                            workspace.page = content.clone();
+                            workspace.info.tags = content.tags.join(", ");
                         }
                     });
                     self.summaries.update(|items| {
@@ -618,30 +722,36 @@ impl AppState {
     }
 
     fn open_id(&self, id: &str, title: &str, kind: &str) {
+        self.outline_open.set(false);
         if let Some(index) = self
             .tabs
             .get_untracked()
             .iter()
             .position(|tab| tab.id.as_deref() == Some(id))
         {
-            self.active.set(index);
+            self.switch_tab(index);
         } else {
+            self.save_active_reading_state();
             let tab = Tab {
                 id: Some(id.to_owned()),
                 title: title.to_owned(),
                 kind: kind.to_owned(),
                 workspace: None,
                 error: None,
+                scroll: 0.0,
+                outline: 0,
             };
             let index = self.tabs.get_untracked().len();
             self.tabs.update(|tabs| tabs.push(tab));
             self.active.set(index);
+            self.ensure_workspace(index);
+            self.apply_reading_state(0.0, 0);
         }
-        let index = self.active_index();
-        self.ensure_workspace(index);
+        self.delete_armed.set(false);
         self.push_history(Some(id.to_owned()));
         self.palette.set(None);
         self.palette_error.set(None);
+        self.save_session();
     }
 
     fn close_tab(&self, index: usize) {
@@ -649,11 +759,48 @@ impl AppState {
         if tabs.len() <= 1 || index >= tabs.len() {
             return;
         }
+        self.save_active_reading_state();
         tabs.remove(index);
         let new_active = self.active.get_untracked().min(tabs.len() - 1);
+        let target = tabs.get(new_active).cloned();
         self.tabs.set(tabs);
         self.active.set(new_active);
+        self.delete_armed.set(false);
         self.ensure_workspace(new_active);
+        if let Some(target) = target {
+            self.apply_reading_state(target.scroll, target.outline);
+        }
+        self.save_session();
+    }
+
+    fn close_other_tabs(&self, keep: usize) {
+        let tabs = self.tabs.get_untracked();
+        let Some(tab) = tabs.get(keep).cloned() else {
+            return;
+        };
+        self.save_active_reading_state();
+        self.tabs.set(vec![tab.clone()]);
+        self.active.set(0);
+        self.ensure_workspace(0);
+        self.apply_reading_state(tab.scroll, tab.outline);
+        self.save_session();
+    }
+
+    fn close_tabs_to_right(&self, index: usize) {
+        let tabs = self.tabs.get_untracked();
+        if index + 1 >= tabs.len() {
+            return;
+        }
+        self.save_active_reading_state();
+        self.tabs.update(|tabs| tabs.truncate(index + 1));
+        let active = self.active.get_untracked().min(index);
+        self.active.set(active);
+        let target = self.tabs.get_untracked().get(active).cloned();
+        self.ensure_workspace(active);
+        if let Some(target) = target {
+            self.apply_reading_state(target.scroll, target.outline);
+        }
+        self.save_session();
     }
 
     fn push_history(&self, id: Option<String>) {
@@ -703,8 +850,7 @@ impl AppState {
             .iter()
             .position(|tab| tab.id.as_deref() == Some(id.as_str()))
         {
-            self.active.set(tab_index);
-            self.ensure_workspace(tab_index);
+            self.switch_tab(tab_index);
             return;
         }
         let summary = self
@@ -842,12 +988,69 @@ impl AppState {
                     warning: outcome.warning,
                     error: None,
                 });
+                self.start_editor_watch();
             }
             Err(error) => {
                 eprintln!("wiki-gui: neovide: {error}");
                 self.set_editor_error(error);
             }
         }
+    }
+
+    fn start_editor_watch(&self) {
+        if self.editor_watch.get_untracked() {
+            return;
+        }
+        self.editor_watch.set(true);
+        let state = self.clone();
+        set_timeout(Duration::from_secs(2), move || editor_watch_tick(&state));
+    }
+
+    fn sync_editor_page(&self) {
+        if !matches!(self.source.get_untracked(), Source::Server) {
+            return;
+        }
+        let Some(tab) = self.active_tab() else { return };
+        let Some(id) = tab.id else { return };
+        let Some(current) = tab.workspace else { return };
+        let Ok(value) = rpc("workspace", json!({ "id": id })) else {
+            return;
+        };
+        let Ok(next) = serde_json::from_value::<Workspace>(value) else {
+            return;
+        };
+        if next.page.rev == current.page.rev {
+            return;
+        }
+        let scroll = self.article_ref.scroll_offset().y;
+        let outline = self
+            .outline_active
+            .get_untracked()
+            .min(next.outline.len().saturating_sub(1));
+        self.tabs.update(|tabs| {
+            if let Some(tab) = tabs
+                .iter_mut()
+                .find(|tab| tab.id.as_deref() == Some(id.as_str()))
+            {
+                tab.title = next.page.title.clone();
+                tab.kind = next.page.content_type.clone();
+                tab.workspace = Some(next.clone());
+                tab.error = None;
+            }
+        });
+        self.cache
+            .borrow_mut()
+            .workspaces
+            .insert(id.clone(), next.clone());
+        let _ = write_cache(&self.cache.borrow());
+        self.summaries.update(|items| {
+            if let Some(summary) = items.iter_mut().find(|summary| summary.id == id) {
+                summary.title = next.page.title.clone();
+                summary.rev = next.page.rev;
+            }
+        });
+        self.apply_reading_state(scroll, outline);
+        notify(self, "エディタの変更を取り込みました");
     }
 
     fn set_editor_error(&self, error: String) {
@@ -887,10 +1090,12 @@ impl AppState {
 
     fn delete_content(&self, id: &str, rev: u64) {
         if !matches!(self.source.get_untracked(), Source::Server) {
+            self.delete_armed.set(false);
             self.set_editor_error("削除: wiki-server に接続していません".to_owned());
             return;
         }
         if let Err(error) = rpc("delete", json!({ "id": id, "rev": rev })) {
+            self.delete_armed.set(false);
             self.set_editor_error(format!("削除できません: {error}"));
             return;
         }
@@ -899,6 +1104,7 @@ impl AppState {
         self.tabs
             .update(|tabs| tabs.retain(|tab| tab.id.as_deref() != Some(id)));
         self.delete_armed.set(false);
+        notify(self, "ページを削除しました");
         if self.tabs.get_untracked().is_empty() {
             self.editor.update(|editor| {
                 editor.error = Some("削除しました。タブがありません。".to_owned())
@@ -909,7 +1115,11 @@ impl AppState {
                 .get_untracked()
                 .min(self.tabs.get_untracked().len() - 1);
             self.active.set(index);
+            let target = self.tabs.get_untracked().get(index).cloned();
             self.ensure_workspace(index);
+            if let Some(target) = target {
+                self.apply_reading_state(target.scroll, target.outline);
+            }
         }
     }
 
@@ -924,6 +1134,8 @@ impl AppState {
             }
         }
         let index = self.active_index();
+        let scroll = self.article_ref.scroll_offset().y;
+        let outline = self.outline_active.get_untracked();
         self.tabs.update(|tabs| {
             if let Some(tab) = tabs.get_mut(index) {
                 tab.workspace = None;
@@ -931,12 +1143,29 @@ impl AppState {
             }
         });
         self.ensure_workspace(index);
-        self.outline_active.set(0);
+        self.apply_reading_state(scroll, outline);
     }
 
     fn scroll_to_outline(&self, index: usize, line: usize) {
         if let Some(anchor) = self.heading_refs.borrow().get(index).copied() {
-            anchor.scroll_into_view();
+            let article = self.article_ref;
+            request_frame(move |_| {
+                let (Some(top), Some(heading)) = (
+                    article.logical_rect().map(|rect| rect.y),
+                    anchor.logical_rect().map(|rect| rect.y),
+                ) else {
+                    return;
+                };
+                // Put the heading just below the top edge instead of letting
+                // `scroll_into_view` align its bottom with the viewport bottom.
+                let y = (article.scroll_offset().y + heading - top - 24.0).max(0.0);
+                article.scroll_to(0.0, y);
+            });
+            if let Some(id) = self.active_tab().and_then(|tab| tab.id)
+                && let Err(error) = self.manager.borrow().goto_line(&id, line)
+            {
+                self.editor.update(|editor| editor.warning = Some(error));
+            }
             return;
         }
         self.scroll_to_line(line);
@@ -954,11 +1183,61 @@ impl AppState {
     }
 }
 
+/// Keeps the outline rail in step with what is actually at the top of the reading pane.
+fn sync_active_heading(state: &AppState) {
+    let Some(top) = state.article_ref.logical_rect().map(|rect| rect.y) else {
+        return;
+    };
+    let refs = state.heading_refs.borrow();
+    let mut active = 0usize;
+    for (index, heading) in refs.iter().enumerate() {
+        let Some(rect) = heading.logical_rect() else {
+            continue;
+        };
+        if rect.y <= top + 140.0 {
+            active = index;
+        } else {
+            break;
+        }
+    }
+    if state.outline_active.get_untracked() != active {
+        state.outline_active.set(active);
+    }
+}
+
+fn highlighted_text(text: &str, query: &str, size: f32, base: Color, accent: Color) -> RichText {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return rich_text(vec![span(text).text_color(base).text_size(size)]);
+    }
+    let lower = text.to_lowercase();
+    let mut runs = Vec::new();
+    let mut cursor = 0;
+    for (start, _) in lower.match_indices(&needle) {
+        if start > cursor {
+            runs.push(span(&text[cursor..start]).text_color(base).text_size(size));
+        }
+        let end = (start + needle.len()).min(text.len());
+        runs.push(
+            span(&text[start..end])
+                .text_color(accent)
+                .text_size(size)
+                .font_weight(FontWeight::SEMIBOLD),
+        );
+        cursor = end;
+    }
+    if cursor < text.len() {
+        runs.push(span(&text[cursor..]).text_color(base).text_size(size));
+    }
+    rich_text(runs)
+}
+
 fn source_label(source: Source) -> &'static str {
     match source {
         Source::Server => "サーバー",
         Source::Offline => "オフラインキャッシュ",
         Source::Fallback => "内蔵 fixture",
+        Source::Empty => "未接続",
     }
 }
 
@@ -1120,6 +1399,8 @@ fn start_polling(alive: Arc<AtomicBool>, updates: mpsc::Sender<PollUpdate>) {
                             if updates.send(PollUpdate::Reconnected(items)).is_ok() {
                                 request_frame(|_| {});
                             }
+                        } else if updates.send(PollUpdate::Disconnected).is_ok() {
+                            request_frame(|_| {});
                         }
                     }
                 }
@@ -1131,6 +1412,24 @@ fn start_polling(alive: Arc<AtomicBool>, updates: mpsc::Sender<PollUpdate>) {
     });
 }
 
+fn editor_watch_tick(state: &AppState) {
+    if !state.editor_watch.get_untracked() {
+        return;
+    }
+    let attached = state.manager.borrow().has_server() && state.editor.get_untracked().attached;
+    if !attached {
+        state.editor_watch.set(false);
+        let mut editor = state.editor.get_untracked();
+        editor.attached = false;
+        editor.detail = state.manager.borrow().status_label();
+        state.editor.set(editor);
+        return;
+    }
+    state.sync_editor_page();
+    let state = state.clone();
+    set_timeout(Duration::from_secs(2), move || editor_watch_tick(&state));
+}
+
 fn drain_updates(state: &AppState) {
     while let Ok(update) = state.updates.borrow().try_recv() {
         match update {
@@ -1139,12 +1438,46 @@ fn drain_updates(state: &AppState) {
                 state.source.set(Source::Server);
                 state.summaries.set(items);
             }
+            PollUpdate::Disconnected => {
+                if matches!(state.source.get_untracked(), Source::Server) {
+                    state.source.set(Source::Offline);
+                }
+            }
             PollUpdate::Ping => {}
         }
     }
 }
 
-fn boot(snapshot: bool) -> AppState {
+fn default_tabs(summaries: &[Summary]) -> Vec<Tab> {
+    let mut chosen: Vec<&Summary> = Vec::new();
+    for title in ["家計の記録", "読書ノート", "Rustのメモ"] {
+        if let Some(summary) = summaries.iter().find(|summary| summary.title == title) {
+            chosen.push(summary);
+        }
+    }
+    for summary in summaries.iter().filter(|summary| summary.is_page()) {
+        if chosen.len() >= 3 {
+            break;
+        }
+        if !chosen.iter().any(|kept| kept.id == summary.id) {
+            chosen.push(summary);
+        }
+    }
+    chosen
+        .into_iter()
+        .map(|summary| Tab {
+            id: Some(summary.id.clone()),
+            title: summary.title.clone(),
+            kind: summary.content_type.clone(),
+            workspace: None,
+            error: None,
+            scroll: 0.0,
+            outline: 0,
+        })
+        .collect()
+}
+
+fn boot(snapshot: bool, shelf: bool) -> AppState {
     let socket = socket_path();
     let mut cached = load_cache().unwrap_or_default();
     let (summaries, source, boot_error) = match load_summaries() {
@@ -1158,26 +1491,44 @@ fn boot(snapshot: bool) -> AppState {
             if !cached.summaries.is_empty() {
                 eprintln!("wiki-gui: server unavailable ({error}); using offline cache");
                 (cached.summaries.clone(), Source::Offline, Some(error))
-            } else {
+            } else if snapshot {
                 eprintln!("wiki-gui: server unavailable ({error}); using built-in fixture");
                 (fixture_summaries(), Source::Fallback, Some(error))
+            } else {
+                eprintln!("wiki-gui: server unavailable ({error}); starting empty");
+                (Vec::new(), Source::Empty, Some(error))
             }
         }
     };
 
-    let mut tabs = Vec::new();
-    for title in ["家計の記録", "読書ノート", "Rustのメモ"] {
-        let summary = summaries.iter().find(|summary| summary.title == title);
-        tabs.push(Tab {
-            id: summary.map(|summary| summary.id.clone()),
-            title: title.to_owned(),
-            kind: summary
-                .map(|summary| summary.content_type.clone())
-                .unwrap_or_else(|| "page".to_owned()),
-            workspace: None,
-            error: None,
-        });
-    }
+    let restored = (!snapshot)
+        .then_some(cached.session.as_ref())
+        .flatten()
+        .map(|session| {
+            let tabs = session
+                .tabs
+                .iter()
+                .filter_map(|saved| {
+                    summaries
+                        .iter()
+                        .find(|summary| summary.id == saved.id)
+                        .map(|summary| Tab {
+                            id: Some(summary.id.clone()),
+                            title: summary.title.clone(),
+                            kind: summary.content_type.clone(),
+                            workspace: None,
+                            error: None,
+                            scroll: saved.scroll.max(0.0),
+                            outline: saved.outline,
+                        })
+                })
+                .collect::<Vec<_>>();
+            let active = session.active.min(tabs.len().saturating_sub(1));
+            (tabs, active)
+        })
+        .filter(|(tabs, _)| !tabs.is_empty());
+    let (tabs, active_index) = restored.unwrap_or_else(|| (default_tabs(&summaries), 0));
+    let initial_outline = tabs.get(active_index).map(|tab| tab.outline).unwrap_or(0);
 
     let manager = Rc::new(RefCell::new(neovide::Manager::detect()));
     let poll_alive = Arc::new(AtomicBool::new(true));
@@ -1187,6 +1538,7 @@ fn boot(snapshot: bool) -> AppState {
     let detail = manager.borrow().status_label();
     let root = node_ref();
     let state = AppState {
+        snapshot,
         source: signal(source),
         boot_error,
         socket,
@@ -1199,10 +1551,12 @@ fn boot(snapshot: bool) -> AppState {
         sidebar_mode: signal(SidebarMode::All),
         sidebar_open: signal(true),
         tabs: signal(tabs),
-        active: signal(0),
+        active: signal(active_index),
         inspector: signal(Inspector::Links),
-        inspector_visible: signal(true),
-        shelf_pinned: signal(snapshot),
+        // The inspector is a contextual drawer, not a permanent column: the reading surface
+        // gets the whole width until the user asks for links or page info.
+        inspector_visible: signal(false),
+        shelf_pinned: signal(shelf),
         shelf_hover: signal(false),
         shelf_dismissed: signal(false),
         palette: signal(None),
@@ -1212,6 +1566,7 @@ fn boot(snapshot: bool) -> AppState {
         results: signal(Vec::new()),
         palette_error: signal(None),
         next_selected: signal(0),
+        editor_watch: signal(false),
         editor: signal(EditorState {
             attached,
             follow: attached,
@@ -1221,18 +1576,28 @@ fn boot(snapshot: bool) -> AppState {
         }),
         history: signal(Vec::new()),
         history_index: signal(0),
-        outline_active: signal(0),
+        outline_active: signal(initial_outline),
+        viewport: signal(WINDOW_WIDTH as f32),
         delete_armed: signal(false),
+        toast: signal(None),
+        shortcuts: signal(false),
+        outline_open: signal(false),
+        outline_collapsed: signal(false),
+        outline_keyboard: signal(false),
+        tab_focus: signal(false),
         article_ref: node_ref(),
         heading_refs: Rc::new(RefCell::new(Vec::new())),
         root,
         manager,
     };
-    for index in 0..3 {
+    for index in 0..state.tabs.get_untracked().len() {
         state.ensure_workspace(index);
     }
-    if let Some(id) = state.active_tab().and_then(|tab| tab.id) {
-        state.push_history(Some(id));
+    if let Some(tab) = state.active_tab() {
+        if tab.scroll > 0.0 {
+            state.apply_reading_state(tab.scroll, tab.outline);
+        }
+        state.push_history(tab.id);
     }
     if !snapshot {
         start_polling(poll_alive, poll_tx);
@@ -1316,6 +1681,12 @@ fn class_color(class: highlight::Class) -> Color {
     }
 }
 
+thread_local! {
+    /// One tree-sitter highlighter for every fenced block. It compiles grammars lazily on a
+    /// worker and bumps `ready`, which the block's `dyn_view` reads to colour itself again.
+    static CODE_HIGHLIGHTER: CodeHighlighter = CodeHighlighter::new(CodeTheme::dark());
+}
+
 fn code_line(line: &str, language: &str) -> RichText {
     let tokens = highlight::line(line, language);
     let runs = tokens
@@ -1328,18 +1699,76 @@ fn code_line(line: &str, language: &str) -> RichText {
         .line_height(LineHeight::Relative(1.75_f32))
 }
 
-fn code_block(lines: &[&str], language: &str) -> Div {
-    let mut block = div().flex().flex_col();
-    for (index, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() {
-            block = block.child(div().h(7.0_f32));
-        } else if index == 0 {
-            block = block.child(code_line(line, language));
-        } else {
-            block = block.child(code_line(line, language));
-        }
+/// One line of a block already parsed by tree-sitter. `offset` is the line's byte offset in the
+/// whole block, so styles crossing line boundaries are clipped correctly.
+fn code_line_colored(
+    line: &str,
+    language: &str,
+    offset: usize,
+    colors: &[(Range<usize>, Rc<Style>)],
+) -> RichText {
+    if colors.is_empty() {
+        return code_line(line, language);
     }
-    block
+    let line_end = offset + line.len();
+    let mut runs: Vec<Run> = Vec::new();
+    let mut cursor = offset;
+    for (range, style) in colors {
+        let start = range.start.max(offset);
+        let end = range.end.min(line_end);
+        if start >= end {
+            continue;
+        }
+        if start > cursor
+            && let Some(text) = line.get(cursor - offset..start - offset)
+        {
+            runs.push(span(text).text_color(theme().text).into());
+        }
+        if let Some(text) = line.get(start - offset..end - offset) {
+            runs.push(span(text).shared_style(style.clone()).into());
+        }
+        cursor = end;
+    }
+    if cursor < line_end
+        && let Some(text) = line.get(cursor - offset..)
+    {
+        runs.push(span(text).text_color(theme().text).into());
+    }
+    if runs.is_empty() {
+        runs.push(Run::Text(line.to_owned()));
+    }
+    rich_text(runs)
+        .font_family(mono())
+        .text_size(12.0_f32)
+        .line_height(LineHeight::Relative(1.75_f32))
+}
+
+fn code_block(lines: &[&str], language: &str) -> View {
+    let highlighter = CODE_HIGHLIGHTER.with(Clone::clone);
+    let ready = highlighter.ready();
+    let code = lines.join("\n");
+    let language = language.to_owned();
+    let lines = lines
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect::<Vec<_>>();
+    dyn_view(move || {
+        // Grammar compilation happens off the UI thread; reading this signal repaints the
+        // block once the highlighter can colour it.
+        let _ = ready.get();
+        let colors = highlighter.highlight(&language, &code);
+        let mut offset = 0usize;
+        let mut block = div().flex().flex_col();
+        for line in &lines {
+            if line.trim().is_empty() {
+                block = block.child(div().h(7.0_f32));
+            } else {
+                block = block.child(code_line_colored(line, &language, offset, &colors));
+            }
+            offset += line.len() + 1;
+        }
+        block
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1361,6 +1790,10 @@ fn layout(state: &AppState) -> Div {
         .text_color(theme().text)
         .node_ref(root)
         .focusable()
+        .on_resized({
+            let state = state.clone();
+            move |width, _| state.viewport.set(width)
+        })
         .on_key_down(move |event| handle_key(&key_state, event))
         .child(dyn_view({
             let state = state.clone();
@@ -1379,48 +1812,109 @@ fn layout(state: &AppState) -> Div {
                         .transition(Transition::ms(180))
                         .dyn_style({
                             let state = state.clone();
-                            move |style| style.w(if state.sidebar_open.get() { 236.0 } else { 0.0 })
+                            move |style| style.w(if state.sidebar_open.get() { 264.0 } else { 0.0 })
                         })
                         .child(dyn_view({
                             let state = state.clone();
                             move || sidebar(&state)
                         })),
                 )
-                .child(dyn_view({
-                    let state = state.clone();
-                    move || editor_column(&state)
-                }))
-                .child(dyn_view({
-                    let state = state.clone();
-                    move || outline_column(&state)
-                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(0.0_f32)
+                        .h_full()
+                        .flex()
+                        .flex_row()
+                        .justify_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(0.0_f32)
+                                .max_w(976.0_f32)
+                                .h_full()
+                                .flex()
+                                .flex_row()
+                                .child(dyn_view({
+                                    let state = state.clone();
+                                    move || editor_column(&state)
+                                }))
+                                .child(dyn_view({
+                                    let state = state.clone();
+                                    move || outline_column(&state)
+                                })),
+                        ),
+                )
                 .child(dyn_view({
                     let state = state.clone();
                     move || inspector_column(&state)
                 })),
         )
+        .child(outline_panel(state))
         .child(shelf(state))
         .child(dyn_view({
             let state = state.clone();
             move || status_bar(&state)
         }))
         .child(palette(state))
+        .child(shortcuts_overlay(state))
+        .child(toast(state))
+}
+
+fn scroll_article(state: &AppState, delta: f32) {
+    let article = state.article_ref;
+    let current = article.scroll_offset().y;
+    article.scroll_to(0.0, (current + delta).max(0.0));
 }
 
 fn handle_key(state: &AppState, event: &KeyboardEvent) {
     let ctrl = event.modifiers.ctrl;
     let alt = event.modifiers.alt;
     if event.key == Key::Named(NamedKey::Escape) {
+        if state.shortcuts.get_untracked() {
+            event.prevent_default();
+            state.shortcuts.set(false);
+            return;
+        }
+        if state.outline_open.get_untracked() {
+            event.prevent_default();
+            state.outline_open.set(false);
+            return;
+        }
+        if state.outline_keyboard.get_untracked() {
+            event.prevent_default();
+            state.outline_keyboard.set(false);
+            return;
+        }
         if state.palette.get_untracked().is_some() {
             event.prevent_default();
             state.close_palette();
             return;
         }
-        if state.shelf_pinned.get_untracked() && !state.shelf_hover.get_untracked() {
+        if state.delete_armed.get_untracked() {
+            event.prevent_default();
+            state.delete_armed.set(false);
+            return;
+        }
+        if state.inspector_visible.get_untracked() {
+            event.prevent_default();
+            state.inspector_visible.set(false);
+            return;
+        }
+        if state.shelf_pinned.get_untracked() {
             event.prevent_default();
             state.shelf_pinned.set(false);
             return;
         }
+        if state.tab_focus.get_untracked() {
+            event.prevent_default();
+            state.tab_focus.set(false);
+            return;
+        }
+    }
+    if state.shortcuts.get_untracked() {
+        event.prevent_default();
+        return;
     }
     if state.palette.get_untracked().is_some() {
         let length = state.results.get_untracked().len();
@@ -1447,11 +1941,25 @@ fn handle_key(state: &AppState, event: &KeyboardEvent) {
             }
             return;
         }
+        // While the palette is open it owns the keyboard. Otherwise Ctrl+W et al. would
+        // close a tab behind the search field the user is typing into.
+        return;
     }
-    if ctrl && (alt || event.modifiers.shift) && (event.key.is_char('l') || event.key.is_char('L'))
-    {
+    if state.shortcuts.get_untracked() {
+        if event.key.is_char('?') {
+            event.prevent_default();
+            state.shortcuts.set(false);
+        }
+        return;
+    }
+    if !ctrl && event.key.is_char('?') {
         event.prevent_default();
-        if state.shelf_pinned.get_untracked() || state.shelf_hover.get_untracked() {
+        state.shortcuts.set(true);
+        return;
+    }
+    if ctrl && alt && (event.key.is_char('l') || event.key.is_char('L')) {
+        event.prevent_default();
+        if state.shelf_pinned.get_untracked() {
             state.shelf_pinned.set(false);
             state.shelf_dismissed.set(true);
         } else {
@@ -1460,7 +1968,80 @@ fn handle_key(state: &AppState, event: &KeyboardEvent) {
         }
         return;
     }
+    if ctrl && event.key == Key::Named(NamedKey::Tab) {
+        event.prevent_default();
+        let length = state.tabs.get_untracked().len();
+        if length > 1 {
+            let current = state.active_index();
+            let next = if event.modifiers.shift {
+                (current + length - 1) % length
+            } else {
+                (current + 1) % length
+            };
+            state.switch_tab(next);
+            state.tab_focus.set(true);
+        }
+        return;
+    }
     if !ctrl {
+        if state.outline_open.get_untracked() || state.outline_keyboard.get_untracked() {
+            let items = outline_key_items(state);
+            if !items.is_empty() {
+                match event.key {
+                    Key::Named(NamedKey::ArrowDown) => {
+                        event.prevent_default();
+                        let next = (state.outline_active.get_untracked() + 1).min(items.len() - 1);
+                        state.outline_active.set(next);
+                        return;
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        event.prevent_default();
+                        let next = state.outline_active.get_untracked().saturating_sub(1);
+                        state.outline_active.set(next);
+                        return;
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        event.prevent_default();
+                        let index = state.outline_active.get_untracked().min(items.len() - 1);
+                        if let Some(item) = items.get(index) {
+                            state.outline_active.set(index);
+                            state.scroll_to_outline(index, item.line);
+                            state.outline_open.set(false);
+                            state.outline_keyboard.set(false);
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            } else {
+                state.outline_keyboard.set(false);
+            }
+        }
+        // Arrow keys only navigate the 2-hop shelf while it is actually visible; otherwise
+        // they scroll the article, so the page is readable without a pointer.
+        let shelf_open =
+            state.shelf_pinned.get_untracked() && !state.shelf_dismissed.get_untracked();
+        if !shelf_open {
+            let page = state
+                .article_ref
+                .logical_rect()
+                .map(|rect| rect.height)
+                .unwrap_or(0.0_f32);
+            let step = (page * 0.82).max(120.0_f32);
+            let delta = match event.key {
+                Key::Named(NamedKey::Space) | Key::Named(NamedKey::PageDown) => Some(step),
+                Key::Named(NamedKey::PageUp) => Some(-step),
+                Key::Named(NamedKey::ArrowDown) => Some(56.0_f32),
+                Key::Named(NamedKey::ArrowUp) => Some(-56.0_f32),
+                Key::Named(NamedKey::Home) => Some(-f32::MAX),
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                event.prevent_default();
+                scroll_article(state, delta);
+            }
+            return;
+        }
         let hops = state
             .active_workspace()
             .map(|workspace| workspace.links.two_hop)
@@ -1504,17 +2085,27 @@ fn handle_key(state: &AppState, event: &KeyboardEvent) {
         state.new_page();
     } else if event.key.is_char('i') {
         event.prevent_default();
+        state.outline_open.set(false);
         state
             .inspector_visible
             .update(|visible| *visible = !*visible);
     } else if event.key.is_char('1') {
         event.prevent_default();
+        state.outline_open.set(false);
         state.inspector.set(Inspector::Links);
         state.inspector_visible.set(true);
     } else if event.key.is_char('2') {
         event.prevent_default();
+        state.outline_open.set(false);
         state.inspector.set(Inspector::Info);
         state.inspector_visible.set(true);
+    } else if event.key.is_char('3') {
+        event.prevent_default();
+        state.inspector_visible.set(false);
+        toggle_outline(state);
+    } else if event.key.is_char('\\') {
+        event.prevent_default();
+        state.sidebar_open.update(|open| *open = !*open);
     } else if event.key.is_char('r') {
         event.prevent_default();
         state.refresh();
@@ -1582,48 +2173,11 @@ fn sidebar(state: &AppState) -> Div {
         pages.retain(|summary| ids.contains(summary.id.as_str()));
     }
 
-    let mut column = div()
-        .w(236.0_f32)
-        .h_full()
-        .min_h(0.0_f32)
-        .px(10.0_f32)
-        .py(10.0_f32)
-        .bg(theme().surface)
-        .border_r(1.0_f32)
-        .border_color(theme().border)
-        .flex()
-        .flex_col()
-        .overflow_y_scroll()
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .px(10.0_f32)
-                .pt(6.0_f32)
-                .pb(8.0_f32)
-                .child(ui_text("Wiki", 13.0, theme().text).font_weight(FontWeight::SEMIBOLD))
-                .child(
-                    div()
-                        .w(26.0_f32)
-                        .h(26.0_f32)
-                        .rounded(7.0_f32)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .hover(|style| style.bg(theme().surface_muted))
-                        .cursor(CursorIcon::Pointer)
-                        .on_click({
-                            let state = state.clone();
-                            move |_| state.new_page()
-                        })
-                        .child(ui_text("＋", 16.0, theme().accent)),
-                ),
-        )
+    let mut list = div().flex().flex_col().px(10.0_f32).pb(8.0_f32);
+    list = list
         .child(side_section("ライブラリ"))
         .child(nav_row(
-            "▤",
+            icons::DESCRIPTION,
             "すべてのページ",
             Some(summaries.iter().filter(|summary| summary.is_page()).count()),
             mode == SidebarMode::All,
@@ -1636,7 +2190,7 @@ fn sidebar(state: &AppState) -> Div {
             },
         ))
         .child(nav_row(
-            "↺",
+            icons::HISTORY,
             "最近",
             Some(recent.len()),
             mode == SidebarMode::Recent,
@@ -1651,30 +2205,23 @@ fn sidebar(state: &AppState) -> Div {
         .child(side_section("タグ"));
 
     if tags.is_empty() {
-        column = column.child(
+        list = list.child(
             ui_text(
                 "タグ付きページはまだありません。",
                 10.5,
                 theme().text_disabled,
             )
-            .px(10.0_f32)
             .py(3.0_f32),
         );
     } else {
-        let mut tag_row = div()
-            .px(8.0_f32)
-            .pb(3.0_f32)
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(4.0_f32);
-        for tag in tags.iter().take(12) {
+        let mut tag_row = div().pb(3.0_f32).flex().flex_row().flex_wrap().gap(4.0_f32);
+        for tag in tags.iter().take(6) {
             let active = tag_filter.as_deref() == Some(tag.as_str());
             tag_row = tag_row.child(
                 div()
                     .px(7.0_f32)
                     .py(3.0_f32)
-                    .rounded(4.0_f32)
+                    .rounded(5.0_f32)
                     .bg(if active {
                         theme().accent_muted
                     } else {
@@ -1687,6 +2234,7 @@ fn sidebar(state: &AppState) -> Div {
                         theme().border
                     })
                     .hover(|style| style.bg(theme().hover))
+                    .cursor(CursorIcon::Pointer)
                     .on_click({
                         let state = state.clone();
                         let tag = tag.clone();
@@ -1701,104 +2249,249 @@ fn sidebar(state: &AppState) -> Div {
                             state.tag_filter.set(next);
                         }
                     })
-                    .child(ui_text(format!("#{tag}"), 10.0, theme().text_muted)),
+                    .child(ui_text(
+                        format!("#{tag}"),
+                        10.0,
+                        if active {
+                            theme().accent_text
+                        } else {
+                            theme().text_muted
+                        },
+                    )),
             );
         }
-        column = column.child(tag_row);
+        list = list.child(tag_row);
     }
 
-    column = column.child(side_section(if mode == SidebarMode::Recent {
+    list = list.child(side_section(if mode == SidebarMode::Recent {
         "最近のページ"
     } else {
         "ページ"
     }));
-
+    if pages.is_empty() {
+        list = list.child(ui_text(
+            "該当するページはありません。",
+            10.5,
+            theme().text_disabled,
+        ));
+    }
     for summary in &pages {
         let is_active = summary.id == active_id;
-        column = column.child(page_row(state, summary, is_active));
+        list = list.child(page_row(state, summary, is_active));
     }
 
-    column = column.child(side_section("スニペット"));
-    for summary in &snippets {
-        column = column.child(snippet_row(state, summary));
+    if !snippets.is_empty() {
+        list = list.child(side_section("スニペット"));
+        for summary in &snippets {
+            list = list.child(snippet_row(state, summary));
+        }
     }
 
-    column = column.child(side_section("最近"));
-    for summary in recent.iter().take(4) {
-        column = column.child(
+    div()
+        .w(264.0_f32)
+        .h_full()
+        .min_h(0.0_f32)
+        .bg(theme().surface)
+        .border_r(1.0_f32)
+        .border_color(theme().border)
+        .flex()
+        .flex_col()
+        .child(
             div()
                 .px(10.0_f32)
-                .py(5.0_f32)
-                .rounded(5.0_f32)
+                .pt(10.0_f32)
+                .pb(8.0_f32)
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(8.0_f32)
-                .hover(|style| style.bg(theme().surface_muted))
-                .cursor(CursorIcon::Pointer)
-                .on_click({
-                    let state = state.clone();
-                    let summary = summary.clone();
-                    move |_| state.open_summary(&summary)
-                })
+                .justify_between()
                 .child(
-                    ui_text(truncate_chars(&summary.title, 18), 12.0, theme().text_muted).flex_1(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(2.0_f32)
+                        .child(
+                            ui_text("Wiki", 15.0, theme().text).font_weight(FontWeight::SEMIBOLD),
+                        )
+                        .child(ui_text(
+                            format!(
+                                "{} ページ · {} スニペット",
+                                summaries.iter().filter(|summary| summary.is_page()).count(),
+                                summaries
+                                    .iter()
+                                    .filter(|summary| summary.is_snippet())
+                                    .count()
+                            ),
+                            10.0,
+                            theme().text_disabled,
+                        )),
                 )
-                .child(mono_text(summary.kind_label(), 9.0, theme().text_disabled))
-                .child(ui_text(&summary.updated_label, 10.0, theme().text_disabled)),
-        );
-    }
-
-    column
-        .child(div().flex_1())
-        .child(div().h(12.0_f32))
-        .child(
-            div()
-                .h(28.0_f32)
-                .w_full()
-                .rounded(6.0_f32)
-                .bg(theme().surface_muted)
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(6.0_f32)
-                .hover(|style| style.bg(theme().surface_muted))
-                .cursor(CursorIcon::Pointer)
-                .on_click({
-                    let state = state.clone();
-                    move |_| state.new_page()
-                })
-                .child(ui_text("新規ページ", 12.0, theme().text))
-                .child(kbd("Ctrl+N")),
-        )
-        .child(div().h(7.0_f32))
-        .child(
-            div()
-                .flex()
-                .justify_between()
-                .child(ui_text("クイックオープン", 10.0, theme().text_disabled))
-                .child(kbd("Ctrl+P")),
+                .child({
+                    let open = state.clone();
+                    let button = div()
+                        .w(28.0_f32)
+                        .h(28.0_f32)
+                        .rounded(7.0_f32)
+                        .bg(theme().surface_muted)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover(|style| style.bg(theme().hover))
+                        .cursor(CursorIcon::Pointer)
+                        .on_click(move |_| open.new_page())
+                        .child(icon(icons::NOTE_ADD, 18.0).text_color(theme().accent));
+                    tooltip(button, "新規ページ Ctrl+N")
+                }),
         )
         .child(
             div()
-                .flex()
-                .justify_between()
-                .child(ui_text("検索", 10.0, theme().text_disabled))
-                .child(kbd("Ctrl+K")),
+                .flex_1()
+                .min_h(0.0_f32)
+                .overflow_y_scroll()
+                .child(list),
         )
 }
 
 fn side_section(label: &str) -> Div {
     div()
-        .mt(16.0_f32)
+        .mt(18.0_f32)
         .mb(5.0_f32)
-        .px(10.0_f32)
+        .px(2.0_f32)
         .child(section_label(label))
 }
 
+fn copy_wiki_link(state: &AppState, summary: &Summary) {
+    set_clipboard(ClipboardKind::Clipboard, format!("wiki://{}", summary.id));
+    notify(
+        state,
+        format!("リンクをコピー · {}", truncate_chars(&summary.title, 24)),
+    );
+}
+
+fn summary_menu_entries(state: &AppState, summary: &Summary) -> Vec<MenuEntry> {
+    let open = state.clone();
+    let open_summary = summary.clone();
+    let copy = state.clone();
+    let copy_summary = summary.clone();
+    let rename = state.clone();
+    let rename_summary = summary.clone();
+    let tags = state.clone();
+    let tags_summary = summary.clone();
+    let remove = state.clone();
+    let remove_summary = summary.clone();
+    vec![
+        menu_item("開く")
+            .on_click(move || open.open_summary(&open_summary))
+            .into(),
+        menu_item("リンクをコピー")
+            .on_click(move || copy_wiki_link(&copy, &copy_summary))
+            .into(),
+        menu_separator(),
+        menu_item("名前を変更…")
+            .on_click(move || {
+                rename.open_summary(&rename_summary);
+                rename.open_palette(PaletteMode::Rename);
+            })
+            .into(),
+        menu_item("タグを編集…")
+            .on_click(move || {
+                tags.open_summary(&tags_summary);
+                tags.open_palette(PaletteMode::Tags);
+            })
+            .into(),
+        menu_separator(),
+        menu_item("削除を確認…")
+            .on_click(move || {
+                remove.open_summary(&remove_summary);
+                remove.inspector.set(Inspector::Info);
+                remove.inspector_visible.set(true);
+                remove.delete_armed.set(true);
+            })
+            .into(),
+    ]
+}
+
+fn tab_menu_entries(state: &AppState, index: usize, tab: &Tab) -> Vec<MenuEntry> {
+    let close = state.clone();
+    let others = state.clone();
+    let right = state.clone();
+    let copy = state.clone();
+    let mut entries = vec![
+        menu_item("閉じる")
+            .shortcut("Ctrl+W")
+            .on_click(move || close.close_tab(index))
+            .into(),
+        menu_item("他のタブを閉じる")
+            .on_click(move || others.close_other_tabs(index))
+            .into(),
+        menu_item("右側のタブを閉じる")
+            .on_click(move || right.close_tabs_to_right(index))
+            .into(),
+        menu_separator(),
+    ];
+    if let Some(id) = tab.id.clone() {
+        let title = tab.title.clone();
+        entries.push(
+            menu_item("リンクをコピー")
+                .on_click(move || {
+                    set_clipboard(ClipboardKind::Clipboard, format!("wiki://{id}"));
+                    notify(&copy, format!("リンクをコピー · {title}"));
+                })
+                .into(),
+        );
+    }
+    entries
+}
+
+fn link_menu_entries(state: &AppState, summary: &Summary) -> Vec<MenuEntry> {
+    let open = state.clone();
+    let open_summary = summary.clone();
+    let copy = state.clone();
+    let copy_summary = summary.clone();
+    vec![
+        menu_item("開く")
+            .on_click(move || open.open_summary(&open_summary))
+            .into(),
+        menu_item("リンクをコピー")
+            .on_click(move || copy_wiki_link(&copy, &copy_summary))
+            .into(),
+    ]
+}
+
+fn article_menu_entries(state: &AppState, workspace: &Workspace) -> Vec<MenuEntry> {
+    let copy = state.clone();
+    let copy_page = workspace.page.clone();
+    let links = state.clone();
+    let edit = state.clone();
+    let reload = state.clone();
+    vec![
+        menu_item("ページのリンクをコピー")
+            .on_click(move || {
+                set_clipboard(ClipboardKind::Clipboard, format!("wiki://{}", copy_page.id));
+                notify(&copy, "ページのリンクをコピー");
+            })
+            .into(),
+        menu_item("ページ情報を表示")
+            .shortcut("Ctrl+I")
+            .on_click(move || {
+                links.inspector.set(Inspector::Links);
+                links.inspector_visible.set(true);
+            })
+            .into(),
+        menu_separator(),
+        menu_item("Neovide で編集")
+            .shortcut("Ctrl+E")
+            .on_click(move || edit.open_editor())
+            .into(),
+        menu_item("再読み込み")
+            .shortcut("Ctrl+R")
+            .on_click(move || reload.refresh())
+            .into(),
+    ]
+}
+
 fn page_row(state: &AppState, summary: &Summary, active: bool) -> Div {
-    let glyph = if active { "◈" } else { "◇" };
-    let state = state.clone();
+    let click_state = state.clone();
     let summary = summary.clone();
     let click_summary = summary.clone();
     let mut row = div()
@@ -1811,32 +2504,34 @@ fn page_row(state: &AppState, summary: &Summary, active: bool) -> Div {
         .gap(8.0_f32)
         .hover(|style| style.bg(theme().surface_muted))
         .cursor(CursorIcon::Pointer)
-        .on_click(move |_| state.open_summary(&click_summary))
+        .on_click(move |_| click_state.open_summary(&click_summary))
+        .child(icon(icons::DESCRIPTION, 16.0).text_color(if active {
+            theme().accent
+        } else {
+            theme().text_disabled
+        }))
         .child(ui_text(
-            glyph,
-            12.0,
-            if active {
-                rgb(0xffffff)
-            } else {
-                theme().text_disabled
-            },
-        ))
-        .child(ui_text(
-            truncate_chars(&summary.title, 18),
+            truncate_chars(&summary.title, 20),
             13.0,
-            if active { rgb(0xffffff) } else { theme().text },
+            theme().text,
         ));
     if active {
-        row = row.bg(theme().accent);
+        row = row
+            .bg(theme().accent_muted)
+            .border_l(2.0_f32)
+            .border_color(theme().accent)
+            .pl(7.0_f32);
     }
-    row
+    let menu = summary_menu_entries(state, &summary);
+    context_menu(tooltip(row, summary.title.clone()), menu)
 }
 
 fn snippet_row(state: &AppState, summary: &Summary) -> Div {
-    let state = state.clone();
+    let click_state = state.clone();
     let summary = summary.clone();
     let click_summary = summary.clone();
-    div()
+    let title = summary.title.clone();
+    let row = div()
         .h(29.0_f32)
         .px(9.0_f32)
         .rounded(6.0_f32)
@@ -1846,13 +2541,15 @@ fn snippet_row(state: &AppState, summary: &Summary) -> Div {
         .gap(8.0_f32)
         .hover(|style| style.bg(theme().surface_muted))
         .cursor(CursorIcon::Pointer)
-        .on_click(move |_| state.open_summary(&click_summary))
-        .child(ui_text("▤", 11.0, theme().text_disabled))
+        .on_click(move |_| click_state.open_summary(&click_summary))
+        .child(icon(icons::CODE, 15.0).text_color(theme().text_disabled))
         .child(ui_text(
             truncate_chars(&summary.title, 20),
             13.0,
             theme().text,
-        ))
+        ));
+    let menu = summary_menu_entries(state, &summary);
+    context_menu(tooltip(row, title), menu)
 }
 
 // ---------------------------------------------------------------------------
@@ -1874,6 +2571,13 @@ fn editor_column(state: &AppState) -> Div {
                 .min_h(0.0_f32)
                 .overflow_y_scroll()
                 .node_ref(state.article_ref)
+                .on_scrolled({
+                    let state = state.clone();
+                    move |_| {
+                        let state = state.clone();
+                        request_frame(move |_| sync_active_heading(&state));
+                    }
+                })
                 .child(article_scroll(state)),
         )
 }
@@ -1881,33 +2585,61 @@ fn editor_column(state: &AppState) -> Div {
 fn tabs(state: &AppState) -> Div {
     let tabs = state.tabs.get();
     let active = state.active_index();
+    let keyboard_focus = state.tab_focus.get();
     let mut row = div()
-        .h(36.0_f32)
-        .px(10.0_f32)
+        .h(38.0_f32)
+        .px(12.0_f32)
         .flex()
         .flex_row()
-        .items_end()
-        .bg(theme().surface)
+        .items_center()
+        .gap(2.0_f32)
+        .bg(theme().page)
         .border_b(1.0_f32)
         .border_color(theme().border);
+    if tabs.is_empty() {
+        row = row
+            .child(ui_text("ページがありません", 11.0, theme().text_disabled))
+            .child(div().flex_1());
+    }
     for (index, tab) in tabs.iter().enumerate() {
         let is_active = index == active;
         let mut tab_view = div()
-            .h(29.0_f32)
+            .h(28.0_f32)
             .px(10.0_f32)
-            .rounded_t(6.0_f32)
+            .rounded(7.0_f32)
+            .border(1.0_f32)
+            .border_color(if is_active && keyboard_focus {
+                theme().accent
+            } else {
+                Color::TRANSPARENT
+            })
             .flex()
             .flex_row()
             .items_center()
-            .gap(8.0_f32)
+            .gap(7.0_f32)
             .hover(|style| style.bg(theme().surface_muted))
             .cursor(CursorIcon::Pointer)
             .on_click({
                 let state = state.clone();
                 move |_| state.switch_tab(index)
             })
+            .child(
+                icon(
+                    if tab.kind == "snippet" {
+                        icons::CODE
+                    } else {
+                        icons::DESCRIPTION
+                    },
+                    14.0,
+                )
+                .text_color(if is_active {
+                    theme().accent_text
+                } else {
+                    theme().text_disabled
+                }),
+            )
             .child(ui_text(
-                &tab.title,
+                truncate_chars(&tab.title, 22),
                 12.0,
                 if is_active {
                     theme().text
@@ -1917,13 +2649,13 @@ fn tabs(state: &AppState) -> Div {
             ))
             .child(
                 div()
-                    .w(18.0_f32)
-                    .h(18.0_f32)
+                    .w(17.0_f32)
+                    .h(17.0_f32)
                     .rounded(4.0_f32)
                     .flex()
                     .items_center()
                     .justify_center()
-                    .hover(|style| style.bg(theme().surface_muted))
+                    .hover(|style| style.bg(theme().pressed))
                     .cursor(CursorIcon::Pointer)
                     .on_click({
                         let state = state.clone();
@@ -1932,63 +2664,131 @@ fn tabs(state: &AppState) -> Div {
                             state.close_tab(index);
                         }
                     })
-                    .child(ui_text("×", 12.0, theme().text_disabled)),
+                    .child(icon(icons::CLOSE, 14.0).text_color(theme().text_disabled)),
             );
         if is_active {
-            tab_view = tab_view
-                .bg(theme().page)
-                .border(1.0_f32)
-                .border_color(theme().border)
-                .mb(-1.0_f32);
+            tab_view = tab_view.bg(theme().surface_muted);
         }
-        row = row.child(tab_view);
+        row = row.child(context_menu(tab_view, tab_menu_entries(state, index, tab)));
     }
-    row.child(
-        div()
-            .w(26.0_f32)
-            .h(26.0_f32)
-            .mb(4.0_f32)
-            .ml(4.0_f32)
-            .rounded(5.0_f32)
+    row.child({
+        let open = state.clone();
+        let button = div()
+            .w(28.0_f32)
+            .h(28.0_f32)
+            .ml(2.0_f32)
+            .rounded(7.0_f32)
             .flex()
             .items_center()
             .justify_center()
             .hover(|style| style.bg(theme().surface_muted))
             .cursor(CursorIcon::Pointer)
-            .on_click({
-                let state = state.clone();
-                move |_| state.open_palette(PaletteMode::QuickOpen)
-            })
-            .child(ui_text("＋", 15.0, theme().text_disabled)),
-    )
-    .child(div().flex_1())
-    .child(div().pb(7.0_f32).pr(2.0_f32).child(ui_text(
-        "Ctrl+W 閉じる",
-        9.5,
-        theme().text_disabled,
-    )))
+            .on_click(move |_| open.open_palette(PaletteMode::QuickOpen))
+            .child(icon(icons::MANAGE_SEARCH, 17.0).text_color(theme().text_disabled));
+        tooltip(button, "クイックオープン Ctrl+P")
+    })
 }
 
 fn article_scroll(state: &AppState) -> Div {
     let tab = state.active_tab();
     let index = state.active_index();
-    let body = match tab {
-        Some(tab) => match tab.workspace {
-            Some(workspace) => article(state, &workspace),
-            None => placeholder(state, index, &tab),
-        },
-        None => div()
-            .p(40.0_f32)
-            .child(ui_text("タブがありません。", 13.0, theme().text_muted)),
+    let show_empty = state.summaries.get().is_empty()
+        && tab.as_ref().and_then(|tab| tab.id.as_deref()).is_none();
+    let (body, menu) = if show_empty {
+        (empty_state(state), None)
+    } else {
+        match tab {
+            Some(tab) => match tab.workspace.clone() {
+                Some(workspace) => {
+                    let menu = article_menu_entries(state, &workspace);
+                    (article(state, &workspace), Some(menu))
+                }
+                None => (placeholder(state, index, &tab), None),
+            },
+            None => (
+                div()
+                    .p(40.0_f32)
+                    .child(ui_text("タブがありません。", 13.0, theme().text_muted)),
+                None,
+            ),
+        }
     };
-    div().w_full().flex().justify_center().child(
-        div()
-            .w_full()
-            .max_w(700.0_f32)
-            .px(48.0_f32)
-            .py(44.0_f32)
-            .child(body),
-    )
+    let page = div()
+        .w_full()
+        .max_w(800.0_f32)
+        .px(56.0_f32)
+        .pt(52.0_f32)
+        .pb(96.0_f32)
+        .child(body);
+    let page = match menu {
+        Some(menu) => context_menu(page, menu),
+        None => page,
+    };
+    div().w_full().flex().justify_center().child(page)
+}
+
+fn empty_state(state: &AppState) -> Div {
+    let online = matches!(state.source.get(), Source::Server);
+    let create = state.clone();
+    let retry = state.clone();
+    let mut action = div().mt(18.0_f32).flex().flex_row().gap(8.0_f32);
+    if online {
+        action = action.child(
+            icon_text_button(
+                icons::NOTE_ADD,
+                "最初のページを作成",
+                11.5,
+                theme().accent_text,
+            )
+            .on_click(move |_| create.new_page()),
+        );
+    } else {
+        action = action
+            .child(
+                icon_text_button(icons::REFRESH, "再試行", 11.5, theme().accent_text)
+                    .on_click(move |_| retry.refresh()),
+            )
+            .child(ui_text(
+                "wiki-server を起動してから再試行してください。",
+                10.5,
+                theme().text_disabled,
+            ));
+    }
+    div()
+        .pt(72.0_f32)
+        .max_w(520.0_f32)
+        .child(ui_text("ノート", 11.0, theme().text_disabled))
+        .child(
+            ui_text("Wiki へようこそ", 30.0, theme().text)
+                .mt(8.0_f32)
+                .font_weight(FontWeight::BOLD),
+        )
+        .child(
+            ui_text(
+                if online {
+                    "ページはまだありません。最初の1枚を作りましょう。"
+                } else {
+                    "ローカルサーバーに接続できません。表示できるページもまだありません。"
+                },
+                13.5,
+                theme().text_muted,
+            )
+            .mt(12.0_f32)
+            .line_height(LineHeight::Relative(1.7_f32)),
+        )
+        .child(action)
+        .child(
+            ui_text(
+                if online {
+                    "Ctrl+N で新規ページ、Ctrl+K で検索できます。"
+                } else {
+                    "Ctrl+K で検索できます。接続後に Ctrl+N で新規ページ。"
+                },
+                10.5,
+                theme().text_disabled,
+            )
+            .mt(14.0_f32),
+        )
 }
 
 fn placeholder(state: &AppState, index: usize, tab: &Tab) -> Div {
@@ -2044,30 +2844,30 @@ fn placeholder(state: &AppState, index: usize, tab: &Tab) -> Div {
 fn article(state: &AppState, workspace: &Workspace) -> Div {
     let page = &workspace.page;
     let info = &workspace.info;
-    let tags = if !info.tags.trim().is_empty() {
-        tag_text(&info.tags)
-    } else {
-        tag_text(&page.tags.join(", "))
-    };
+    let backlinks_state = state.clone();
 
     let mut body = div()
         .flex()
         .flex_col()
-        .child(ui_text("ノート", 11.0, theme().text_muted))
         .child(
-            ui_text(&page.title, 29.0, theme().text)
-                .mt(9.0_f32)
+            ui_text(&page.title, 33.0, theme().text)
+                .font_family(display())
+                .mt(0.0_f32)
                 .font_weight(FontWeight::BOLD)
-                .letter_spacing(-0.6_f32),
+                .letter_spacing(-0.3_f32)
+                .line_height(LineHeight::Relative(1.32)),
         )
         .child(
             div()
-                .mt(9.0_f32)
+                .mt(12.0_f32)
+                .pb(18.0_f32)
                 .flex()
                 .flex_row()
                 .items_center()
                 .flex_wrap()
-                .gap(7.0_f32)
+                .gap(8.0_f32)
+                .border_b(1.0_f32)
+                .border_color(rgba(0xffffff0a))
                 .child(ui_text(
                     format!("更新 {}", info.updated),
                     12.0,
@@ -2080,27 +2880,23 @@ fn article(state: &AppState, workspace: &Workspace) -> Div {
                     theme().text_muted,
                 ))
                 .child(meta_sep())
-                .child(ui_text(
-                    format!("{}語", info.word_count),
-                    12.0,
-                    theme().text_muted,
-                ))
-                .child(meta_sep())
-                .child(ui_text(
-                    format!("{} バックリンク", workspace.links.backlinks.len()),
-                    12.0,
-                    theme().text_muted,
-                ))
-                .child(meta_sep())
-                .child(ui_text(
-                    if tags.is_empty() {
-                        "タグなし".to_owned()
-                    } else {
-                        tags
-                    },
-                    12.0,
-                    theme().text_muted,
-                )),
+                .child(
+                    div()
+                        .px(4.0_f32)
+                        .rounded(4.0_f32)
+                        .hover(|style| style.bg(theme().surface_muted))
+                        .cursor(CursorIcon::Pointer)
+                        .on_click(move |_| {
+                            backlinks_state.inspector.set(Inspector::Links);
+                            backlinks_state.inspector_visible.set(true);
+                            backlinks_state.outline_open.set(false);
+                        })
+                        .child(ui_text(
+                            format!("{} バックリンク", workspace.links.backlinks.len()),
+                            12.0,
+                            theme().text_muted,
+                        )),
+                ),
         );
 
     state.heading_refs.borrow_mut().clear();
@@ -2109,6 +2905,91 @@ fn article(state: &AppState, workspace: &Workspace) -> Div {
         workspace,
         Some(&state.heading_refs),
     ));
+
+    // Backlinks belong at the end of the reading flow, not only behind Ctrl+I. This is the
+    // feature that makes a wiki feel connected, so it stays visible by default.
+    let backlinks = &workspace.links.backlinks;
+    if !backlinks.is_empty() {
+        let mut rows = div().mt(8.0_f32).flex().flex_col();
+        for summary in backlinks.iter().take(4) {
+            let state = state.clone();
+            let summary = summary.clone();
+            let target = summary.clone();
+            let excerpt = if summary.excerpt.is_empty() {
+                summary.kind_label()
+            } else {
+                summary.excerpt.clone()
+            };
+            rows = rows.child(
+                div()
+                    .py(9.0_f32)
+                    .border_b(1.0_f32)
+                    .border_color(rgba(0xffffff0a))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(10.0_f32)
+                    .hover(|style| style.bg(theme().surface_muted))
+                    .rounded(6.0_f32)
+                    .px(6.0_f32)
+                    .cursor(CursorIcon::Pointer)
+                    .on_click(move |_| state.open_summary(&target))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(3.0_f32)
+                            .flex_1()
+                            .min_w(0.0_f32)
+                            .child(ui_text(
+                                truncate_chars(&summary.title, 40),
+                                12.5,
+                                theme().text,
+                            ))
+                            .child(ui_text(
+                                truncate_chars(&excerpt, 64),
+                                10.5,
+                                theme().text_disabled,
+                            )),
+                    )
+                    .child(icon(icons::CHEVRON_RIGHT, 16.0).text_color(theme().text_disabled)),
+            );
+        }
+        let mut section = div()
+            .mt(46.0_f32)
+            .pt(18.0_f32)
+            .border_t(1.0_f32)
+            .border_color(theme().border)
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .child(section_label("このページを参照"))
+                    .child(ui_text(
+                        format!("{} 件", backlinks.len()),
+                        10.0,
+                        theme().text_disabled,
+                    )),
+            )
+            .child(rows);
+        if backlinks.len() > 4 {
+            let state = state.clone();
+            section = section.child(
+                icon_text_button(
+                    icons::LINK,
+                    "すべてのリンクを表示",
+                    11.0,
+                    theme().accent_text,
+                )
+                .mt(10.0_f32)
+                .on_click(move |_| {
+                    state.inspector.set(Inspector::Links);
+                    state.inspector_visible.set(true);
+                }),
+            );
+        }
+        body = body.child(section);
+    }
 
     body
 }
@@ -2127,6 +3008,199 @@ enum MdBlock {
     Interpreter(String, String),
 }
 
+enum BodySegment {
+    Heading(u8, String),
+    Markdown(String),
+    Code(String, Vec<String>),
+    Embed(String),
+    Transclude(String),
+    Interpreter(String, String),
+}
+
+fn flush_markdown(markdown: &mut String, segments: &mut Vec<BodySegment>) {
+    if !markdown.trim().is_empty() {
+        segments.push(BodySegment::Markdown(std::mem::take(markdown)));
+    } else {
+        markdown.clear();
+    }
+}
+
+/// Splits a page at the things `markdown_view` cannot own: wiki embeds, transclusions,
+/// interpreter panels and fenced code that keeps the app's copy button. Headings start a new
+/// segment too, so each heading gets a `NodeRef` for the outline and scroll spy.
+fn split_segments(body: &str, title: &str) -> Vec<BodySegment> {
+    let lines = body.lines().collect::<Vec<_>>();
+    let calls = parse_interpreter_calls(body);
+    let mut segments = Vec::new();
+    let mut markdown = String::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let raw = lines[index].trim_end_matches('\r');
+        let line = raw.trim();
+        if line.is_empty() {
+            markdown.push('\n');
+            index += 1;
+            continue;
+        }
+        if let Some(info) = line.strip_prefix("!```") {
+            flush_markdown(&mut markdown, &mut segments);
+            let preset = info.split("||").next().unwrap_or("text").trim().to_owned();
+            let id = info.split("||").nth(1).map(str::trim).unwrap_or_default();
+            index += 1;
+            let mut code = Vec::new();
+            while index < lines.len() && !lines[index].trim_start().starts_with("```") {
+                code.push(lines[index].trim_end_matches('\r').to_owned());
+                index += 1;
+            }
+            index += 1;
+            if id.is_empty() {
+                // A loose fence has no canonical id yet. Showing it as code is better than
+                // dropping the content; the Neovim side can convert it later.
+                segments.push(BodySegment::Code(preset, code));
+            } else {
+                segments.push(BodySegment::Embed(id.to_owned()));
+            }
+            continue;
+        }
+        if let Some(info) = line.strip_prefix("```") {
+            flush_markdown(&mut markdown, &mut segments);
+            let language = info.split('|').next().unwrap_or("text").trim().to_owned();
+            index += 1;
+            let mut code = Vec::new();
+            while index < lines.len() && !lines[index].trim_start().starts_with("```") {
+                code.push(lines[index].trim_end_matches('\r').to_owned());
+                index += 1;
+            }
+            index += 1;
+            segments.push(BodySegment::Code(language, code));
+            continue;
+        }
+        if let Some(call) = calls.iter().find(|call| call.line == index + 1) {
+            flush_markdown(&mut markdown, &mut segments);
+            segments.push(BodySegment::Interpreter(
+                call.provider.clone(),
+                call.args.clone(),
+            ));
+            index += 1;
+            continue;
+        }
+        if let Some((level, text)) = heading(line) {
+            flush_markdown(&mut markdown, &mut segments);
+            index += 1;
+            if level == 1 && text == title {
+                continue;
+            }
+            segments.push(BodySegment::Heading(level, text.to_owned()));
+            continue;
+        }
+        if let Some(target) = line.strip_prefix("![[")
+            && let Some(target) = target.strip_suffix("]]")
+        {
+            flush_markdown(&mut markdown, &mut segments);
+            segments.push(BodySegment::Transclude(target.trim().to_owned()));
+            index += 1;
+            continue;
+        }
+        markdown.push_str(raw);
+        markdown.push('\n');
+        index += 1;
+    }
+    flush_markdown(&mut markdown, &mut segments);
+    segments
+}
+
+/// `markdown_view` understands `[label](target)` but not `[[target|label]]`; turning one into the
+/// other keeps wiki links clickable while the standard Markdown renderer does the paragraph work.
+fn wiki_links_to_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("]]") else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let inner = &after[..end];
+        let (target, label) = inner.rsplit_once('|').unwrap_or((inner, inner));
+        out.push('[');
+        out.push_str(label);
+        out.push_str("](wiki:");
+        out.push_str(target.trim());
+        out.push(')');
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[allow(clippy::field_reassign_with_default)]
+fn wiki_markdown_theme() -> MarkdownTheme {
+    let mut markdown = MarkdownTheme::default();
+    markdown.root = Style::default()
+        .font_family(sans())
+        .text_size(15.5_f32)
+        .text_color(theme().text)
+        .line_height(LineHeight::Relative(1.78_f32));
+    markdown.paragraph = Style::default().mb(15.0_f32);
+    markdown.strong = Style::default()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme().text);
+    markdown.emphasis = Style::default().italic();
+    markdown.strikethrough = Style::default().strikethrough();
+    markdown.code = Style::default()
+        .font_family(mono())
+        .text_size(13.0_f32)
+        .bg(theme().surface_muted)
+        .text_color(theme().accent_text)
+        .rounded(4.0_f32)
+        .px(4.0_f32);
+    markdown.link = Style::default().text_color(theme().accent_text).underline();
+    markdown.link_hover = Style::default()
+        .text_color(theme().accent_hover)
+        .underline();
+    markdown.quote = Style::default()
+        .border_l(3.0_f32)
+        .border_color(theme().accent_muted)
+        .px(16.0_f32)
+        .py(10.0_f32)
+        .bg(rgba(0xffffff06))
+        .text_color(theme().text_muted)
+        .mb(20.0_f32);
+    markdown.list = Style::default().mb(14.0_f32);
+    markdown.item_gap = 6.0_f32;
+    markdown.indent = 22.0_f32;
+    markdown.table = Style::default().mb(18.0_f32);
+    markdown.table_head = Style::default()
+        .bg(theme().surface_muted)
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme().text);
+    markdown.table_cell = Style::default()
+        .px(12.0_f32)
+        .py(7.0_f32)
+        .border(1.0_f32)
+        .border_color(theme().border)
+        .text_size(13.0_f32);
+    markdown.table_stripe = Color::TRANSPARENT;
+    markdown.rule = Style::default().h(1.0_f32).my(26.0_f32).bg(theme().border);
+    markdown.task_done = Style::default()
+        .strikethrough()
+        .text_color(theme().text_disabled);
+    markdown
+}
+
+fn handle_markdown_link(state: &AppState, target: &str) {
+    if let Some(id) = target.strip_prefix("wiki:") {
+        open_wiki_target(state, id);
+    } else if target.starts_with("http://") || target.starts_with("https://") {
+        set_clipboard(ClipboardKind::Clipboard, target.to_owned());
+        notify(
+            state,
+            format!("URLをコピー · {}", truncate_chars(target, 40)),
+        );
+    }
+}
+
 fn render_markdown_body(
     state: &AppState,
     workspace: &Workspace,
@@ -2143,19 +3217,31 @@ fn render_markdown_body(
         let lines = page.body.lines().collect::<Vec<_>>();
         return out.child(code_panel(&language, &lines).mt(24.0_f32));
     }
-    for block in parse_markdown(&page.body, &page.title) {
-        match block {
-            MdBlock::Heading(level, text) => {
-                let size = match level {
-                    2 => 24.0,
-                    3 => 19.0,
-                    4 => 16.0,
-                    _ => 15.0,
+
+    let mut rendered = false;
+    for segment in split_segments(&page.body, &page.title) {
+        rendered = true;
+        match segment {
+            BodySegment::Heading(level, text) => {
+                let (size, top) = match level {
+                    1 => (28.0_f32, 40.0_f32),
+                    2 => (24.0_f32, 38.0_f32),
+                    3 => (19.5_f32, 28.0_f32),
+                    4 => (16.0_f32, 22.0_f32),
+                    _ => (15.0_f32, 18.0_f32),
                 };
-                let heading = ui_text(text, size, theme().text)
-                    .mt(if level <= 2 { 26.0_f32 } else { 20.0_f32 })
-                    .font_weight(FontWeight::SEMIBOLD);
-                if level >= 2 && let Some(collect) = collect {
+                let heading = rich_text(inline_runs(&text, Some(state)))
+                    .font_family(if level <= 3 { display() } else { sans() })
+                    .text_size(size)
+                    .text_color(theme().text)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .letter_spacing(-0.2_f32)
+                    .line_height(LineHeight::Relative(1.45_f32))
+                    .mt(top)
+                    .mb(10.0_f32);
+                if level >= 2
+                    && let Some(collect) = collect
+                {
                     let anchor = node_ref();
                     collect.borrow_mut().push(anchor);
                     out = out.child(div().node_ref(anchor).child(heading));
@@ -2163,91 +3249,19 @@ fn render_markdown_body(
                     out = out.child(heading);
                 }
             }
-            MdBlock::Paragraph(text) => {
+            BodySegment::Markdown(text) => {
+                let link_state = state.clone();
                 out = out.child(
-                    ui_text(strip_inline(&text), 15.5, theme().text)
-                        .mt(14.0_f32)
-                        .line_height(LineHeight::Relative(1.68_f32)),
+                    markdown_view(wiki_links_to_markdown(&text))
+                        .theme(wiki_markdown_theme())
+                        .on_link(move |target| handle_markdown_link(&link_state, target)),
                 );
             }
-            MdBlock::List(ordered, items) => {
-                let mut list = div().mt(12.0_f32).flex().flex_col().gap(5.0_f32);
-                for (index, item) in items.iter().enumerate() {
-                    let marker = if ordered {
-                        format!("{}.", index + 1)
-                    } else {
-                        "•".to_owned()
-                    };
-                    list = list.child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_start()
-                            .gap(8.0_f32)
-                            .child(ui_text(marker, 14.0, theme().text_disabled).min_w(18.0_f32))
-                            .child(
-                                ui_text(strip_inline(item), 14.5, theme().text)
-                                    .line_height(LineHeight::Relative(1.6_f32)),
-                            ),
-                    );
-                }
-                out = out.child(list);
-            }
-            MdBlock::Quote(lines) => {
-                out = out.child(
-                    div()
-                        .mt(18.0_f32)
-                        .pl(14.0_f32)
-                        .border_l(2.0_f32)
-                        .border_color(theme().border)
-                        .child(
-                            ui_text(strip_inline(&lines.join("\n")), 14.0, theme().text_muted)
-                                .line_height(LineHeight::Relative(1.65_f32)),
-                        ),
-                );
-            }
-            MdBlock::Code(language, lines) => {
+            BodySegment::Code(language, lines) => {
                 let refs = lines.iter().map(String::as_str).collect::<Vec<_>>();
                 out = out.child(code_panel(&language, &refs));
             }
-            MdBlock::Table(rows) => {
-                if rows.is_empty() {
-                    continue;
-                }
-                let mut table = div()
-                    .mt(16.0_f32)
-                    .rounded(8.0_f32)
-                    .border(1.0_f32)
-                    .border_color(theme().border)
-                    .overflow_hidden()
-                    .flex()
-                    .flex_col();
-                for (row_index, row) in rows.iter().enumerate() {
-                    let mut table_row = div()
-                        .flex()
-                        .flex_row()
-                        .border_b(1.0_f32)
-                        .border_color(theme().border);
-                    for cell in row {
-                        table_row =
-                            table_row.child(div().flex_1().px(9.0_f32).py(6.0_f32).child(ui_text(
-                                strip_inline(cell),
-                                11.5,
-                                if row_index == 0 {
-                                    theme().text
-                                } else {
-                                    theme().text_muted
-                                },
-                            )));
-                    }
-                    table = table.child(table_row);
-                }
-                out = out.child(table);
-            }
-            MdBlock::Rule => {
-                out = out.child(div().h(1.0_f32).my(20.0_f32).bg(theme().border));
-            }
-            MdBlock::Embed(id) => {
+            BodySegment::Embed(id) => {
                 let snippet = workspace
                     .embeds
                     .iter()
@@ -2273,7 +3287,7 @@ fn render_markdown_body(
                     );
                 }
             }
-            MdBlock::Transclude(target) => {
+            BodySegment::Transclude(target) => {
                 let body = if matches!(state.source.get_untracked(), Source::Server) {
                     rpc("transclude", json!({ "id": target, "depth": 1 }))
                         .ok()
@@ -2308,10 +3322,40 @@ fn render_markdown_body(
                     );
                 }
             }
-            MdBlock::Interpreter(provider, args) => {
+            BodySegment::Interpreter(provider, args) => {
                 out = out.child(render_interpreter(state, workspace, &provider, &args));
             }
         }
+    }
+    if !rendered {
+        let edit = state.clone();
+        out = out.child(
+            div()
+                .mt(28.0_f32)
+                .p(20.0_f32)
+                .rounded(10.0_f32)
+                .bg(theme().surface_muted)
+                .border(1.0_f32)
+                .border_color(theme().border)
+                .flex()
+                .flex_col()
+                .gap(8.0_f32)
+                .child(ui_text("このページはまだ空です。", 13.0, theme().text))
+                .child(ui_text(
+                    "Ctrl+E で Neovide を開いて書き始められます。",
+                    11.0,
+                    theme().text_disabled,
+                ))
+                .child(
+                    icon_text_button(
+                        icons::EDIT,
+                        "Neovide で書き始める",
+                        11.5,
+                        theme().accent_text,
+                    )
+                    .on_click(move |_| edit.open_editor()),
+                ),
+        );
     }
     out
 }
@@ -2324,10 +3368,9 @@ fn render_interpreter(state: &AppState, workspace: &Workspace, provider: &str, a
     if let Some(depth) = args
         .split([',', ' '])
         .find_map(|part| part.strip_prefix("depth:"))
+        && let Ok(depth) = depth.trim().parse::<u64>()
     {
-        if let Ok(depth) = depth.trim().parse::<u64>() {
-            params["depth"] = json!(depth.min(3));
-        }
+        params["depth"] = json!(depth.min(3));
     }
     let display = if matches!(state.source.get_untracked(), Source::Server) {
         rpc("provider_call", params).ok().and_then(|value| {
@@ -2361,23 +3404,53 @@ fn render_interpreter(state: &AppState, workspace: &Workspace, provider: &str, a
 }
 
 fn code_panel(language: &str, lines: &[&str]) -> Div {
+    let plain = lines.join("\n");
     div()
         .mt(22.0_f32)
         .rounded(10.0_f32)
         .bg(theme().surface_muted)
+        .border(1.0_f32)
+        .border_color(theme().border)
         .overflow_hidden()
         .child(
             div()
                 .px(14.0_f32)
-                .py(8.0_f32)
+                .py(7.0_f32)
                 .flex()
-                .justify_between()
-                .child(mono_text(language, 10.0, theme().text_disabled)),
+                .flex_row()
+                .items_center()
+                .gap(10.0_f32)
+                .border_b(1.0_f32)
+                .border_color(rgba(0xffffff0d))
+                .child(mono_text(language, 10.0, theme().text_disabled))
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .h(22.0_f32)
+                        .px(7.0_f32)
+                        .rounded(4.0_f32)
+                        .flex()
+                        .items_center()
+                        .hover(|style| style.bg(theme().hover))
+                        .cursor(CursorIcon::Pointer)
+                        .on_click(move |_| {
+                            set_clipboard(ClipboardKind::Clipboard, plain.clone());
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(4.0_f32)
+                                .child(icon(icons::CONTENT_COPY, 13.0))
+                                .child(ui_text("コピー", 10.0, theme().text_disabled)),
+                        ),
+                ),
         )
         .child(
             div()
                 .px(14.0_f32)
-                .pb(11.0_f32)
+                .py(11.0_f32)
                 .child(code_block(lines, language)),
         )
 }
@@ -2470,12 +3543,12 @@ fn parse_markdown(body: &str, title: &str) -> Vec<MdBlock> {
             blocks.push(MdBlock::Rule);
             continue;
         }
-        if let Some(target) = line.strip_prefix("![[") {
-            if let Some(target) = target.strip_suffix("]]") {
-                index += 1;
-                blocks.push(MdBlock::Transclude(target.to_owned()));
-                continue;
-            }
+        if let Some(target) = line.strip_prefix("![[")
+            && let Some(target) = target.strip_suffix("]]")
+        {
+            index += 1;
+            blocks.push(MdBlock::Transclude(target.to_owned()));
+            continue;
         }
         let mut paragraph = Vec::new();
         while index < lines.len() {
@@ -2582,6 +3655,179 @@ fn strip_inline(text: &str) -> String {
     out.push_str(rest);
     out.replace("**", "").replace('`', "")
 }
+/// Splits one line of Markdown into styled runs: `**bold**`, `*italic*`, `~~strike~~`,
+/// `` `code` ``, `[label](url)` and `[[target|label]]`. Wiki links stay on the reading surface;
+/// they open by title through the link index, not by navigating away from the page.
+fn inline_runs(text: &str, state: Option<&AppState>) -> Vec<Run> {
+    let mut runs: Vec<Run> = Vec::new();
+    let mut plain = String::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("[[")
+            && let Some(end) = after.find("]]")
+        {
+            let inner = &after[..end];
+            let (target, label) = inner.rsplit_once('|').unwrap_or((inner, inner));
+            flush_plain(&mut runs, &mut plain);
+            let mut run = span(label).text_color(theme().accent_text).underline();
+            if let Some(state) = state {
+                let state = state.clone();
+                let target = target.trim().to_owned();
+                run = run.on_click(move || open_wiki_target(&state, &target));
+            }
+            runs.push(run.into());
+            rest = &after[end + 2..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("**")
+            && let Some(end) = after.find("**")
+            && end > 0
+        {
+            flush_plain(&mut runs, &mut plain);
+            runs.push(
+                span(&after[..end])
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme().text)
+                    .into(),
+            );
+            rest = &after[end + 2..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("~~")
+            && let Some(end) = after.find("~~")
+            && end > 0
+        {
+            flush_plain(&mut runs, &mut plain);
+            runs.push(span(&after[..end]).strikethrough().into());
+            rest = &after[end + 2..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('`')
+            && let Some(end) = after.find('`')
+            && end > 0
+        {
+            flush_plain(&mut runs, &mut plain);
+            runs.push(
+                span(&after[..end])
+                    .font_family(mono())
+                    .text_size(13.0_f32)
+                    .bg(theme().surface_muted)
+                    .text_color(theme().accent_text)
+                    .px(4.0_f32)
+                    .rounded(4.0_f32)
+                    .into(),
+            );
+            rest = &after[end + 1..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('[')
+            && let Some(close) = after.find(']')
+            && after[close + 1..].starts_with('(')
+            && let Some(paren) = after[close + 1..].find(')')
+        {
+            let label = &after[..close];
+            flush_plain(&mut runs, &mut plain);
+            runs.push(
+                span(label)
+                    .text_color(theme().accent_text)
+                    .underline()
+                    .into(),
+            );
+            rest = &after[close + 1 + paren + 1..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('*')
+            && !after.starts_with('*')
+            && let Some(end) = after.find('*')
+            && end > 0
+        {
+            flush_plain(&mut runs, &mut plain);
+            runs.push(span(&after[..end]).italic().into());
+            rest = &after[end + 1..];
+            continue;
+        }
+        let mut chars = rest.char_indices();
+        let (_, first) = chars.next().expect("non-empty");
+        plain.push(first);
+        rest = &rest[first.len_utf8()..];
+    }
+    flush_plain(&mut runs, &mut plain);
+    if runs.is_empty() {
+        runs.push(Run::Text(String::new()));
+    }
+    runs
+}
+
+/// Resolves a `[[target|label]]` by title or Content ID against the summary list, then opens it
+/// as a tab. The link parser stays free of navigation policy.
+fn open_wiki_target(state: &AppState, target: &str) {
+    let (page, fragment) = match target.split_once('#') {
+        Some((page, fragment)) => (page.trim(), Some(fragment.trim())),
+        None => (target.trim(), None),
+    };
+    let page = page.strip_prefix("id:").unwrap_or(page).trim();
+    let lower = page.to_lowercase();
+    let summaries = state.summaries.get_untracked();
+    let found = summaries.iter().find(|summary| {
+        summary.id == page
+            || summary.title == page
+            || summary.title.to_lowercase() == lower
+            || summary
+                .aliases
+                .iter()
+                .any(|alias| alias == page || alias.to_lowercase() == lower)
+    });
+    let Some(summary) = found.cloned() else {
+        return;
+    };
+    state.open_summary(&summary);
+    if let Some(fragment) = fragment.filter(|fragment| !fragment.is_empty()) {
+        let state = state.clone();
+        let fragment = fragment.to_owned();
+        request_frame(move |_| scroll_to_fragment(&state, &fragment));
+    }
+}
+
+fn scroll_to_fragment(state: &AppState, fragment: &str) {
+    let Some(workspace) = state.active_workspace() else {
+        return;
+    };
+    let items = workspace
+        .outline
+        .iter()
+        .filter(|item| item.level >= 2)
+        .collect::<Vec<_>>();
+    let needle = fragment.to_lowercase();
+    if let Some((index, item)) = items.iter().enumerate().find(|(_, item)| {
+        let title = item.title.to_lowercase();
+        title == needle || title.contains(&needle)
+    }) {
+        state.outline_active.set(index);
+        state.scroll_to_outline(index, item.line);
+    }
+}
+
+fn flush_plain(runs: &mut Vec<Run>, plain: &mut String) {
+    if !plain.is_empty() {
+        runs.push(Run::Text(std::mem::take(plain)));
+    }
+}
+
+fn rich_paragraph(
+    state: &AppState,
+    text: &str,
+    size: f32,
+    color: Color,
+    line_height: f32,
+) -> RichText {
+    rich_text(inline_runs(text, Some(state)))
+        .font_family(sans())
+        .text_size(size)
+        .text_color(color)
+        .line_height(LineHeight::Relative(line_height))
+        .flex_shrink(0.0_f32)
+}
+
 fn quote_for(workspace: &Workspace) -> Option<(String, String)> {
     for line in &workspace.before {
         if let Some(quote) = line.trim_start().strip_prefix('>') {
@@ -2608,17 +3854,20 @@ fn embed(state: &AppState, snippet: &Content) -> Div {
         .collect::<Vec<_>>()
         .join(" · ");
     let lines = snippet.body.lines().collect::<Vec<_>>();
-    let meta = if kinds.is_empty() {
-        format!(
-            "{} · {}",
-            snippet.format.clone().unwrap_or_default(),
-            language
-        )
-    } else {
-        format!("{} · {}", snippet.format.clone().unwrap_or_default(), kinds)
-    };
+    let mut badges = Vec::new();
+    if let Some(format) = snippet.format.as_deref()
+        && !format.is_empty()
+        && format != language
+    {
+        badges.push(format.to_owned());
+    }
+    if !kinds.is_empty() {
+        badges.push(kinds);
+    }
+    let meta = badges.join(" · ");
     let id = snippet.id.clone();
     let title = snippet.title.clone();
+    let body = snippet.body.clone();
     div()
         .mt(24.0_f32)
         .rounded(10.0_f32)
@@ -2627,7 +3876,7 @@ fn embed(state: &AppState, snippet: &Content) -> Div {
         .hover(|style| style.bg(theme().hover))
         .on_click({
             let state = state.clone();
-            move |_| state.open_editor_for(&id, &title)
+            move |_| state.open_id(&id, &title, "snippet")
         })
         .child(
             div()
@@ -2645,30 +3894,20 @@ fn embed(state: &AppState, snippet: &Content) -> Div {
                     meta.trim_matches(' ').trim_matches('·'),
                     10.0,
                     theme().text_disabled,
-                )),
+                ))
+                .child(div().flex_1())
+                .child(
+                    icon_button(icons::CONTENT_COPY, "コードをコピー").on_click(move |event| {
+                        event.stop_propagation();
+                        set_clipboard(ClipboardKind::Clipboard, body.clone());
+                    }),
+                ),
         )
         .child(
             div()
                 .px(14.0_f32)
                 .pb(11.0_f32)
                 .child(code_block(&lines, &language)),
-        )
-        .child(
-            div()
-                .px(14.0_f32)
-                .pb(11.0_f32)
-                .flex()
-                .justify_between()
-                .child(mono_text(
-                    short_id(&snippet.id),
-                    10.0,
-                    theme().text_disabled,
-                ))
-                .child(ui_text(
-                    format!("最終更新 {}", snippet.updated_label),
-                    10.5,
-                    theme().text_disabled,
-                )),
         )
 }
 
@@ -2719,7 +3958,24 @@ fn balance_section() -> Div {
 // Outline
 // ---------------------------------------------------------------------------
 
-fn outline_column(state: &AppState) -> Div {
+/// The outline rows, shared by the margin rail and the standalone panel.
+fn outline_key_items(state: &AppState) -> Vec<OutlineItem> {
+    let outline = state
+        .active_workspace()
+        .map(|workspace| workspace.outline)
+        .unwrap_or_default();
+    let mut items = outline
+        .iter()
+        .filter(|item| item.level >= 2)
+        .cloned()
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        items = outline;
+    }
+    items
+}
+
+fn outline_nav(state: &AppState) -> (Div, bool) {
     let outline = state
         .active_workspace()
         .map(|workspace| workspace.outline)
@@ -2733,41 +3989,46 @@ fn outline_column(state: &AppState) -> Div {
     }
     let mut nav = div().flex().flex_col().gap(1.0_f32);
     let active_outline = state.outline_active.get();
+    let keyboard_focus = state.outline_keyboard.get() || state.outline_open.get();
     for (index, item) in items.iter().enumerate() {
         let active = index == active_outline;
-        nav = nav.child(
-            div()
-                .py(5.0_f32)
-                .pl(9.0_f32)
-                .pr(6.0_f32)
-                .border_l(2.0_f32)
-                .border_color(if active {
-                    theme().accent
+        let row = div()
+            .py(5.0_f32)
+            .pl(9.0_f32 + (item.level.saturating_sub(2) as f32) * 8.0)
+            .pr(6.0_f32)
+            .border_l(2.0_f32)
+            .border_color(if active {
+                theme().accent
+            } else {
+                Color::TRANSPARENT
+            })
+            .rounded(4.0_f32)
+            .bg(if active && keyboard_focus {
+                theme().accent_muted
+            } else {
+                Color::TRANSPARENT
+            })
+            .hover(|style| style.bg(theme().surface_muted))
+            .cursor(CursorIcon::Pointer)
+            .on_click({
+                let state = state.clone();
+                let line = item.line;
+                move |_| {
+                    state.outline_active.set(index);
+                    state.scroll_to_outline(index, line);
+                    state.outline_open.set(false);
+                }
+            })
+            .child(ui_text(
+                truncate_chars(&item.title, 26),
+                if item.level >= 3 { 11.5 } else { 12.0 },
+                if active {
+                    theme().text
                 } else {
-                    Color::TRANSPARENT
-                })
-                .rounded(4.0_f32)
-                .hover(|style| style.bg(theme().surface_muted))
-                .cursor(CursorIcon::Pointer)
-                .on_click({
-                    let state = state.clone();
-                    let line = item.line;
-                    let index = index;
-                    move |_| {
-                        state.outline_active.set(index);
-                        state.scroll_to_outline(index, line);
-                    }
-                })
-                .child(ui_text(
-                    truncate_chars(&item.title, 18),
-                    if item.level >= 3 { 11.5 } else { 12.0 },
-                    if active {
-                        theme().text
-                    } else {
-                        theme().text_muted
-                    },
-                )),
-        );
+                    theme().text_muted
+                },
+            ));
+        nav = nav.child(tooltip(row, item.title.clone()));
     }
     if items.is_empty() {
         nav = nav.child(
@@ -2776,17 +4037,128 @@ fn outline_column(state: &AppState) -> Div {
                 .py(5.0_f32),
         );
     }
-    div()
+    (nav, items.is_empty())
+}
+
+fn outline_rail_fits(state: &AppState) -> bool {
+    let sidebar = if state.sidebar_open.get() { 264.0 } else { 0.0 };
+    let inspector = if state.inspector_visible.get() {
+        360.0
+    } else {
+        0.0
+    };
+    state.viewport.get() - sidebar - inspector >= 900.0
+}
+
+fn toggle_outline(state: &AppState) {
+    if outline_rail_fits(state) {
+        state.outline_open.set(false);
+        state
+            .outline_keyboard
+            .update(|focused| *focused = !*focused);
+    } else {
+        state.outline_keyboard.set(false);
+        state.outline_collapsed.set(false);
+        state.outline_open.update(|open| *open = !*open);
+    }
+}
+
+fn outline_column(state: &AppState) -> Div {
+    let (nav, empty) = outline_nav(state);
+    // A borderless rail inside the reading block, not an overlay and not an inspector tab.
+    // It only disappears when the block would leave the article too narrow; `Ctrl+3` then
+    // opens the standalone outline panel.
+    let mut rail = div()
         .w(176.0_f32)
+        .flex_shrink(0.0_f32)
         .h_full()
-        .px(14.0_f32)
-        .py(22.0_f32)
-        .border_l(1.0_f32)
-        .border_color(theme().border)
+        .px(8.0_f32)
+        .pt(54.0_f32)
+        .pb(22.0_f32)
         .flex()
         .flex_col()
-        .child(div().mb(9.0_f32).child(section_label("Outline")))
-        .child(nav)
+        .child(
+            div()
+                .mb(10.0_f32)
+                .px(9.0_f32)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(6.0_f32)
+                .child(icon(icons::TOC, 14.0).text_color(theme().text_muted))
+                .child(section_label("目次")),
+        )
+        .child(div().flex_1().min_h(0.0_f32).overflow_y_scroll().child(nav));
+    if !outline_rail_fits(state)
+        || empty
+        || state.outline_open.get()
+        || state.outline_collapsed.get()
+    {
+        rail = rail.hidden();
+    }
+    rail
+}
+
+/// The outline as its own floating surface. It is separate from the inspector so reading
+/// structure and page properties never compete for the same segmented control.
+fn outline_panel(state: &AppState) -> Show {
+    let state = state.clone();
+    show(
+        move || state.outline_open.get(),
+        move || {
+            let close = state.clone();
+            let (nav, _) = outline_nav(&state);
+            div()
+                .absolute()
+                .right(16.0_f32)
+                .top(56.0_f32)
+                .bottom(28.0_f32)
+                .w(280.0_f32)
+                .z_index(30)
+                .rounded(12.0_f32)
+                .bg(theme().overlay)
+                .border(1.0_f32)
+                .border_color(theme().border_strong)
+                .shadow_lg()
+                .px(14.0_f32)
+                .py(14.0_f32)
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(7.0_f32)
+                        .child(icon(icons::TOC, 15.0).text_color(theme().accent_text))
+                        .child(
+                            ui_text("目次", 13.0, theme().text).font_weight(FontWeight::SEMIBOLD),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .w(26.0_f32)
+                                .h(26.0_f32)
+                                .rounded(6.0_f32)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .hover(|style| style.bg(theme().surface_muted))
+                                .cursor(CursorIcon::Pointer)
+                                .on_click(move |_| close.outline_open.set(false))
+                                .child(icon(icons::CLOSE, 15.0).text_color(theme().text_disabled)),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt(10.0_f32)
+                        .flex_1()
+                        .min_h(0.0_f32)
+                        .overflow_y_scroll()
+                        .child(nav),
+                )
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2798,8 +4170,9 @@ fn inspector_column(state: &AppState) -> Option<Div> {
         return None;
     }
     let mode = state.inspector.get();
+    let close_state = state.clone();
     let mut column = div()
-        .w(340.0_f32)
+        .w(360.0_f32)
         .h_full()
         .min_h(0.0_f32)
         .px(20.0_f32)
@@ -2812,26 +4185,49 @@ fn inspector_column(state: &AppState) -> Option<Div> {
         .overflow_y_scroll()
         .child(
             div()
-                .p(2.0_f32)
-                .rounded(7.0_f32)
-                .bg(theme().surface_muted)
                 .flex()
                 .flex_row()
-                .gap(2.0_f32)
-                .child(segment_button(
-                    state,
-                    "リンク",
-                    "Ctrl+1",
-                    Inspector::Links,
-                    mode,
-                ))
-                .child(segment_button(
-                    state,
-                    "情報",
-                    "Ctrl+2",
-                    Inspector::Info,
-                    mode,
-                )),
+                .items_center()
+                .gap(6.0_f32)
+                .child(
+                    div()
+                        .flex_1()
+                        .p(2.0_f32)
+                        .rounded(7.0_f32)
+                        .bg(theme().surface_muted)
+                        .flex()
+                        .flex_row()
+                        .gap(2.0_f32)
+                        .child(segment_button(
+                            state,
+                            icons::LINK,
+                            "リンク",
+                            "Ctrl+1",
+                            Inspector::Links,
+                            mode,
+                        ))
+                        .child(segment_button(
+                            state,
+                            icons::INFO,
+                            "ページ情報",
+                            "Ctrl+2",
+                            Inspector::Info,
+                            mode,
+                        )),
+                )
+                .child(
+                    div()
+                        .w(26.0_f32)
+                        .h(26.0_f32)
+                        .rounded(6.0_f32)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover(|style| style.bg(theme().surface_muted))
+                        .cursor(CursorIcon::Pointer)
+                        .on_click(move |_| close_state.inspector_visible.set(false))
+                        .child(icon(icons::CLOSE, 16.0).text_color(theme().text_disabled)),
+                ),
         )
         .child(div().h(18.0_f32));
 
@@ -2845,13 +4241,14 @@ fn inspector_column(state: &AppState) -> Option<Div> {
 
 fn segment_button(
     state: &AppState,
+    symbol: &'static anti_webui_symbols_outlined::Symbol,
     label: &str,
     shortcut: &str,
     value: Inspector,
     current: Inspector,
 ) -> Div {
     let active = value == current;
-    div()
+    let button = div()
         .flex_1()
         .h(28.0_f32)
         .rounded(6.0_f32)
@@ -2870,6 +4267,11 @@ fn segment_button(
             let state = state.clone();
             move |_| state.inspector.set(value)
         })
+        .child(icon(symbol, 14.0).text_color(if active {
+            theme().text
+        } else {
+            theme().text_muted
+        }))
         .child(ui_text(
             label,
             11.0,
@@ -2878,16 +4280,8 @@ fn segment_button(
             } else {
                 theme().text_muted
             },
-        ))
-        .child(ui_text(
-            shortcut,
-            8.5,
-            if active {
-                theme().text_muted
-            } else {
-                theme().text_disabled
-            },
-        ))
+        ));
+    tooltip(button, format!("{label} {shortcut}"))
 }
 
 fn inspector_links(state: &AppState) -> Div {
@@ -3006,7 +4400,7 @@ fn inspector_links(state: &AppState) -> Div {
 
     let mut related = div().mt(4.0_f32).flex().flex_col();
     for summary in workspace.related.iter().take(6) {
-        related = related.child(link_row(state, summary, &summary.updated_label));
+        related = related.child(link_row(state, summary, None));
     }
     if workspace.related.is_empty() {
         related = related.child(ui_text(
@@ -3036,7 +4430,7 @@ fn inspector_links(state: &AppState) -> Div {
         theme().text_disabled,
     )));
     for summary in workspace.links.outgoing.iter().take(8) {
-        groups = groups.child(link_row(state, summary, "›"));
+        groups = groups.child(link_row(state, summary, Some(icons::CALL_MADE)));
     }
     if workspace.links.outgoing.is_empty() {
         groups = groups.child(ui_text(
@@ -3051,7 +4445,7 @@ fn inspector_links(state: &AppState) -> Div {
         theme().text_disabled,
     )));
     for summary in workspace.links.backlinks.iter().take(8) {
-        groups = groups.child(link_row(state, summary, "›"));
+        groups = groups.child(link_row(state, summary, Some(icons::LINK)));
     }
     if workspace.links.backlinks.is_empty() {
         groups = groups.child(ui_text(
@@ -3148,12 +4542,16 @@ fn ordered_groups(workspace: &Workspace) -> Vec<(Summary, Vec<TwoHop>)> {
     ordered
 }
 
-fn link_row(state: &AppState, summary: &Summary, arrow: &str) -> Div {
-    let state = state.clone();
+fn link_row(
+    state: &AppState,
+    summary: &Summary,
+    arrow: Option<&'static anti_webui_symbols_outlined::Symbol>,
+) -> Div {
+    let click_state = state.clone();
     let summary = summary.clone();
     let click_summary = summary.clone();
-    let arrow = arrow.to_owned();
-    div()
+    let updated = summary.updated_label.clone();
+    let mut row = div()
         .py(4.0_f32)
         .flex()
         .flex_row()
@@ -3163,9 +4561,13 @@ fn link_row(state: &AppState, summary: &Summary, arrow: &str) -> Div {
         .border_color(rgb(0x2f2f31))
         .hover(|style| style.bg(theme().surface_muted))
         .cursor(CursorIcon::Pointer)
-        .on_click(move |_| state.open_summary(&click_summary))
-        .child(ui_text(truncate_chars(&summary.title, 30), 11.5, theme().text_muted).flex_1())
-        .child(ui_text(arrow, 11.0, theme().text_disabled))
+        .on_click(move |_| click_state.open_summary(&click_summary))
+        .child(ui_text(truncate_chars(&summary.title, 30), 11.5, theme().text_muted).flex_1());
+    row = match arrow {
+        Some(arrow) => row.child(icon(arrow, 15.0).text_color(theme().text_disabled)),
+        None => row.child(ui_text(updated, 9.5, theme().text_disabled)),
+    };
+    context_menu(row, link_menu_entries(state, &summary))
 }
 
 fn inspector_info(state: &AppState) -> Div {
@@ -3173,7 +4575,7 @@ fn inspector_info(state: &AppState) -> Div {
     let editor = state.editor.get();
     let source = state.source.get();
     let Some(workspace) = workspace else {
-        return div().child(section_label("ページ情報")).child(
+        return div().child(section_label("基本情報")).child(
             ui_text(
                 "ページを開くと情報が表示されます。",
                 11.5,
@@ -3199,7 +4601,7 @@ fn inspector_info(state: &AppState) -> Div {
     let mut content = div()
         .flex()
         .flex_col()
-        .child(section_label("ページ情報"))
+        .child(section_label("基本情報"))
         .child(info_row("作成", &short_date(&info.created)))
         .child(info_row("更新", &info.updated))
         .child(info_row("語数", &info.word_count.to_string()))
@@ -3214,21 +4616,14 @@ fn inspector_info(state: &AppState) -> Div {
             } else {
                 &workspace.page.content_type
             },
-        ))
+        ));
+    if !workspace.page.aliases.is_empty() {
+        let aliases = workspace.page.aliases.join(", ");
+        content = content.child(info_row("エイリアス", &aliases));
+    }
+    content = content
         .child(divider())
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(4.0_f32)
-                .child(section_label("接続"))
-                .child(ui_text(
-                    format!("{}", state.providers.get().len()),
-                    10.0,
-                    theme().text_disabled,
-                )),
-        )
+        .child(section_label("連携"))
         .child(
             div()
                 .mt(6.0_f32)
@@ -3242,9 +4637,9 @@ fn inspector_info(state: &AppState) -> Div {
                 }))
                 .child(ui_text(
                     if state.providers.get().is_empty() {
-                        "provider 状態は未取得"
+                        "Interpreter は未登録"
                     } else {
-                        "ローカル provider を検出"
+                        "Interpreter を検出"
                     },
                     12.0,
                     theme().text_muted,
@@ -3253,7 +4648,7 @@ fn inspector_info(state: &AppState) -> Div {
         .child(
             ui_text(
                 if state.providers.get().is_empty() {
-                    "provider を取得できません".to_owned()
+                    "接続すると使えます。".to_owned()
                 } else {
                     state.providers.get().join(" · ")
                 },
@@ -3269,9 +4664,9 @@ fn inspector_info(state: &AppState) -> Div {
         .child(
             ui_text(
                 if let Some(warning) = &editor.warning {
-                    format!("タブを切り替えると追従します。注意: {warning}")
+                    format!("Ctrl+E で開きます。注意: {warning}")
                 } else {
-                    "タブを切り替えると、Neovide も同じ Content に追従します。".to_owned()
+                    "Ctrl+E で現在のページを Neovide で開きます。".to_owned()
                 },
                 10.5,
                 theme().text_disabled,
@@ -3287,11 +4682,21 @@ fn inspector_info(state: &AppState) -> Div {
                 .flex()
                 .items_center()
                 .gap(7.0_f32)
-                .child(dot(if source != Source::Server {
-                    rgb(0xe0af68)
-                } else {
-                    theme().success
-                }))
+                .child(
+                    icon(
+                        if source != Source::Server {
+                            icons::CLOUD_OFF
+                        } else {
+                            icons::CHECK_CIRCLE
+                        },
+                        14.0,
+                    )
+                    .text_color(if source != Source::Server {
+                        rgb(0xe0af68)
+                    } else {
+                        theme().success
+                    }),
+                )
                 .child(ui_text(
                     if source != Source::Server {
                         source_label(source)
@@ -3305,19 +4710,24 @@ fn inspector_info(state: &AppState) -> Div {
         .child(
             ui_text(
                 if source != Source::Server {
-                    format!(
-                        "サーバーに接続できないため、内蔵 fixture を表示しています。\n{}",
-                        state.boot_error.clone().unwrap_or_default()
-                    )
+                    "ローカルサーバーに接続できません。"
                 } else {
-                    format!("競合情報は未取得\n{}", state.socket)
+                    "競合情報はまだありません。"
                 },
                 10.5,
                 theme().text_disabled,
             )
-            .mt(6.0_f32)
-            .line_height(LineHeight::Relative(1.5_f32)),
-        );
+            .mt(4.0_f32)
+            .line_height(LineHeight::Relative(1.45_f32)),
+        )
+        .child(if source != Source::Server {
+            let retry = state.clone();
+            icon_text_button(icons::REFRESH, "再試行", 10.5, theme().accent_text)
+                .mt(6.0_f32)
+                .on_click(move |_| retry.refresh())
+        } else {
+            div()
+        });
     if let Some(error) = &editor.error {
         content = content.child(
             ui_text(error, 10.5, rgb(0xff453a))
@@ -3367,42 +4777,58 @@ fn inspector_info(state: &AppState) -> Div {
                         .child(ui_text("タグ", 11.5, theme().text_muted)),
                 ),
         );
-        content = content.child(divider()).child(
-            div()
-                .h(28.0_f32)
-                .px(9.0_f32)
-                .rounded(5.0_f32)
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(if armed {
-                    rgb(0x5a1d1d)
-                } else {
-                    theme().surface_muted
-                })
-                .border(1.0_f32)
-                .border_color(if armed { rgb(0xff453a) } else { theme().border })
-                .hover(|style| style.bg(if armed { rgb(0x7a2424) } else { theme().hover }))
-                .on_click({
-                    let state = state.clone();
-                    move |_| {
-                        if state.delete_armed.get_untracked() {
-                            state.delete_content(&id, rev);
-                        } else {
-                            state.delete_armed.set(true);
-                        }
-                    }
-                })
-                .child(ui_text(
-                    if armed { "本当に削除" } else { "削除" },
-                    11.5,
-                    if armed {
-                        rgb(0xffb4b4)
-                    } else {
-                        theme().text_muted
-                    },
-                )),
-        );
+        content = content.child(divider());
+        if armed {
+            let confirm = state.clone();
+            let cancel = state.clone();
+            content = content
+                .child(ui_text("削除しますか？元に戻せません。", 11.0, rgb(0xff8f8a)).mb(8.0_f32))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(6.0_f32)
+                        .child(
+                            div()
+                                .flex_1()
+                                .h(28.0_f32)
+                                .rounded(5.0_f32)
+                                .bg(rgb(0x5a1d1d))
+                                .border(1.0_f32)
+                                .border_color(rgb(0xff453a))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .hover(|style| style.bg(rgb(0x7a2424)))
+                                .cursor(CursorIcon::Pointer)
+                                .on_click(move |_| {
+                                    confirm.delete_content(&id, rev);
+                                    confirm.delete_armed.set(false);
+                                })
+                                .child(ui_text("削除", 11.5, rgb(0xffb4b4))),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .h(28.0_f32)
+                                .rounded(5.0_f32)
+                                .bg(theme().surface_muted)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .hover(|style| style.bg(theme().hover))
+                                .cursor(CursorIcon::Pointer)
+                                .on_click(move |_| cancel.delete_armed.set(false))
+                                .child(ui_text("キャンセル", 11.5, theme().text_muted)),
+                        ),
+                );
+        } else {
+            let arm = state.clone();
+            content = content.child(
+                icon_text_button(icons::DELETE, "削除", 11.5, rgb(0xe5484d))
+                    .on_click(move |_| arm.delete_armed.set(true)),
+            );
+        }
     }
     content
 }
@@ -3422,55 +4848,302 @@ fn info_row(label: &str, value: &str) -> Div {
 // Status bar
 // ---------------------------------------------------------------------------
 
-fn status_bar(state: &AppState) -> Div {
-    let editor = state.editor.get();
-    let source = state.source.get();
-    let title = state
-        .active_tab()
-        .map(|tab| tab.title)
-        .unwrap_or_else(|| "Wiki".to_owned());
-    let error = editor.error.clone();
+/// A short confirmation for actions that otherwise have no visible result, such as copying a
+/// wiki link from a context menu.
+fn notify(state: &AppState, message: impl Into<String>) {
+    let message = message.into();
+    state.toast.set(Some(message.clone()));
+    let toast = state.toast;
+    set_timeout(Duration::from_millis(1900), move || {
+        if toast.get_untracked().as_deref() == Some(message.as_str()) {
+            toast.set(None);
+        }
+    });
+}
+
+fn toast(state: &AppState) -> Show {
+    let state = state.clone();
+    show(
+        move || state.toast.get().is_some(),
+        move || {
+            let message = state.toast.get().unwrap_or_default();
+            div()
+                .absolute()
+                .left(0.0_f32)
+                .right(0.0_f32)
+                .bottom(80.0_f32)
+                .z_index(60)
+                .flex()
+                .justify_center()
+                .pointer_events_none()
+                .child(
+                    div()
+                        .px(12.0_f32)
+                        .h(32.0_f32)
+                        .rounded(8.0_f32)
+                        .bg(theme().overlay)
+                        .border(1.0_f32)
+                        .border_color(theme().border_strong)
+                        .shadow_lg()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(7.0_f32)
+                        .child(icon(icons::CHECK_CIRCLE, 15.0).text_color(theme().success))
+                        .child(ui_text(message, 11.5, theme().text)),
+                )
+        },
+    )
+}
+
+fn shortcut_row(label: &str, keys: &str) -> Div {
     div()
-        .h(26.0_f32)
-        .px(20.0_f32)
+        .h(27.0_f32)
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
-        .bg(theme().surface)
+        .gap(18.0_f32)
+        .border_b(1.0_f32)
+        .border_color(rgba(0xffffff08))
+        .child(ui_text(label, 12.0, theme().text_muted))
+        .child(kbd(keys))
+}
+
+fn shortcut_group(title: &str, rows: &[(&str, &str)]) -> Div {
+    let mut group = div()
+        .flex()
+        .flex_col()
+        .child(div().mb(6.0_f32).child(section_label(title)));
+    for (label, keys) in rows {
+        group = group.child(shortcut_row(label, keys));
+    }
+    group
+}
+
+fn shortcuts_overlay(state: &AppState) -> Show {
+    let state = state.clone();
+    show(
+        move || state.shortcuts.get(),
+        move || {
+            let close = state.clone();
+            div()
+                .absolute()
+                .left(0.0_f32)
+                .right(0.0_f32)
+                .top(0.0_f32)
+                .bottom(0.0_f32)
+                .z_index(45)
+                .bg(rgba(0x000000a6))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_click(move |_| close.shortcuts.set(false))
+                .child(
+                    div()
+                        .w(620.0_f32)
+                        .p(22.0_f32)
+                        .rounded(16.0_f32)
+                        .bg(theme().overlay)
+                        .border(1.0_f32)
+                        .border_color(theme().border_strong)
+                        .shadow_lg()
+                        .on_click(|event| event.stop_propagation())
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(9.0_f32)
+                                .child(icon(icons::KEYBOARD, 20.0).text_color(theme().accent_text))
+                                .child(
+                                    ui_text("キーボードショートカット", 17.0, theme().text)
+                                        .font_weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .w(28.0_f32)
+                                        .h(28.0_f32)
+                                        .rounded(7.0_f32)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .hover(|style| style.bg(theme().surface_muted))
+                                        .cursor(CursorIcon::Pointer)
+                                        .on_click({
+                                            let state = state.clone();
+                                            move |_| state.shortcuts.set(false)
+                                        })
+                                        .child(
+                                            icon(icons::CLOSE, 16.0)
+                                                .text_color(theme().text_disabled),
+                                        ),
+                                ),
+                        )
+                        .child(div().h(18.0_f32))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(32.0_f32)
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(14.0_f32)
+                                        .child(shortcut_group(
+                                            "移動",
+                                            &[
+                                                ("検索", "Ctrl+K"),
+                                                ("クイックオープン", "Ctrl+P"),
+                                                ("戻る", "Ctrl+["),
+                                                ("進む", "Ctrl+]"),
+                                            ],
+                                        ))
+                                        .child(shortcut_group(
+                                            "ページ",
+                                            &[
+                                                ("新規ページ", "Ctrl+N"),
+                                                ("次のタブ", "Ctrl+Tab"),
+                                                ("前のタブ", "Ctrl+Shift+Tab"),
+                                                ("タブを閉じる", "Ctrl+W"),
+                                                ("再読み込み", "Ctrl+R"),
+                                            ],
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(14.0_f32)
+                                        .child(shortcut_group(
+                                            "表示",
+                                            &[
+                                                ("情報パネル", "Ctrl+I"),
+                                                ("サイドバー", "Ctrl+\\"),
+                                                ("リンク", "Ctrl+1"),
+                                                ("情報タブ", "Ctrl+2"),
+                                                ("目次", "Ctrl+3"),
+                                                ("2-hop リンク", "Ctrl+Alt+L"),
+                                            ],
+                                        ))
+                                        .child(shortcut_group(
+                                            "編集",
+                                            &[("Neovide で編集", "Ctrl+E")],
+                                        )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .mt(18.0_f32)
+                                .pt(12.0_f32)
+                                .border_t(1.0_f32)
+                                .border_color(theme().border)
+                                .flex()
+                                .justify_between()
+                                .child(ui_text(
+                                    "入力中は一部のショートカットを無効にします。",
+                                    10.0,
+                                    theme().text_disabled,
+                                ))
+                                .child(ui_text("? / Esc で閉じる", 10.0, theme().text_disabled)),
+                        ),
+                )
+        },
+    )
+}
+
+fn status_bar(state: &AppState) -> Div {
+    let editor = state.editor.get();
+    let source = state.source.get();
+    let error = editor.error.clone();
+    let source_label = match source {
+        Source::Server => "ローカルサーバー接続中",
+        Source::Offline => "オフラインキャッシュ",
+        Source::Fallback => "内蔵サンプル",
+        Source::Empty => "未接続",
+    };
+    let open = state.clone();
+    let editor_status = div()
+        .h(22.0_f32)
+        .px(7.0_f32)
+        .rounded(5.0_f32)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(6.0_f32)
+        .hover(|style| style.bg(theme().surface_muted))
+        .cursor(CursorIcon::Pointer)
+        .on_click(move |_| open.open_editor())
+        .access(|access| access.label("Neovide で編集 Ctrl+E"))
+        .child(icon(icons::EDIT, 13.0).text_color(if editor.attached {
+            theme().success
+        } else {
+            theme().text_disabled
+        }))
+        .child(ui_text(
+            if editor.attached {
+                "Neovide 接続済み"
+            } else {
+                "Neovide 未接続"
+            },
+            10.0,
+            if editor.attached {
+                theme().success_text
+            } else {
+                theme().text_disabled
+            },
+        ))
+        .child(kbd("Ctrl+E"));
+    div()
+        .h(28.0_f32)
+        .px(16.0_f32)
+        .z_index(25)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .bg(theme().page)
         .border_t(1.0_f32)
         .border_color(theme().border)
         .child(
             div()
+                .flex_1()
+                .min_w(0.0_f32)
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(7.0_f32)
-                .child(dot(if source != Source::Server {
-                    rgb(0xe0af68)
-                } else {
-                    theme().success
-                }))
-                .child(ui_text(
-                    if source != Source::Server {
-                        source_label(source)
+                .child(
+                    icon(
+                        if source != Source::Server {
+                            icons::CLOUD_OFF
+                        } else {
+                            icons::CHECK_CIRCLE
+                        },
+                        14.0,
+                    )
+                    .text_color(if source != Source::Server {
+                        rgb(0xe0af68)
                     } else {
-                        "閲覧のみ  ·  保存は Neovim"
-                    },
-                    9.5,
-                    theme().text_muted,
-                ))
+                        theme().success
+                    }),
+                )
+                .child(ui_text(source_label, 10.0, theme().text_muted))
                 .child(if let Some(error) = error {
-                    ui_text(truncate_chars(&error, 70), 9.5, rgb(0xff453a))
+                    ui_text(
+                        format!("· {}", truncate_chars(&error, 52)),
+                        10.0,
+                        rgb(0xff6b62),
+                    )
                 } else {
-                    ui_text("", 9.5, theme().text_disabled)
+                    ui_text("", 10.0, theme().text_disabled)
                 }),
         )
-        .child(ui_text(
-            format!("provider 未取得  ·  {title}  ·  {}", editor.detail),
-            9.5,
-            theme().text_disabled,
-        ))
+        .child(tooltip(editor_status, "Neovide で編集 Ctrl+E"))
 }
 
 // ---------------------------------------------------------------------------
@@ -4125,12 +5798,54 @@ fn main() {
     let mut page = None;
     let mut search = false;
     let mut edit = false;
+    let mut shelf = false;
+    let mut inspector = None;
+    let mut tab = None;
+    let mut shortcuts = false;
+    let mut query_text = None;
+    let mut focus_outline = false;
+    let mut focus_tabs = false;
+    let mut outline = false;
+    let mut empty = false;
+    let mut width = WINDOW_WIDTH;
+    let mut height = WINDOW_HEIGHT;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--snapshot" => snapshot_path = Some(args.next().expect("--snapshot requires a path")),
             "--page" => page = Some(args.next().expect("--page requires a title")),
             "--search" => search = true,
             "--edit" => edit = true,
+            "--shelf" => shelf = true,
+            "--links" => inspector = Some(Inspector::Links),
+            "--info" => inspector = Some(Inspector::Info),
+            "--empty" => empty = true,
+            "--outline" => outline = true,
+            "--query" => query_text = args.next(),
+            "--focus-outline" => focus_outline = true,
+            "--focus-tabs" => focus_tabs = true,
+            "--shortcuts" => shortcuts = true,
+            "--tab" => {
+                tab = Some(
+                    args.next()
+                        .expect("--tab requires a number")
+                        .parse::<usize>()
+                        .expect("--tab must be a number"),
+                );
+            }
+            "--width" => {
+                width = args
+                    .next()
+                    .expect("--width requires a number")
+                    .parse()
+                    .expect("--width must be a number");
+            }
+            "--height" => {
+                height = args
+                    .next()
+                    .expect("--height requires a number")
+                    .parse()
+                    .expect("--height must be a number");
+            }
             other => panic!("unknown argument: {other}"),
         }
     }
@@ -4138,35 +5853,62 @@ fn main() {
 
     let _ = fonts();
     set_theme(app_theme());
-    let state = boot(snapshot);
-    if let Some(title) = page {
-        if let Some(summary) = state
+    let state = boot(snapshot, shelf);
+    if let Some(index) = tab {
+        state.switch_tab(index);
+    }
+    if shortcuts {
+        state.shortcuts.set(true);
+    }
+    if outline {
+        state.outline_open.set(true);
+    }
+    if focus_outline {
+        state.outline_keyboard.set(true);
+    }
+    if focus_tabs {
+        state.switch_tab(1);
+        state.tab_focus.set(true);
+    }
+    if empty {
+        state.summaries.set(Vec::new());
+        state.tabs.set(Vec::new());
+        state.active.set(0);
+        state.source.set(Source::Empty);
+    }
+    if let Some(title) = page
+        && let Some(summary) = state
             .summaries
             .get_untracked()
             .into_iter()
             .find(|summary| summary.title == title)
-        {
-            state.open_summary(&summary);
-        }
+    {
+        state.open_summary(&summary);
     }
     if search {
         state.open_palette(PaletteMode::Search);
+        if let Some(query) = query_text {
+            state.query.set(query);
+            state.refresh_results();
+        }
     }
     if edit {
         state.open_editor();
     }
+    if let Some(mode) = inspector {
+        state.inspector.set(mode);
+        state.inspector_visible.set(true);
+    }
 
     if let Some(out) = snapshot_path {
-        anti_webui::app::headless::render_png(out, WINDOW_WIDTH, WINDOW_HEIGHT, 1.0, move || {
-            layout(&state)
-        })
-        .unwrap();
+        anti_webui::app::headless::render_png(out, width, height, 1.0, move || layout(&state))
+            .unwrap();
         return;
     }
 
     App::new()
         .title("Harmion Wiki")
-        .size(WINDOW_WIDTH as i32, WINDOW_HEIGHT as i32)
+        .size(width as i32, height as i32)
         .run(move || layout(&state))
         .unwrap();
 }
@@ -4206,5 +5948,38 @@ mod gui_markdown_tests {
         assert_eq!(strip_inline("see [[p-goals|目標]] now"), "see 目標 now");
         assert_eq!(strip_inline("[[p-home]]"), "p-home");
         assert_eq!(strip_inline("**bold** and `code`"), "bold and code");
+    }
+
+    #[test]
+    fn splits_wiki_blocks_out_of_markdown() {
+        let body = "# Title\n\nintro\n\n## Section\n\ntext\n\n```rust\nfn main() {}\n```\n\n!```ledger||abc\n```\n\n![[p-home]]\n";
+        let segments = split_segments(body, "Title");
+        assert!(segments.iter().any(
+            |segment| matches!(segment, BodySegment::Heading(2, title) if title == "Section")
+        ));
+        assert!(segments.iter().any(
+            |segment| matches!(segment, BodySegment::Markdown(text) if text.contains("intro"))
+        ));
+        assert!(segments.iter().any(
+            |segment| matches!(segment, BodySegment::Code(language, _) if language == "rust")
+        ));
+        assert!(
+            segments
+                .iter()
+                .any(|segment| matches!(segment, BodySegment::Embed(id) if id == "abc"))
+        );
+        assert!(
+            segments
+                .iter()
+                .any(|segment| matches!(segment, BodySegment::Transclude(id) if id == "p-home"))
+        );
+    }
+
+    #[test]
+    fn rewrites_wiki_links_for_markdown_view() {
+        assert_eq!(
+            wiki_links_to_markdown("[[p-goals|目標]] and [[p-home]]"),
+            "[目標](wiki:p-goals) and [p-home](wiki:p-home)"
+        );
     }
 }

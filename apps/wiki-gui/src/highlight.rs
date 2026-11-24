@@ -215,9 +215,7 @@ fn rust(line: &str) -> Vec<Token> {
                 Class::Keyword
             } else if matches!(word, "true" | "false") {
                 Class::Bool
-            } else if after.starts_with('!') {
-                Class::Func
-            } else if after.starts_with('(') && !word.is_empty() {
+            } else if after.starts_with('!') || (after.starts_with('(') && !word.is_empty()) {
                 Class::Func
             } else if word.chars().next().is_some_and(char::is_uppercase) {
                 Class::Type
@@ -381,13 +379,7 @@ fn json(line: &str) -> Vec<Token> {
                 ch.is_ascii_punctuation() || ch == ' ' || ch == '\t'
             });
             let run = &line[index..end];
-            let class =
-                if run.contains('{') || run.contains('}') || run.contains('[') || run.contains(']')
-                {
-                    Class::Punct
-                } else {
-                    Class::Punct
-                };
+            let class = Class::Punct;
             tokens.push(Token::new(run, class));
             index = end;
             continue;

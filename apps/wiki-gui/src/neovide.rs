@@ -95,6 +95,33 @@ impl Manager {
         })
     }
 
+    /// Ask Neovim to switch to `id` and put the cursor on `line`, without taking focus. This is
+    /// the GUI-to-editor half of position sync; scrolling in Neovim does not move the GUI yet.
+    pub fn goto_line(&self, id: &str, line: usize) -> Result<(), String> {
+        if !self.has_server() {
+            return Ok(());
+        }
+        let mut remote = Command::new("nvim");
+        remote.args([
+            "--server",
+            &self.socket.display().to_string(),
+            "--remote-send",
+            &format!(":WikiGoTo {id} {}<CR>", line.max(1)),
+        ]);
+        sanitize_editor_env(&mut remote, &self.socket);
+        let output = remote
+            .output()
+            .map_err(|error| format!("nvim --server failed: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "nvim --server exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
+
     /// Focus the Neovide window that belongs to this Wiki session.
     pub fn focus_window(&self, _title: &str) -> Result<(), String> {
         let windows = niri_windows()?;
@@ -489,7 +516,9 @@ mod tests {
     fn editor_env_gets_absolute_server_and_socket() {
         let mut command = Command::new("true");
         sanitize_editor_env(&mut command, Path::new("/tmp/harmion-wiki-nvim.sock"));
-        let envs = command.get_envs().collect::<std::collections::BTreeMap<_, _>>();
+        let envs = command
+            .get_envs()
+            .collect::<std::collections::BTreeMap<_, _>>();
         if let Some(server) = envs
             .get(std::ffi::OsStr::new("WIKI_SERVER_CMD"))
             .and_then(|value| *value)
