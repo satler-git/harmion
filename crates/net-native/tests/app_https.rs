@@ -248,6 +248,7 @@ async fn pinned_app_api_save_replay_permissions_and_revocation() {
                     manage_nodes: false,
                 },
                 revoked: true,
+                expires_at: None,
             })
             .unwrap(),
         )

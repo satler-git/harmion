@@ -410,6 +410,7 @@ fn approval_and_grants_survive_restart_and_revoked_provider_is_unavailable() {
         provider_id,
         Grants::default(),
         false,
+        None,
     )
     .unwrap();
     assert!(matches!(
@@ -578,6 +579,7 @@ fn manual_registration_and_approval_respect_provide_names() {
             ..Grants::default()
         },
         false,
+        None,
     )
     .unwrap();
     assert!(matches!(

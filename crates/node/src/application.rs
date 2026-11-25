@@ -138,15 +138,22 @@ pub fn change_grants(
     id: AppId,
     grants: Grants,
     revoked: bool,
+    expires_at: Option<i64>,
 ) -> Result<(), Error> {
     validate_grants(&grants)?;
+    if let Some(expires) = expires_at {
+        const MAX_TTL_MICROS: i64 = 10 * 365 * 24 * 60 * 60 * 1_000_000;
+        if expires <= now || expires > now.saturating_add(MAX_TTL_MICROS) {
+            return Err(Error::InvalidRequest);
+        }
+    }
     store.transaction(|tx| {
         let principal = authenticate(tx, credential, now)?;
         if !principal.app.grants.manage_apps {
             return Err(Error::Forbidden);
         }
         let mut app = tx.app_by_id(id)?.ok_or(Error::NotFound)?;
-        if app.grants == grants && app.revoked == revoked {
+        if app.grants == grants && app.revoked == revoked && expires_at.is_none() {
             return Ok(());
         }
         if tx.oauth_client(app.id)?.is_some() {
@@ -157,6 +164,9 @@ pub fn change_grants(
         }
         app.grants = grants;
         app.revoked = revoked;
+        if let Some(expires) = expires_at {
+            app.expires_at = expires;
+        }
         tx.update_app(&app)?;
         crate::interpreter::registry::reconcile_grants(tx, app.id, &app.grants)
     })
@@ -601,5 +611,21 @@ pub fn save_with_outcome(
             save_response(tx, &graph, &result, request.content_id, grants)?,
             true,
         ))
+    })
+}
+
+/// Lists app credentials for the management surface. Reading the list requires
+/// `manage_apps`; it never exposes verifiers or tokens.
+pub fn list_apps(
+    store: &mut impl Store,
+    credential: &Credential,
+    now: i64,
+) -> Result<Vec<crate::access::App>, Error> {
+    store.transaction(|tx| {
+        let principal = authenticate(tx, credential, now)?;
+        if !principal.app.grants.manage_apps {
+            return Err(Error::Forbidden);
+        }
+        tx.apps()
     })
 }

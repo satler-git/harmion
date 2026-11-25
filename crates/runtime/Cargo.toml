@@ -1,0 +1,26 @@
+[package]
+name = "harmion-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+harmion-domain = { path = "../domain" }
+harmion-protocol = { path = "../protocol" }
+harmion-node = { path = "../node" }
+harmion-store-sqlite = { path = "../store-sqlite" }
+harmion-net-native = { path = "../net-native" }
+harmion-local = { path = "../local" }
+
+[dev-dependencies]
+harmion-client = { path = "../client" }
+
+[lints]
+workspace = true

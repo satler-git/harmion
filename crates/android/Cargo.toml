@@ -1,0 +1,25 @@
+[package]
+name = "harmion-android"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+jni = "0.22.4"
+harmion-protocol = { path = "../protocol" }
+harmion-runtime = { path = "../runtime" }
+harmion-node = { path = "../node" }
+harmion-net-native = { path = "../net-native" }
+harmion-store-sqlite = { path = "../store-sqlite" }
+
+# The JNI boundary is the only unsafe code in this crate: raw pointers and
+# exported symbols. Everything else stays safe.
+[lints.rust]
+unsafe_code = "allow"

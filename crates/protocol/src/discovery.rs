@@ -82,6 +82,9 @@ pub struct ChangeGrantsRequest {
     pub app_id: String,
     pub grants: GrantSpec,
     pub revoked: bool,
+    /// Optional new authorization deadline (unix micros). Omit to keep it.
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

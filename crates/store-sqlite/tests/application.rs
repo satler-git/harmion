@@ -499,6 +499,7 @@ fn retry_redacts_revoked_read_and_current_out_of_scope_content() {
             ..Grants::default()
         },
         false,
+        None,
     )
     .unwrap();
     assert!(
@@ -518,6 +519,7 @@ fn retry_redacts_revoked_read_and_current_out_of_scope_content() {
             ..Grants::default()
         },
         false,
+        None,
     )
     .unwrap();
     let current = t.get(&admin).edit_token;
@@ -541,6 +543,7 @@ fn retry_redacts_revoked_read_and_current_out_of_scope_content() {
         user_id,
         read_write(),
         true,
+        None,
     )
     .unwrap();
     assert!(matches!(
@@ -1279,9 +1282,19 @@ fn subscription_connects_frozen_snapshot_to_changes_and_rechecks_read() {
         app_id,
         Grants::default(),
         false,
+        None,
     )
     .unwrap();
-    app::change_grants(&mut t.store, t.host.now, &admin, app_id, grants, false).unwrap();
+    app::change_grants(
+        &mut t.store,
+        t.host.now,
+        &admin,
+        app_id,
+        grants,
+        false,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         subscriptions
             .resume(&mut t.store, &mut t.host, &reader, subscription, cursor)
@@ -1529,6 +1542,7 @@ fn export_pins_all_content_at_start_and_reauthorizes_each_read() {
         owner_id,
         Grants::administrator(),
         true,
+        None,
     )
     .unwrap();
     assert!(matches!(
@@ -1598,6 +1612,7 @@ fn granting_read_later_does_not_add_historical_content_to_a_write_only_receipt()
         writer_id,
         read_write(),
         false,
+        None,
     )
     .unwrap();
     t.restart();
@@ -1675,4 +1690,78 @@ fn retention_reclaims_old_tokens_and_receipts_and_keeps_grandfathered_rows() {
         ),
         Err(Error::TokenExpired)
     ));
+}
+
+#[test]
+fn admin_can_list_app_credentials_without_exposing_secrets() {
+    let mut t = Test::new();
+    let (id, _credential) = t.issue(read_write());
+    let apps = app::list_apps(&mut t.store, &t.admin, t.host.now).unwrap();
+    // The bootstrap credential is itself an app; the issued one is also listed.
+    assert_eq!(apps.len(), 2);
+    let issued = apps
+        .iter()
+        .find(|app| app.id == id)
+        .expect("issued app listed");
+    assert!(!issued.revoked);
+    assert_eq!(issued.grants.read, read_write().read);
+    assert_eq!(issued.grants.write, read_write().write);
+    // A content-only credential cannot enumerate app credentials.
+    let (_, limited) = t.issue(Grants {
+        read: Some(wiki()),
+        ..Grants::default()
+    });
+    assert!(matches!(
+        app::list_apps(&mut t.store, &limited, t.host.now),
+        Err(Error::Forbidden)
+    ));
+}
+
+#[test]
+fn change_grants_can_extend_expiry_within_bounds() {
+    let mut t = Test::new();
+    let (id, _) = t.issue(read_write());
+    let admin = t.admin.clone();
+    let now = t.host.now;
+    app::change_grants(
+        &mut t.store,
+        now,
+        &admin,
+        id,
+        read_write(),
+        false,
+        Some(now + 1_000_000),
+    )
+    .unwrap();
+    let app = t
+        .store
+        .transaction(|tx| tx.app_by_id(id))
+        .unwrap()
+        .expect("app");
+    assert_eq!(app.expires_at, now + 1_000_000);
+    // Past deadlines and absurd extensions are rejected.
+    assert!(
+        app::change_grants(
+            &mut t.store,
+            now,
+            &admin,
+            id,
+            read_write(),
+            false,
+            Some(now - 1),
+        )
+        .is_err()
+    );
+    assert!(
+        app::change_grants(
+            &mut t.store,
+            now,
+            &admin,
+            id,
+            read_write(),
+            false,
+            Some(now + 20 * 365 * 24 * 60 * 60 * 1_000_000),
+        )
+        .is_err()
+    );
 }

@@ -15,6 +15,7 @@ harmion-protocol = { path = "../../crates/protocol" }
 harmion-node = { path = "../../crates/node" }
 harmion-store-sqlite = { path = "../../crates/store-sqlite" }
 harmion-net-native = { path = "../../crates/net-native" }
+harmion-runtime = { path = "../../crates/runtime" }
 harmion-local = { path = "../../crates/local" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

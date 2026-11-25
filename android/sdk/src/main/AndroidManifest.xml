@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      Consumers bind to the Harmion node app by explicit component. Android 11
+      package visibility requires this declaration to be merged into the
+      consuming app's manifest.
+    -->
+    <queries>
+        <package android:name="org.harmion.android" />
+    </queries>
+</manifest>

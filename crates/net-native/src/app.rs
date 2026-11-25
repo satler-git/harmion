@@ -670,6 +670,12 @@ async fn dispatch<S: Store + Send + 'static>(
         let app = AppId(unhex(&request.app_id)?);
         let grants = Grants::from(request.grants.clone());
         let revoked = request.revoked;
+        let expires_at = request
+            .expires_at
+            .as_deref()
+            .map(str::parse::<i64>)
+            .transpose()
+            .map_err(|_| invalid())?;
         let grants_for_db = grants.clone();
         store
             .run(move |s| {
@@ -680,6 +686,7 @@ async fn dispatch<S: Store + Send + 'static>(
                     app,
                     grants_for_db,
                     revoked,
+                    expires_at,
                 )
             })
             .await?;
@@ -910,6 +917,23 @@ async fn dispatch<S: Store + Send + 'static>(
                 let items: Vec<_> = page.items.iter().map(read_view_json).collect();
                 Ok(json!({"items":items,"next":page.next.map(|cursor| hex(&cursor.0))}))
             },
+            "apps" => {
+                let apps = application::list_apps(s, &credential, host.now_micros())?;
+                let mut output = Vec::with_capacity(apps.len());
+                for app in apps {
+                    let client = s.transaction(|tx| tx.oauth_client(app.id))?;
+                    output.push(json!({
+                        "app_id": hex(&app.id.0),
+                        "expires_at": app.expires_at.to_string(),
+                        "revoked": app.revoked,
+                        "grants": harmion_protocol::GrantSpec::from(app.grants.clone()),
+                        "name": client.as_ref().map(|c| c.name.clone()),
+                        "redirect_uri": client.as_ref().map(|c| c.redirect.clone()),
+                        "client_id": client.as_ref().map(|c| hex(&c.id.0)),
+                    }));
+                }
+                Ok(json!({"apps": output}))
+            }
             "conflicts" => Ok(conflict_view_json(&application::get_conflicts(s, &mut host, &credential, ContentId(id(&body)?))?)),
             "inspect" => Ok(conflict_view_json(&application::inspect(s, &mut host, &credential, ContentId(id(&body)?))?)),
             "merge-input" => {
@@ -973,7 +997,7 @@ async fn dispatch<S: Store + Send + 'static>(
                     },
                     "permissions" => json!(GrantSpec::from(permissions)),
                     _ => {
-                        let mut methods = vec!["get","query","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","provision-manifest","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants","interpreter-list","interpreter-describe","interpreter-register","interpreter-approve","interpreter-call","interpreter-call-stream","interpreter-cancel"];
+                        let mut methods = vec!["get","query","apps","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","provision-manifest","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants","interpreter-list","interpreter-describe","interpreter-register","interpreter-approve","interpreter-call","interpreter-call-stream","interpreter-cancel"];
                         methods.extend(["metrics", "sync-status", "owner-status", "owner-challenge", "owner-enroll", "owner-revoke", "owner-recover", "owner-enforce"]);
                         if oauth.is_some() { methods.extend(["oauth-register","oauth-consent","oauth-preview"]); }
                         json!({"version":1,"oauth":oauth.is_some(),"query":true,"subscriptions":true,

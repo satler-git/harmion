@@ -264,9 +264,23 @@ pub(crate) async fn handle_admin<S: Store + Send + 'static>(
             let id = harmion_protocol::connect::connection_id(&request.connection_id)?;
             let allow = request.allow;
             let replace = request.replace;
+            let expires_at = request
+                .expires_at
+                .as_deref()
+                .map(str::parse::<i64>)
+                .transpose()
+                .map_err(|_| harmion_node::Error::InvalidRequest)?;
             let result = store
                 .run(move |s| {
-                    node_connect::approve(s, &mut SystemHost, &credential, id, allow, replace)
+                    node_connect::approve(
+                        s,
+                        &mut SystemHost,
+                        &credential,
+                        id,
+                        allow,
+                        replace,
+                        expires_at,
+                    )
                 })
                 .await?;
             for provider in &result.replaced_providers {

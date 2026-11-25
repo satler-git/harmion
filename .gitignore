@@ -14,3 +14,23 @@ __pycache__/
 
 /.deploy-secrets/
 /.wrangler/
+
+# Android: native libraries are built by android/scripts/build-rust.sh, and
+# Gradle produces build outputs under each module.
+/android/app/src/main/jniLibs/
+/android/sdk/src/main/jniLibs/
+/android/build/
+/android/app/build/
+/android/sdk/build/
+/android/.gradle/
+/android/local.properties
+/android/.kotlin/
+/android/app/.cxx/
+/android/sdk/.cxx/
+/android/captures/
+/android/.idea/
+*.iml
+*.hprof
+*.jks
+*.keystore
+keystore.properties

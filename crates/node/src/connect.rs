@@ -233,7 +233,15 @@ pub fn approve(
     id: ConnectionId,
     allow: bool,
     replace: bool,
+    expires_at: Option<i64>,
 ) -> Result<Approval, Error> {
+    if let Some(expires) = expires_at {
+        const MAX_TTL_MICROS: i64 = 10 * 365 * 24 * 60 * 60 * 1_000_000;
+        let now = host.now_micros();
+        if expires <= now || expires > now.saturating_add(MAX_TTL_MICROS) {
+            return Err(Error::InvalidRequest);
+        }
+    }
     store.transaction(|tx| {
         let principal = authenticate(tx, owner, host.now_micros())?;
         if !principal.app.grants.manage_apps {
@@ -289,10 +297,22 @@ pub fn approve(
         if app.revoked || now >= app.expires_at {
             return Err(Error::Unauthenticated);
         }
-        if app.grants != request.grants {
+        let grants_changed = app.grants != request.grants;
+        if grants_changed {
             tx.revoke_oauth_app(app.id)?;
             app.grants = request.grants.clone();
+        }
+        let mut app_changed = grants_changed;
+        if let Some(expires) = expires_at
+            && app.expires_at != expires
+        {
+            app.expires_at = expires;
+            app_changed = true;
+        }
+        if app_changed {
             tx.update_app(&app)?;
+        }
+        if grants_changed {
             registry::reconcile_grants(tx, app.id, &app.grants)?;
         }
         let mut providers = Vec::new();

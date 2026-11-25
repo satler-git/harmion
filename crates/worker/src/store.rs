@@ -735,6 +735,9 @@ impl Transaction for WorkerTransaction<'_> {
     fn insert_app(&mut self, _app: &App) -> Result<(), Error> {
         Err(Error::Storage(UNSUPPORTED.into()))
     }
+    fn apps(&mut self) -> Result<Vec<App>, Error> {
+        Err(Error::Storage(UNSUPPORTED.into()))
+    }
     fn update_app(&mut self, _app: &App) -> Result<(), Error> {
         Err(Error::Storage(UNSUPPORTED.into()))
     }

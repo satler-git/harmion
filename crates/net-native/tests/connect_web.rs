@@ -254,6 +254,7 @@ async fn web_connection_start_status_complete_uses_cors_and_helper() {
             connection_id: connection_id.clone(),
             allow: true,
             replace: false,
+            expires_at: None,
         })
         .await
         .unwrap();

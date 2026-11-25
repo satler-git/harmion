@@ -1717,6 +1717,26 @@ impl Transaction for SqlTransaction<'_> {
         self.write_kinds(app)?;
         self.write_provide_names(app)
     }
+    fn apps(&mut self) -> Result<Vec<App>, Error> {
+        let ids: Vec<Vec<u8>> = {
+            let mut statement = self
+                .sql
+                .prepare("SELECT app_id FROM apps ORDER BY app_id")
+                .map_err(db)?;
+            statement
+                .query_map([], |row| row.get(0))
+                .map_err(db)?
+                .collect::<Result<_, _>>()
+                .map_err(db)?
+        };
+        let mut apps = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(app) = self.app_by_id(AppId(fixed(id)?))? {
+                apps.push(app);
+            }
+        }
+        Ok(apps)
+    }
     fn update_app(&mut self, app: &App) -> Result<(), Error> {
         let changed = self.sql.execute("UPDATE apps SET expires_at=?2,revoked=?3,read_all=?4,write_all=?5,call=?6,provide=?7,manage_apps=?8,manage_nodes=?9 WHERE app_id=?1",
             params![app.id.0, app.expires_at, app.revoked, all_flag(&app.grants.read), all_flag(&app.grants.write), app.grants.call, app.grants.provide, app.grants.manage_apps, app.grants.manage_nodes]).map_err(db)?;

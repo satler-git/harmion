@@ -16,6 +16,7 @@ base64 = "0.22.1"
 subtle = "2.6.1"
 url = "2.5.8"
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc", "zeroize"] }
+ring = "0.17.14"
 
 [lints]
 workspace = true

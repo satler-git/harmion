@@ -173,6 +173,8 @@ pub trait Transaction: crate::oauth::Storage {
     fn app_by_id(&mut self, id: AppId) -> Result<Option<App>, Error>;
     fn insert_app(&mut self, app: &App) -> Result<(), Error>;
     fn update_app(&mut self, app: &App) -> Result<(), Error>;
+    /// Lists every app credential. Admin read; peer-only hosts may refuse.
+    fn apps(&mut self) -> Result<Vec<App>, Error>;
     /// Interpreter registration is an optional host capability. Peer-only hosts
     /// fail closed instead of pretending an approvable local registry exists.
     fn interpreter_registration(

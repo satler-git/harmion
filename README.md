@@ -6,7 +6,13 @@ Rustで初期実装を進めています。Content・SQLite保存・App HTTPS AP
 
 ネイティブの App HTTPS と Rust SDK は、固定スナップショットの Query、初回取得と変更通知をつなぐ Subscribe、購読キャッシュを提供します。所有者向けの `sync-status` では、最後の自発同期の成功・失敗と、保存した更新のPeerごとの受領確認を取得できます。ローカル保存成功・過去の受領確認・現在の到達性は区別します。
 
-- [native 複数ノード同期の実行手順](docs/native-quickstart.md)
+- [Androidノードの要件定義・実装指針](docs/android-node.md)
+- [Androidノードの設計・実装状態](docs/android-design.md)
+
+Android版は、Rust CoreをJNIで埋め込んだ単一プロセスのノードアプリ（管理UI・接続承認Activity・Bound Service）と、
+外部アプリ向けSDK（AIDLで発見・承認、pinned HTTPSでデータ操作）で構成します。同期は`harmion-runtime`が所有し、
+Wi-Fi・従量制・バッテリー・ローミングのポリシーとWorkManagerを組み合わせます。ビルドは`nix develop .#android`を使います。
+
 - [Linuxユーザーサービスと日常運用](docs/linux-service.md)
 
 - [現時点の仕様と設計方針](docs/specification.md)

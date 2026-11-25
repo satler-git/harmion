@@ -297,6 +297,9 @@ pub struct ConnectionApproval {
     pub allow: bool,
     #[serde(default)]
     pub replace: bool,
+    /// Optional authorization deadline (unix micros) chosen by the owner.
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

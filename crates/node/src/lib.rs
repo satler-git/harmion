@@ -15,6 +15,7 @@ pub mod owner;
 pub mod provisioning;
 pub mod query;
 pub mod replication;
+pub mod sshsig;
 pub mod storage;
 pub mod subscription;
 pub mod sync_status;

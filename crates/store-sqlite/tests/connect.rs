@@ -162,8 +162,16 @@ fn integrated_connection_grants_app_and_provider_and_issues_tokens() {
             .len(),
         1
     );
-    let approved =
-        connect::approve(&mut t.store, &mut t.host, &t.admin, started.id, true, false).unwrap();
+    let approved = connect::approve(
+        &mut t.store,
+        &mut t.host,
+        &t.admin,
+        started.id,
+        true,
+        false,
+        None,
+    )
+    .unwrap();
     assert_eq!(approved.status, ConnectionStatus::Approved);
     let provider = approved.provider.unwrap();
     assert_eq!(
@@ -211,7 +219,16 @@ fn integrated_connection_grants_app_and_provider_and_issues_tokens() {
 fn connection_denial_and_expiry_are_terminal() {
     let mut t = Test::new();
     let denied = connect::start(&mut t.store, &mut t.host, offer("Denied", false)).unwrap();
-    connect::approve(&mut t.store, &mut t.host, &t.admin, denied.id, false, false).unwrap();
+    connect::approve(
+        &mut t.store,
+        &mut t.host,
+        &t.admin,
+        denied.id,
+        false,
+        false,
+        None,
+    )
+    .unwrap();
     assert!(matches!(
         connect::complete(
             &mut t.store,
@@ -251,18 +268,42 @@ fn connection_denial_and_expiry_are_terminal() {
 fn provider_replacement_requires_explicit_owner_approval() {
     let mut t = Test::new();
     let first = connect::start(&mut t.store, &mut t.host, offer("First", true)).unwrap();
-    let first_approval =
-        connect::approve(&mut t.store, &mut t.host, &t.admin, first.id, true, false).unwrap();
+    let first_approval = connect::approve(
+        &mut t.store,
+        &mut t.host,
+        &t.admin,
+        first.id,
+        true,
+        false,
+        None,
+    )
+    .unwrap();
     let first_provider = first_approval.provider.unwrap();
     connect::complete(&mut t.store, &mut t.host, first.id, first.secret, VERIFIER).unwrap();
 
     let second = connect::start(&mut t.store, &mut t.host, offer("Second", true)).unwrap();
     assert!(matches!(
-        connect::approve(&mut t.store, &mut t.host, &t.admin, second.id, true, false),
+        connect::approve(
+            &mut t.store,
+            &mut t.host,
+            &t.admin,
+            second.id,
+            true,
+            false,
+            None
+        ),
         Err(Error::InterpreterNameConflict)
     ));
-    let second_approval =
-        connect::approve(&mut t.store, &mut t.host, &t.admin, second.id, true, true).unwrap();
+    let second_approval = connect::approve(
+        &mut t.store,
+        &mut t.host,
+        &t.admin,
+        second.id,
+        true,
+        true,
+        None,
+    )
+    .unwrap();
     assert_eq!(second_approval.replaced, Some(first_provider));
     assert_eq!(
         registry::describe(&mut t.store, &t.admin, t.host.now, first_provider)
@@ -284,8 +325,16 @@ fn multi_provider_connection_registers_all_and_persists_ids() {
     let pending = connect::list(&mut t.store, &t.admin, t.host.now).unwrap();
     assert_eq!(pending[0].provider_names().unwrap(), expected_names);
 
-    let approved =
-        connect::approve(&mut t.store, &mut t.host, &t.admin, started.id, true, false).unwrap();
+    let approved = connect::approve(
+        &mut t.store,
+        &mut t.host,
+        &t.admin,
+        started.id,
+        true,
+        false,
+        None,
+    )
+    .unwrap();
     let providers = approved.providers.clone();
     assert_eq!(providers.len(), 3);
     assert_eq!(approved.provider, Some(providers[0]));
@@ -334,11 +383,18 @@ fn one_provider_name_conflict_rejects_the_whole_multi_provider_request() {
         multi_offer("First", &["wiki/backlinks"]),
     )
     .unwrap();
-    let first_provider =
-        connect::approve(&mut t.store, &mut t.host, &t.admin, first.id, true, false)
-            .unwrap()
-            .provider
-            .unwrap();
+    let first_provider = connect::approve(
+        &mut t.store,
+        &mut t.host,
+        &t.admin,
+        first.id,
+        true,
+        false,
+        None,
+    )
+    .unwrap()
+    .provider
+    .unwrap();
 
     let second = connect::start(
         &mut t.store,
@@ -347,7 +403,15 @@ fn one_provider_name_conflict_rejects_the_whole_multi_provider_request() {
     )
     .unwrap();
     assert!(matches!(
-        connect::approve(&mut t.store, &mut t.host, &t.admin, second.id, true, false),
+        connect::approve(
+            &mut t.store,
+            &mut t.host,
+            &t.admin,
+            second.id,
+            true,
+            false,
+            None
+        ),
         Err(Error::InterpreterNameConflict)
     ));
     // The conflicting approval must not leave the other manifest registered.
@@ -355,8 +419,16 @@ fn one_provider_name_conflict_rejects_the_whole_multi_provider_request() {
     assert_eq!(registrations.len(), 1);
     assert_eq!(registrations[0].provider, first_provider);
 
-    let approved =
-        connect::approve(&mut t.store, &mut t.host, &t.admin, second.id, true, true).unwrap();
+    let approved = connect::approve(
+        &mut t.store,
+        &mut t.host,
+        &t.admin,
+        second.id,
+        true,
+        true,
+        None,
+    )
+    .unwrap();
     assert_eq!(approved.providers.len(), 2);
     assert_eq!(approved.replaced_providers, vec![first_provider]);
 }
@@ -376,8 +448,16 @@ fn legacy_single_object_manifest_row_still_approves_and_completes() {
     .unwrap();
     drop(sql);
 
-    let approved =
-        connect::approve(&mut t.store, &mut t.host, &t.admin, started.id, true, false).unwrap();
+    let approved = connect::approve(
+        &mut t.store,
+        &mut t.host,
+        &t.admin,
+        started.id,
+        true,
+        false,
+        None,
+    )
+    .unwrap();
     let provider = approved.provider.unwrap();
     // Pre-v18 rows have no Provider ID array; completion falls back to `provider`.
     let sql = rusqlite::Connection::open(t.path.join("node.db")).unwrap();
@@ -495,4 +575,40 @@ fn oauth_authorization_grants_call_and_named_provide() {
         permissions.provide_names,
         ["ledger/balance".to_string()].into()
     );
+}
+
+#[test]
+fn approval_can_set_an_app_deadline() {
+    let mut t = Test::new();
+    let started = connect::start(&mut t.store, &mut t.host, offer("Expiry", false)).unwrap();
+    let now = t.host.now;
+    let deadline = now + 30 * 24 * 60 * 60 * 1_000_000;
+    let approved = connect::approve(
+        &mut t.store,
+        &mut t.host,
+        &t.admin,
+        started.id,
+        true,
+        false,
+        Some(deadline),
+    )
+    .unwrap();
+    let app = approved.app.expect("approved app");
+    let apps = app::list_apps(&mut t.store, &t.admin, t.host.now).unwrap();
+    let stored = apps.iter().find(|candidate| candidate.id == app).unwrap();
+    assert_eq!(stored.expires_at, deadline);
+
+    let other = connect::start(&mut t.store, &mut t.host, offer("Expiry2", false)).unwrap();
+    assert!(matches!(
+        connect::approve(
+            &mut t.store,
+            &mut t.host,
+            &t.admin,
+            other.id,
+            true,
+            false,
+            Some(now - 1),
+        ),
+        Err(Error::InvalidRequest)
+    ));
 }

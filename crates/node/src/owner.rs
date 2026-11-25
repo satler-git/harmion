@@ -674,6 +674,10 @@ fn normalize_label(label: &str) -> Result<String, Error> {
 
 /// Parse and validate an OpenSSH public key, returning its normalized
 /// `algorithm base64` form and `SHA256:` fingerprint.
+///
+/// Ed25519 and ECDSA P-256 keys are parsed and fingerprinted in-process so an
+/// Android node can enroll a key without `ssh-keygen`. Other algorithms keep the
+/// existing `ssh-keygen -l` path.
 pub fn validate_public_key(input: &str) -> Result<(String, String), Error> {
     if input.len() > MAX_PUBLIC_KEY_BYTES {
         return Err(Error::InvalidRequest);
@@ -683,6 +687,14 @@ pub fn validate_public_key(input: &str) -> Result<(String, String), Error> {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .ok_or(Error::InvalidRequest)?;
+    match crate::sshsig::parse_key_line(line) {
+        Ok(key) => Ok((key.normalized, key.fingerprint)),
+        Err(crate::sshsig::KeyError::Invalid) => Err(Error::InvalidRequest),
+        Err(crate::sshsig::KeyError::Unsupported) => validate_public_key_with_ssh_keygen(line),
+    }
+}
+
+fn validate_public_key_with_ssh_keygen(line: &str) -> Result<(String, String), Error> {
     let mut parts = line.split_whitespace();
     let algorithm = parts.next().ok_or(Error::InvalidRequest)?;
     let encoded = parts.next().ok_or(Error::InvalidRequest)?;
@@ -716,12 +728,13 @@ pub fn validate_public_key(input: &str) -> Result<(String, String), Error> {
     let _ = fs::remove_dir_all(directory);
     result
 }
-
 /// Verify an OpenSSH SSHSIG over `statement` with one of `public_keys`.
 ///
-/// `ssh-keygen` performs the cryptographic verification, so Ed25519, ECDSA,
-/// RSA and FIDO2 `sk-*` keys use the same OpenSSH rules as the signer. The
-/// matched normalized public key is returned for the audit.
+/// Ed25519 and ECDSA P-256 signatures are verified in-process, so owner-required
+/// operations work on Android, which has no `ssh-keygen`. Algorithms this module
+/// does not implement (RSA, FIDO2 `sk-*`) fall back to `ssh-keygen -Y verify`
+/// when the host has it, so desktop behavior is unchanged. The matched normalized
+/// public key is returned for the audit.
 pub fn verify_ssh(
     public_keys: &[String],
     statement: &[u8],
@@ -730,6 +743,21 @@ pub fn verify_ssh(
     if signature_pem.is_empty() || signature_pem.len() > protocol::MAX_SSH_SIGNATURE_BYTES {
         return Err(Error::OwnerAssertionInvalid);
     }
+    match crate::sshsig::verify(public_keys, statement, signature_pem) {
+        Ok(Some(matched)) => return Ok(matched),
+        Ok(None) => {}
+        // A supported algorithm that does not verify must not be retried by a
+        // different implementation: the signature is invalid.
+        Err(_) => return Err(Error::OwnerAssertionInvalid),
+    }
+    verify_ssh_with_ssh_keygen(public_keys, statement, signature_pem)
+}
+
+fn verify_ssh_with_ssh_keygen(
+    public_keys: &[String],
+    statement: &[u8],
+    signature_pem: &[u8],
+) -> Result<String, Error> {
     let directory = temp_dir()?;
     let result = (|| {
         let mut allowed = String::new();
@@ -777,7 +805,6 @@ pub fn verify_ssh(
     let _ = fs::remove_dir_all(directory);
     result
 }
-
 fn temp_dir() -> Result<PathBuf, Error> {
     let base = std::env::temp_dir();
     for attempt in 0..16u32 {
@@ -811,6 +838,18 @@ fn create_private_dir(path: &Path) -> io::Result<()> {
 
 fn storage(error: io::Error) -> Error {
     Error::Storage(error.to_string())
+}
+
+/// Derives the OpenSSH public key and `SHA256:` fingerprint for an Ed25519 owner
+/// seed. The seed is private key material; callers keep it wrapped.
+pub fn owner_public_key(seed: &[u8; 32]) -> (String, String) {
+    crate::sshsig::ed25519_public_key(seed)
+}
+
+/// Signs a node-issued owner statement with an Ed25519 seed and returns an
+/// armored SSHSIG in the `harmion-owner` namespace.
+pub fn owner_sign(seed: &[u8; 32], statement: &[u8]) -> String {
+    crate::sshsig::sign_ed25519(seed, protocol::NAMESPACE, statement)
 }
 
 #[cfg(test)]

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Harmion</string>
+    <string name="node_channel_name">ノード通知</string>
+    <string name="sync_channel_name">同期通知</string>
+    <string name="approval_channel_name">承認要求</string>
+    <string name="sync_running">同期しています</string>
+    <string name="approval_running">承認を待っています</string>
+    <string name="runtime_channel_name">バックグラウンド稼働</string>
+    <string name="issues_channel_name">競合とストレージ</string>
+</resources>

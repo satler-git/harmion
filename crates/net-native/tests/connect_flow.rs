@@ -112,6 +112,7 @@ async fn integrated_connection_approval_registers_provider_and_call_works() {
             connection_id: connection_id.clone(),
             allow: true,
             replace: false,
+            expires_at: None,
         })
         .await
         .unwrap();
@@ -237,6 +238,7 @@ async fn integrated_connection_approval_registers_provider_and_call_works() {
             connection_id: started["connection_id"].as_str().unwrap().into(),
             allow: true,
             replace: false,
+            expires_at: None,
         })
         .await
         .unwrap();

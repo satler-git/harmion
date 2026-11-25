@@ -40,6 +40,36 @@
             # --target wasm32-unknown-unknown` needs this target's std.
             fenixPkgs.targets.wasm32-unknown-unknown.stable.rust-std
           ];
+          # Androidノードのビルド用。SDK/NDKのライセンスはNix式で明示的に受理する。
+          # `nix develop .#android` からのみ評価される（既定シェルには含めない）。
+          androidPkgs = import nixpkgs {
+            inherit system;
+            config.allowUnfree = true;
+          };
+          androidSdk = (androidPkgs.androidenv.override { licenseAccepted = true; }).composeAndroidPackages {
+            platformVersions = [ "37.2" ];
+            buildToolsVersions = [ "37.0.0" ];
+            includeNDK = true;
+            ndkVersions = [ "30.0.16248370" ];
+            includeSources = false;
+            includeEmulator = true;
+            includeSystemImages = true;
+            systemImageTypes = [ "google_apis" ];
+            abiVersions = [ "x86_64" ];
+            cmdLineToolsVersion = "latest";
+          };
+          androidRust = fenixPkgs.combine [
+            (fenixPkgs.stable.withComponents [
+              "cargo"
+              "rustc"
+              "rustfmt"
+              "clippy"
+              "rust-src"
+            ])
+            fenixPkgs.targets.aarch64-linux-android.stable.rust-std
+            fenixPkgs.targets.armv7-linux-androideabi.stable.rust-std
+            fenixPkgs.targets.x86_64-linux-android.stable.rust-std
+          ];
         in
         {
           default = pkgs.mkShell {
@@ -92,6 +122,33 @@
               fi
               export WIKI_SANS_FONT="${pkgs.noto-fonts-cjk-sans}/share/fonts/opentype/noto-cjk/NotoSansCJK-VF.otf.ttc"
               export WIKI_MONO_FONT="${pkgs.jetbrains-mono}/share/fonts/opentype/JetBrainsMono-Regular.otf"
+            '';
+          };
+          android = androidPkgs.mkShell {
+            packages = [
+              androidRust
+              # ring / libsqlite3-sys / NDK linkers need a C toolchain.
+              androidPkgs.stdenv.cc
+              androidPkgs.jdk
+              androidPkgs.gradle_9
+              androidSdk.androidsdk
+              androidPkgs.android-tools
+              androidPkgs.pkg-config
+              androidPkgs.sqlite
+              androidPkgs.nodejs
+              androidPkgs.python3
+            ];
+            shellHook = ''
+              export ANDROID_HOME="${androidSdk.androidsdk}/libexec/android-sdk"
+              export ANDROID_SDK_ROOT="$ANDROID_HOME"
+              export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/30.0.16248370"
+              export JAVA_HOME="${androidPkgs.jdk}"
+              # The sandbox may make ~/.android and ~/.gradle read-only; keep
+              # tool caches inside the checkout.
+              export ANDROID_USER_HOME="''${ANDROID_USER_HOME:-$PWD/target/android-home}"
+              export GRADLE_USER_HOME="''${GRADLE_USER_HOME:-$PWD/target/gradle-home}"
+              export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$PWD/target}"
+              echo "harmion android shell: $(rustc --version), Java $(${androidPkgs.jdk}/bin/java -version 2>&1 | head -1), SDK $ANDROID_HOME"
             '';
           };
         }

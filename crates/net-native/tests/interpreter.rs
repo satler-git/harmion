@@ -478,6 +478,7 @@ async fn provider_attach_call_timeout_cancel_and_disconnect() {
                     manage_nodes: false,
                 },
                 revoked: false,
+                expires_at: None,
             })
             .unwrap(),
         )
