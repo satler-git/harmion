@@ -6,6 +6,6 @@
       consuming app's manifest.
     -->
     <queries>
-        <package android:name="org.harmion.android" />
+        <package android:name="dev.satler.harmion" />
     </queries>
 </manifest>

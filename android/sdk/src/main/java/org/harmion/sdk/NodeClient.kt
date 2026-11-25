@@ -99,7 +99,7 @@ class NodeClient private constructor(
 
     companion object {
         /** Package of the node app. Also declared in the SDK's `<queries>`. */
-        const val NODE_PACKAGE: String = "org.harmion.android"
+        const val NODE_PACKAGE: String = "dev.satler.harmion"
         const val SERVICE_CLASS: String = "org.harmion.android.service.HarmionNodeService"
         const val APPROVAL_ACTIVITY: String = "org.harmion.android.approval.ApprovalActivity"
         const val ACTION_APPROVE: String = "org.harmion.android.action.APPROVE"

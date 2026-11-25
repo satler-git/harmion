@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <queries>
-        <package android:name="org.harmion.android" />
+        <package android:name="dev.satler.harmion" />
     </queries>
     <application
         android:label="Harmion E2E"

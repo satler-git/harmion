@@ -10,11 +10,11 @@ android {
     buildToolsVersion = "37.0.0"
 
     defaultConfig {
-        applicationId = "org.harmion.android"
+        applicationId = "dev.satler.harmion"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = (project.findProperty("harmionVersionCode") as String?)?.toInt() ?: 1
+        versionName = (project.findProperty("harmionVersionName") as String?) ?: "0.1.0"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }

@@ -8,3 +8,7 @@
 -keep class org.harmion.android.service.IHarmionNodeService$Stub { *; }
 -keep class org.harmion.android.service.IHarmionNodeService$Stub$Proxy { *; }
 # App model JSON is parsed reflectively by org.json only; no keep needed.
+
+# WorkManager/Room instantiate generated implementations reflectively.
+-keep class androidx.work.impl.WorkDatabase_Impl { <init>(); }
+-keep class * extends androidx.room.RoomDatabase { <init>(); }

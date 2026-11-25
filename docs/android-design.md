@@ -247,6 +247,10 @@ AIDL `IHarmionNodeService`:
 - AGP 9.5.2 はKotlinを内蔵するため `org.jetbrains.kotlin.android` は適用しない。
   Compose Compilerプラグイン（2.4.21）は `:app` のみ。`:sdk` はCompose実行時を含めない。
 - compileSdk 37（minor 2）/ targetSdk 36 / minSdk 29。Compose BOM 2026.11.01。
+- applicationIdは`dev.satler.harmion`。コードのnamespaceは`org.harmion.android`のまま
+  （SDKは`dev.satler.harmion/org.harmion.android.service.HarmionNodeService`をbindする）。
+- release署名は1Passwordのkeystore Documentと署名アイテムから取得する
+  （[android-release.md](android-release.md)）。
 - SDK/エミュレータはnixpkgsから供給し、Gradle/SDKの手動ダウンロードはしない。
 - ネイティブ: `nix develop .#android --command ./android/scripts/build-rust.sh arm64-v8a`
   - `libharmion_android.so` → `android/app/src/main/jniLibs/<abi>/`
