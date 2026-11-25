@@ -8,19 +8,25 @@
   **アプリの寿命と同じ**期間保持する。
 
 ## 2. 鍵の保管（1Password）
-1Passwordに次の2アイテムを作る。
+1Passwordの **1つのDocumentアイテム** にkeystoreとメタデータをまとめる。
 
-| アイテム | 種別 | フィールド |
-|---|---|---|
-| `Harmion release keystore` | Document | `harmion-release.jks` |
-| `Harmion release signing` | Password | `password`, `key_password`, `alias`, `cert_sha256` |
+| 項目 | 値 |
+|---|---|
+| Vault | `dev`（`OP_VAULT`で変更可） |
+| アイテム | `Harmion release keystore`（Document） |
+| ファイル | `harmion-release.jks` |
+| フィールド `pass` | keystoreパスワード（concealed） |
+| フィールド `key psas` | 鍵パスワード（concealed、通常は`pass`と同じ） |
+| フィールド `alias` | 鍵エイリアス（`harmion`） |
+| フィールド `cert_sha256` | 署名証明書のSHA-256 |
 
-- `password`: keystoreパスワード
-- `key_password`: 鍵パスワード（PKCS12では通常passwordと同じ）
-- `alias`: 既定 `harmion`
-- `cert_sha256`: 署名証明書のSHA-256（SDKのピンと同じ値）
+`release-1password.sh` は次の順で読み出す:
+1. `op document get "Harmion release keystore" --vault dev --out-file ...`
+2. `op item get ... --format=json` からラベルで `pass` / `key psas` / `alias` / `cert_sha256` を取得
+3. keystoreから証明書SHA-256を再計算し、`cert_sha256` と不一致ならビルドを中止
 
-Vault名は既定 `Private`。`OP_VAULT` で変更できる。
+フィールド名を変えた場合は `OP_PASSWORD_LABEL` / `OP_KEY_PASSWORD_LABEL` / `OP_ALIAS_LABEL` /
+`OP_CERT_LABEL` で上書きできる。`key psas` が空の場合は `key_password` なども自動で試す。
 
 ## 3. 初回の鍵作成
 ```bash
@@ -35,9 +41,9 @@ nix develop .#android
 1Passwordへ保存（スクリプトが表示するコマンド）:
 ```bash
 op document create target/release-keystore/harmion-release.jks \
-  --title "Harmion release keystore" --vault "Private"
-op item create --category=password --title "Harmion release signing" --vault "Private" \
-  "password=..." "key_password=..." "alias=harmion" "cert_sha256=..."
+  --title "Harmion release keystore" --vault "dev"
+op item edit "Harmion release keystore" --vault "dev" \
+  "pass=..." "key psas=..." "alias=harmion" "cert_sha256=..."
 ```
 保存後、作業ディレクトリのkeystoreは削除してよい（1Passwordが正）。
 
@@ -48,21 +54,19 @@ nix develop .#android
 ./android/scripts/release-1password.sh
 ```
 - 1Passwordからkeystoreを一時ディレクトリへ取得（0600、終了時に削除）
-- 署名証明書のSHA-256をkeystoreから計算
-- `-PharmionNodeCertSha256=<sha>` でSDKの証明書ピンを同じ鍵に合わせる
+- `cert_sha256` とkeystoreの証明書を照合
+- 証明書SHA-256を `-PharmionNodeCertSha256=<sha>` としてSDKのピンに注入
 - `:app:assembleRelease` を実行し、`apksigner verify --print-certs` で照合
 - 成果物: `target/release/harmion-release.apk`
 
 バージョン:
 ```bash
-./android/scripts/release-1password.sh   # versionCode/Nameは既定
-# または Gradle 直接:
-HARMION_KEYSTORE=... ... gradle -p android :app:assembleRelease \
-  -PharmionNodeCertSha256=<sha> \
-  -PharmionVersionCode=2 -PharmionVersionName=0.2.0
+HARMION_KEYSTORE=... HARMION_KEYSTORE_PASSWORD=... HARMION_KEY_ALIAS=harmion \
+HARMION_KEY_PASSWORD=... gradle -p android :app:assembleRelease \
+  -PharmionNodeCertSha256=<sha> -PharmionVersionCode=2 -PharmionVersionName=0.2.0
 ```
 
-ローカル鍵でのテスト（CI/開発用。実鍵をコミットしない）:
+ローカル鍵でのテスト（実鍵をコミットしない）:
 ```bash
 HARMION_KEYSTORE=/path/to/test.jks \
 HARMION_KEYSTORE_PASSWORD=... HARMION_KEY_ALIAS=harmion HARMION_KEY_PASSWORD=... \

@@ -1,46 +1,61 @@
 #!/usr/bin/env bash
 # Build a signed release APK with signing material from 1Password.
 #
-# Required 1Password items (override names with env vars):
-#   Document: Harmion release keystore  -> OP_KEYSTORE_ITEM
-#   Password: Harmion release signing   -> OP_SIGNING_ITEM
-#     password     = keystore password
-#     key_password = key password (optional, defaults to password)
-#     alias        = key alias (optional, defaults to "harmion")
+# Default item layout (matching the stored item):
+#   Vault:  dev
+#   Item:   Harmion release keystore (Document, harmion-release.jks)
+#   Fields: pass, key psas, alias, cert_sha256
 #
-# Local override (for testing, never commit a real keystore):
-#   HARMION_KEYSTORE=/path/to.jks HARMION_KEYSTORE_PASSWORD=... \
-#   HARMION_KEY_ALIAS=harmion HARMION_KEY_PASSWORD=... \
-#   ./android/scripts/release-1password.sh
+# Override with OP_VAULT / OP_ITEM / OP_*_LABEL. For local testing set
+# HARMION_KEYSTORE (and passwords); 1Password is then not contacted.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
-OP_VAULT="${OP_VAULT:-Private}"
-OP_KEYSTORE_ITEM="${OP_KEYSTORE_ITEM:-Harmion release keystore}"
-OP_SIGNING_ITEM="${OP_SIGNING_ITEM:-Harmion release signing}"
+OP_VAULT="${OP_VAULT:-dev}"
+OP_ITEM="${OP_ITEM:-Harmion release keystore}"
+OP_PASSWORD_LABEL="${OP_PASSWORD_LABEL:-pass}"
+OP_KEY_PASSWORD_LABEL="${OP_KEY_PASSWORD_LABEL:-key psas}"
+OP_ALIAS_LABEL="${OP_ALIAS_LABEL:-alias}"
+OP_CERT_LABEL="${OP_CERT_LABEL:-cert_sha256}"
 android_home="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 
 work="$(mktemp -d)"
 cleanup() { rm -rf "${work}"; }
 trap cleanup EXIT
 
+stored_cert=""
 if [[ -z "${HARMION_KEYSTORE:-}" ]]; then
   if ! command -v op >/dev/null 2>&1; then
     echo "1Password CLI (op) is required, or set HARMION_KEYSTORE explicitly." >&2
     exit 1
   fi
-  echo "Fetching signing material from 1Password (${OP_VAULT})…" >&2
-  op document get "${OP_KEYSTORE_ITEM}" --vault "${OP_VAULT}" \
+  echo "Fetching signing material from 1Password (${OP_VAULT}/${OP_ITEM})…" >&2
+  op document get "${OP_ITEM}" --vault "${OP_VAULT}" \
     --out-file "${work}/harmion-release.jks"
   HARMION_KEYSTORE="${work}/harmion-release.jks"
-  HARMION_KEYSTORE_PASSWORD="$(op read "op://${OP_VAULT}/${OP_SIGNING_ITEM}/password")"
-  HARMION_KEY_ALIAS="$(op read "op://${OP_VAULT}/${OP_SIGNING_ITEM}/alias" 2>/dev/null || echo harmion)"
-  HARMION_KEY_PASSWORD="$(
-    op read "op://${OP_VAULT}/${OP_SIGNING_ITEM}/key_password" 2>/dev/null \
-      || printf '%s' "${HARMION_KEYSTORE_PASSWORD}"
-  )"
+
+  item_json="$(op item get "${OP_ITEM}" --vault "${OP_VAULT}" --format=json)"
+  read_field() {
+    jq -r --arg label "$1" \
+      'first(.fields[] | select(.label == $label) | .value) // empty' \
+      <<<"${item_json}"
+  }
+  HARMION_KEYSTORE_PASSWORD="$(read_field "${OP_PASSWORD_LABEL}")"
+  HARMION_KEY_ALIAS="$(read_field "${OP_ALIAS_LABEL}")"
+  [[ -n "${HARMION_KEY_ALIAS}" ]] || HARMION_KEY_ALIAS="harmion"
+  stored_cert="$(read_field "${OP_CERT_LABEL}")"
+  HARMION_KEY_PASSWORD="$(read_field "${OP_KEY_PASSWORD_LABEL}")"
+  if [[ -z "${HARMION_KEY_PASSWORD}" ]]; then
+    for fallback in key_password "key pass" "key password"; do
+      HARMION_KEY_PASSWORD="$(read_field "${fallback}")"
+      [[ -n "${HARMION_KEY_PASSWORD}" ]] && break
+    done
+  fi
+  if [[ -z "${HARMION_KEY_PASSWORD}" ]]; then
+    HARMION_KEY_PASSWORD="${HARMION_KEYSTORE_PASSWORD}"
+  fi
 fi
 
 for name in HARMION_KEYSTORE_PASSWORD HARMION_KEY_ALIAS HARMION_KEY_PASSWORD; do
@@ -61,6 +76,13 @@ keytool -exportcert \
   -storepass "${HARMION_KEYSTORE_PASSWORD}" \
   -file "${cert}" >/dev/null
 cert_sha256="$(sha256sum "${cert}" | awk '{print $1}')"
+
+if [[ -n "${stored_cert}" && "${stored_cert}" != "${cert_sha256}" ]]; then
+  echo "cert_sha256 in 1Password does not match the keystore" >&2
+  echo "  1Password: ${stored_cert}" >&2
+  echo "  keystore:  ${cert_sha256}" >&2
+  exit 1
+fi
 
 echo "Signing certificate SHA-256: ${cert_sha256}" >&2
 
