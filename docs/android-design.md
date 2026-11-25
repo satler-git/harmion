@@ -229,6 +229,8 @@ AIDL `IHarmionNodeService`:
   Dynamic Color、Light/Dark、edge-to-edge）。
 - 方針: 説明的な長文を置かず、状態・アイコン・短いラベル・構造で伝える。
   セキュリティ上重要な警告（強い権限、所有者キー失効、回復コード再表示不可）だけを残す。
+- 承認Activityは`taskAffinity=""`の専用タスクで開き、完了時に`finishAndRemoveTask()`で
+  タスクごと閉じる。これにより承認後はノードアプリではなく要求元アプリへ戻る（F-17の緩和も兼ねる）。
 - 画面: Onboarding（作成 / QR参加）、ホーム（状態・同期・競合・ノード）、
   ピア（招待QR・メンバー）、アプリ（接続要求・認可済みアプリのgrant/期限管理）、
   設定（同期ポリシー・常時稼働・所有者承認・回復コード再登録）、接続承認Activity、
@@ -329,6 +331,8 @@ JNI実装上の注意（実測）: `JString` を `JavaVM` シングルトン経�
 - Glanceウィジェットをランチャーに配置→「稼働中 / 0 ピア / 開く / 同期」を描画。
 - F-04検証: 未承認の`status`が拒否されること、承認後は`status`が通り、HOME+40秒で
   `running=false/stopped`、次の`createContent`でオンデマンド起動して保存できることを確認。
+- 承認後の戻り先: 承認完了直後のtop activityが`org.harmion.testclient/.MainActivity`で
+  あること、ApprovalActivityのタスクが残らないことを確認。
 - 承認E2E: debug専用`android/testclient`（`:testclient`）から接続要求→承認画面
   （パッケージ・証明書・リダイレクト・期限30/90/365）→90日選択→指紋→connectComplete→
   createContentまで確認。ノードのアプリ一覧に90日期限で反映。

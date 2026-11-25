@@ -37,6 +37,7 @@
             android:name=".approval.ApprovalActivity"
             android:exported="true"
             android:excludeFromRecents="true"
+            android:taskAffinity=""
             android:theme="@style/Theme.Harmion.Approval">
             <intent-filter>
                 <action android:name="org.harmion.android.action.APPROVE" />

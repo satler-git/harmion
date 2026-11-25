@@ -107,7 +107,9 @@ class ApprovalActivity : FragmentActivity() {
                         loaded = loaded,
                         deciding = deciding,
                         onAllow = { days -> decide(true, days) },
-                        onDeny = { if (tokenValid) decide(false) else finish() },
+                        onDeny = {
+                            if (tokenValid) decide(false) else finishAndRemoveTask()
+                        },
                         modifier = Modifier.padding(padding),
                     )
                 }
@@ -230,7 +232,10 @@ class ApprovalActivity : FragmentActivity() {
             result
                 .onSuccess {
                     setResult(if (allow) RESULT_OK else RESULT_CANCELED)
-                    finish()
+                    // The approval runs in its own task (taskAffinity="") so the
+                    // requesting app returns to the foreground instead of the
+                    // node app's main screen.
+                    finishAndRemoveTask()
                 }
                 .onFailure {
                     error = it.message ?: "承認を記録できませんでした。"
