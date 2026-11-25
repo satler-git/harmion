@@ -32,37 +32,44 @@ class HarmionNodeService : Service() {
     private val startThrottle = mutableMapOf<Int, Long>()
     private val approvalThrottle = mutableMapOf<Int, Long>()
     private val syncThrottle = mutableMapOf<Int, Long>()
-    private var bound = false
+    private val discoveryThrottle = mutableMapOf<Int, Long>()
+    private val statusThrottle = mutableMapOf<Int, Long>()
+    private val callerRegistrationThrottle = mutableMapOf<Int, Long>()
+    private val startGate = Any()
+    private var lastGlobalStart = 0L
 
     override fun onCreate() {
         super.onCreate()
         controller = (application as HarmionApplication).runtime
     }
 
-    override fun onBind(intent: Intent?): IBinder {
-        if (!bound) {
-            bound = true
-            controller.acquire()
-        }
-        return binder
-    }
+    // Binding no longer keeps the runtime alive: any app can bind, so a held
+    // binding must not defeat the idle stop. The UI, keep-alive service and
+    // workers own explicit references; SDK calls start the node on demand.
+    override fun onBind(intent: Intent?): IBinder = binder
 
-    override fun onUnbind(intent: Intent?): Boolean {
-        if (bound) {
-            bound = false
-            controller.release()
-        }
-        return false
-    }
+    override fun onUnbind(intent: Intent?): Boolean = false
 
     private inner class HarmionBinder : IHarmionNodeService.Stub() {
         override fun connectionInfo(): String {
+            val uid = Binder.getCallingUid()
+            if (!admit(discoveryThrottle, uid, DISCOVERY_THROTTLE_MILLIS)) {
+                return failure("rate_limited", "too many discovery requests")
+            }
             if (!controller.isInitialized) {
                 return failure("not_initialized", "the node is not initialized yet")
             }
             val connection =
                 controller.nodeConnection()
                     ?: return failure("not_running", "the node has no discovery information")
+            val identity = callerIdentity(uid)
+            val approved =
+                identity != null &&
+                    CallerAccess.isAllowed(
+                        this@HarmionNodeService,
+                        identity.packageName,
+                        identity.certificateSha256,
+                    )
             return JSONObject()
                 .put("ok", true)
                 .put("endpoint", connection.endpoint)
@@ -70,19 +77,28 @@ class HarmionNodeService : Service() {
                 .put("node_id", connection.nodeId)
                 .put("cluster_id", connection.clusterId)
                 .apply {
-                    connection.oauthOrigin?.let { put("oauth_origin", it) }
-                    connection.oauthRoot?.let { put("oauth_root", Hex.encode(it)) }
+                    // OAuth trust material is only useful after approval; keep it
+                    // out of the unauthenticated discovery response.
+                    if (approved) {
+                        connection.oauthOrigin?.let { put("oauth_origin", it) }
+                        connection.oauthRoot?.let { put("oauth_root", Hex.encode(it)) }
+                    }
                 }
                 .toString()
         }
 
         override fun status(): String {
+            requireApproved()
             if (!controller.isInitialized) {
                 return JSONObject()
                     .put("ok", true)
                     .put("running", false)
                     .put("membership", "uninitialized")
                     .toString()
+            }
+            val uid = Binder.getCallingUid()
+            if (!admit(statusThrottle, uid, STATUS_THROTTLE_MILLIS)) {
+                throw SecurityException("status rate limit exceeded")
             }
             return runBlocking { controller.statusJson() }.toString()
         }
@@ -91,38 +107,56 @@ class HarmionNodeService : Service() {
             if (controller.running) return true
             if (!controller.isInitialized) return false
             val uid = Binder.getCallingUid()
+            val approved = isApprovedCaller(uid)
             // Re-evaluate Wi-Fi/battery policy before the runtime starts, so the
             // scheduler never opens with a stale "permitted" gate.
             controller.refreshPolicy()
-            if (!admit(startThrottle, uid, START_THROTTLE_MILLIS)) return false
+            val window = if (approved) START_THROTTLE_MILLIS else BOOTSTRAP_START_THROTTLE_MILLIS
+            if (!admit(startThrottle, uid, window)) return false
+            synchronized(startGate) {
+                val now = System.currentTimeMillis()
+                if (now - lastGlobalStart < GLOBAL_START_GATE_MILLIS) return false
+                lastGlobalStart = now
+            }
             return runBlocking { controller.ensureStarted() }
         }
 
         override fun requestSync() {
+            requireApproved()
             val uid = Binder.getCallingUid()
             if (!admit(syncThrottle, uid, SYNC_THROTTLE_MILLIS)) return
             controller.requestSync("app_connect")
         }
 
-        override fun beginApproval(connectionId: String): String {
+        override fun beginApproval(connectionId: String, requestSecret: String): String {
             val uid = Binder.getCallingUid()
             val identity = callerIdentity(uid)
                 ?: return failure("unknown_caller", "the calling app could not be identified")
-            if (!connectionId.matches(CONNECTION_ID_PATTERN)) {
-                return failure("invalid_connection", "malformed connection id")
+            if (!connectionId.matches(CONNECTION_ID_PATTERN) ||
+                !requestSecret.matches(SECRET_PATTERN)
+            ) {
+                return failure("invalid_connection", "malformed connection credentials")
             }
             if (!admit(approvalThrottle, uid, APPROVAL_THROTTLE_MILLIS)) {
                 return failure("rate_limited", "too many approval requests")
             }
+            // The secret binds the approval token to the request that this app
+            // created. A guessed connection id alone is not enough.
             val pending =
                 runCatching {
                     runBlocking {
                         val admin = controller.adminClient()
                         try {
-                            admin.connections().any {
-                                it.optString("connection_id") == connectionId &&
-                                    it.optString("status") == "pending"
-                            }
+                            admin
+                                .call(
+                                    "connect-status",
+                                    JSONObject()
+                                        .put("connection_id", connectionId)
+                                        .put("request_secret", requestSecret)
+                                        .toString()
+                                        .toByteArray(Charsets.UTF_8),
+                                )
+                                .optString("status") == "pending"
                         } finally {
                             admin.close()
                         }
@@ -142,7 +176,59 @@ class HarmionNodeService : Service() {
             return JSONObject().put("ok", true).put("token", grant.token).toString()
         }
 
+        override fun registerCaller(connectionId: String, requestSecret: String): Boolean {
+            val uid = Binder.getCallingUid()
+            val identity = callerIdentity(uid) ?: return false
+            if (!connectionId.matches(CONNECTION_ID_PATTERN) ||
+                !requestSecret.matches(SECRET_PATTERN)
+            ) {
+                return false
+            }
+            if (!admit(callerRegistrationThrottle, uid, CALLER_REGISTRATION_THROTTLE_MILLIS)) {
+                return false
+            }
+            val verified =
+                runCatching {
+                    runBlocking {
+                        val admin = controller.adminClient()
+                        try {
+                            val status =
+                                admin
+                                    .call(
+                                        "connect-status",
+                                        JSONObject()
+                                            .put("connection_id", connectionId)
+                                            .put("request_secret", requestSecret)
+                                            .toString()
+                                            .toByteArray(Charsets.UTF_8),
+                                    )
+                                    .optString("status")
+                            if (status != "completed") return@runBlocking null
+                            val appId =
+                                admin.connections()
+                                    .firstOrNull {
+                                        it.optString("connection_id") == connectionId
+                                    }
+                                    ?.optString("app_id")
+                                    .orEmpty()
+                            appId.ifEmpty { null }
+                        } finally {
+                            admin.close()
+                        }
+                    }
+                }.getOrNull()
+            if (verified == null) return false
+            CallerAccess.record(
+                this@HarmionNodeService,
+                identity.packageName,
+                identity.certificateSha256,
+                verified,
+            )
+            return true
+        }
+
         override fun nodeSummary(): String {
+            requireApproved()
             val identifiers = runCatching { runBlocking { controller.identifiers() } }.getOrNull()
             return JSONObject()
                 .put("ok", true)
@@ -161,6 +247,21 @@ class HarmionNodeService : Service() {
         val packageName: String,
         val certificateSha256: String,
     )
+
+    private fun isApprovedCaller(uid: Int): Boolean {
+        val identity = callerIdentity(uid) ?: return false
+        return CallerAccess.isAllowed(this, identity.packageName, identity.certificateSha256)
+    }
+
+    private fun requireApproved(): CallerIdentity {
+        val identity = callerIdentity(Binder.getCallingUid())
+        if (identity == null ||
+            !CallerAccess.isAllowed(this, identity.packageName, identity.certificateSha256)
+        ) {
+            throw SecurityException("app is not approved")
+        }
+        return identity
+    }
 
     /**
      * Package names and signing certificates are read from the package manager,
@@ -205,8 +306,14 @@ class HarmionNodeService : Service() {
 
     private companion object {
         const val START_THROTTLE_MILLIS = 10_000L
+        const val BOOTSTRAP_START_THROTTLE_MILLIS = 60_000L
+        const val GLOBAL_START_GATE_MILLIS = 5_000L
         const val APPROVAL_THROTTLE_MILLIS = 1_000L
-        const val SYNC_THROTTLE_MILLIS = 5_000L
+        const val SYNC_THROTTLE_MILLIS = 60_000L
+        const val DISCOVERY_THROTTLE_MILLIS = 500L
+        const val STATUS_THROTTLE_MILLIS = 1_000L
+        const val CALLER_REGISTRATION_THROTTLE_MILLIS = 1_000L
         val CONNECTION_ID_PATTERN = Regex("^[0-9a-f]{64}$")
+        val SECRET_PATTERN = Regex("^[0-9a-f]{64}$")
     }
 }

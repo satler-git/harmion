@@ -40,6 +40,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.harmion.android.HarmionApplication
+import org.harmion.android.service.CallerAccess
 import org.harmion.android.ui.theme.HarmionTheme
 import org.harmion.sdk.Hex
 import org.harmion.sdk.NodeClient
@@ -204,13 +205,23 @@ class ApprovalActivity : FragmentActivity() {
                                 } else {
                                     null
                                 }
-                            harmony.ownerAdmin.decideConnection(
-                                admin,
-                                this@ApprovalActivity,
-                                grant.connectionId,
-                                allow,
-                                expiresAt,
-                            )
+                            val result =
+                                harmony.ownerAdmin.decideConnection(
+                                    admin,
+                                    this@ApprovalActivity,
+                                    grant.connectionId,
+                                    allow,
+                                    expiresAt,
+                                )
+                            if (allow && result.optString("status") == "approved") {
+                                CallerAccess.record(
+                                    this@ApprovalActivity,
+                                    pending.packageName,
+                                    pending.certificateSha256,
+                                    result.optString("app_id"),
+                                )
+                            }
+                            result
                         } finally {
                             admin.close()
                         }

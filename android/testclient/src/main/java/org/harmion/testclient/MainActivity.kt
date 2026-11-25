@@ -49,10 +49,16 @@ class MainActivity : ComponentActivity() {
                 text = "既存の認可を確認して保存"
                 setOnClickListener { runSave() }
             }
+        val unauthorized =
+            Button(this).apply {
+                text = "未認可で status を呼ぶ"
+                setOnClickListener { runUnauthorizedStatus() }
+            }
         root.addView(title, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         root.addView(status, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         root.addView(connect, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         root.addView(verify, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        root.addView(unauthorized, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         setContentView(ScrollView(this).apply { addView(root) })
     }
 
@@ -80,18 +86,33 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun runUnauthorizedStatus() {
+        status.text = "未認可 status を呼び出し中…"
+        lifecycleScope.launch {
+            var session: HarmionSession? = null
+            try {
+                session = Harmion.connect(this@MainActivity)
+                val nodeStatus = session.status()
+                status.text = "status OK: running=${nodeStatus.running} membership=${nodeStatus.membership}"
+            } catch (error: Exception) {
+                status.text = "拒否されました: ${error.message}"
+            } finally {
+                session?.close()
+            }
+        }
+    }
+
     private fun runSave() {
         status.text = "接続を確認中…"
         lifecycleScope.launch {
             var session: HarmionSession? = null
             try {
                 session = Harmion.connect(this@MainActivity)
-                if (!session.isAuthorized()) {
-                    status.text = "未認可です。先に接続を要求してください。"
-                    return@launch
-                }
+                val nodeStatus = session.status()
                 val saved = session.createContent("verify ${System.currentTimeMillis()}")
-                status.text = "保存OK\n${saved.updateId}"
+                status.text =
+                    "status OK: running=${nodeStatus.running} membership=${nodeStatus.membership}\n" +
+                        "保存OK ${saved.updateId}"
             } catch (error: Exception) {
                 status.text = "失敗: ${error.message}"
             } finally {

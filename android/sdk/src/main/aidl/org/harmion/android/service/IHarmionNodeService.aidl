@@ -18,9 +18,14 @@ interface IHarmionNodeService {
     void requestSync();
 
     // Registers an approval request for the calling app and returns an opaque,
-    // single-use token. The connection id comes from connect-start.
-    String beginApproval(String connectionId);
+    // single-use token. Both values come from connect-start; the secret proves
+    // that the caller owns this request.
+    String beginApproval(String connectionId, String requestSecret);
 
     // Human-readable node summary for approval UIs (no secrets).
     String nodeSummary();
+
+    // Records this package as an approved caller after connect-complete. Both
+    // values come from connect-start; the node verifies the secret.
+    boolean registerCaller(String connectionId, String requestSecret);
 }

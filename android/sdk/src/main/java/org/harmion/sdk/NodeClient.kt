@@ -42,12 +42,15 @@ class NodeClient private constructor(
 
     fun nodeSummary(): JSONObject = JSONObject(call { service.nodeSummary() })
 
+    internal fun registerCaller(connectionId: String, requestSecret: String): Boolean =
+        call { service.registerCaller(connectionId, requestSecret) }
+
     /**
      * Registers an approval request for this app. The node verifies the Binder
      * UID, package and signing certificate before issuing a single-use token.
      */
-    internal fun beginApproval(connectionId: String): String {
-        val reply = JSONObject(call { service.beginApproval(connectionId) })
+    internal fun beginApproval(connectionId: String, requestSecret: String): String {
+        val reply = JSONObject(call { service.beginApproval(connectionId, requestSecret) })
         if (!reply.optBoolean("ok")) {
             val error = reply.optJSONObject("error")
             throw HarmionException(

@@ -217,8 +217,10 @@ AIDL `IHarmionNodeService`:
 - 主経路はiroh（UDP）。Androidからの発信は必須要件として満たす。
 - irohのbindに失敗した場合、HTTPS Peerリスナーを現在のLANアドレスにbindする
   フォールバックを行う（`NodeRuntimeController.startOptions`）。到達可能性は保証しない。
-- 既定では着信待ちの常駐をしない。ユーザーが「常時稼働」を有効にした場合のみ
-  foreground serviceがランタイムを保持し、着信・定期同期を継続する。
+- 既定では着信待ちの常駐をしない。UIはON_STARTでacquireしON_STOPでreleaseする。
+  bound serviceはbindを保持してもacquireしない（任意アプリのbind保持で常駐させない）。
+  SDKは各操作の前に`ensureRunning`でオンデマンド起動する。ユーザーが「常時稼働」を
+  有効にした場合のみforeground serviceが保持し、着信・定期同期を継続する。
   端末再起動後の自動起動はしない。
 - 着信・発信とも既存のmembership認可を通る。着信によってポリシーを迂回しない。
 ## 11. UI・通知
@@ -272,12 +274,18 @@ AIDL `IHarmionNodeService`:
 ### セキュリティレビュー対応（2026-11-25）
 - High: F-01（API 34+のidentity共有）、F-02（FLAG_SECURE・overlay不可・二重検証）は修正済み。
 - Medium: 同期ゲート初期許可（Rust唯一のMedium）→ `sync_blocked` と起動前評価で修正。
-  F-03（承認UIの同一性・遷移先・grant差分）、F-05（承認tokenの非追い出し・接続存在確認）、
-  F-06（throttleの同期化）、F-07（ポリシー初期評価・バッテリー再評価）、
+  F-03（承認UIの同一性・遷移先・grant差分）、F-05（承認tokenの非追い出し・**request_secret
+  による接続束縛**）、F-06（throttleの同期化）、F-07（ポリシー初期評価・バッテリー再評価）、
   F-09（refresh Mutexと401競合の再確認）、F-10（API 29の鍵無効化・回復UI）も対応。
   F-08はSDKがノードアプリの署名SHA-256を`BuildConfig.NODE_CERT_SHA256`で照合する。
-- 残: F-04の完全な認証（Serviceの情報面はUID throttleと最小情報で緩和、`connectionInfo`は
-  SDK発見に必要）、F-14の配布APKはdebugのまま（release設定は追加済み、署名鍵は環境変数）。
+- F-04（Service認証）: 承認完了時に`CallerAccess`へpackage/署名証明書/app_idを記録し、
+  `status`/`requestSync`/`nodeSummary`は承認済みパッケージのみ許可。`beginApproval`は
+  `request_secret`を`connect-status`で検証し、`registerCaller`は接続完了後にのみ登録する。
+  未承認の`connectionInfo`はOAuth trust materialを返さない。bind保持はacquireせず、
+  UIはSTART/STOPで参照を管理。UID/グローバル配额とレート制限を追加。
+- 残: `connectionInfo`と`ensureRunning`は初回接続のブートストラップのため無認証のまま
+  （レート制限・最小情報・グローバル起動ゲートで緩和）。F-14の配布APKはdebugのまま
+  （release設定は追加済み、署名鍵は環境変数）。
 ## 14. テスト
 
 - `cargo test -p harmion-runtime`: 初期化・起動・停止・再起動、2ノードの参加・承認・
@@ -319,6 +327,8 @@ JNI実装上の注意（実測）: `JString` を `JavaVM` シングルトン経�
 - アプリ一覧（`apps`）→ grant管理シート→90日延長（owner承認）→期限更新を確認。
 - 回復コード再登録→新コード発行・新fingerprint・enforce有効を確認。
 - Glanceウィジェットをランチャーに配置→「稼働中 / 0 ピア / 開く / 同期」を描画。
+- F-04検証: 未承認の`status`が拒否されること、承認後は`status`が通り、HOME+40秒で
+  `running=false/stopped`、次の`createContent`でオンデマンド起動して保存できることを確認。
 - 承認E2E: debug専用`android/testclient`（`:testclient`）から接続要求→承認画面
   （パッケージ・証明書・リダイレクト・期限30/90/365）→90日選択→指紋→connectComplete→
   createContentまで確認。ノードのアプリ一覧に90日期限で反映。

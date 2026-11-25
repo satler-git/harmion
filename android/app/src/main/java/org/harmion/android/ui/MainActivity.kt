@@ -34,11 +34,15 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
@@ -136,14 +140,50 @@ private fun MainScaffold(
     syncRequests: MutableStateFlow<Int>,
 ) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
 
-    DisposableEffect(controller) {
-        controller.acquire()
-        onDispose { controller.release() }
-    }
-    LaunchedEffect(controller) {
-        controller.refreshPolicy()
-        controller.ensureStarted()
+    // Keep the runtime only while the screen is actually started. Releasing on
+    // composition disposal alone would keep the node alive after HOME because a
+    // stopped activity keeps its composition.
+    DisposableEffect(lifecycleOwner, controller) {
+        var acquired = false
+        val observer =
+            LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_START -> {
+                        if (!acquired) {
+                            acquired = true
+                            controller.acquire()
+                            scope.launch {
+                                controller.refreshPolicy()
+                                controller.ensureStarted()
+                            }
+                        }
+                    }
+                    Lifecycle.Event.ON_STOP,
+                    Lifecycle.Event.ON_DESTROY -> {
+                        if (acquired) {
+                            acquired = false
+                            controller.release()
+                        }
+                    }
+                    else -> Unit
+                }
+            }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            acquired = true
+            controller.acquire()
+            scope.launch {
+                controller.refreshPolicy()
+                controller.ensureStarted()
+            }
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            if (acquired) controller.release()
+        }
     }
     val context = androidx.compose.ui.platform.LocalContext.current
     val syncCount by syncRequests.collectAsStateWithLifecycle()

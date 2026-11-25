@@ -231,7 +231,16 @@ fun AppsScreen(controller: NodeRuntimeController) {
                                 admin.close()
                             }
                         }
-                    }.onSuccess { managing = null; reload() }
+                    }.onSuccess {
+                        if (revoked) {
+                            org.harmion.android.service.CallerAccess.revokeApp(
+                                context,
+                                app.optString("app_id"),
+                            )
+                        }
+                        managing = null
+                        reload()
+                    }
                         .onFailure { error = it.message }
                 }
             },

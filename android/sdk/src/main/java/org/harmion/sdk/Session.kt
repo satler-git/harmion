@@ -64,7 +64,7 @@ class HarmionSession internal constructor(
         if (!withContext(Dispatchers.IO) { node.ensureRunning() }) {
             throw HarmionException("node_unavailable", "the Harmion node could not start")
         }
-        val connection = withContext(Dispatchers.IO) { node.connectionInfo() }
+        val connection = awaitConnection()
         val verifier = Requests.pkceVerifier()
         val challenge = Requests.pkceChallenge(verifier)
         val state = Requests.randomIdHex(16)
@@ -82,7 +82,8 @@ class HarmionSession internal constructor(
                 }
             val connectionId = started.getString("connection_id")
             val requestSecret = started.getString("request_secret")
-            val token = withContext(Dispatchers.IO) { node.beginApproval(connectionId) }
+            val token =
+                withContext(Dispatchers.IO) { node.beginApproval(connectionId, requestSecret) }
             withContext(Dispatchers.Main) { node.launchApproval(connectionId, token) }
 
             val deadline = System.currentTimeMillis() + APPROVAL_TIMEOUT_MILLIS
@@ -142,6 +143,15 @@ class HarmionSession internal constructor(
                         System.currentTimeMillis() + reply.optLong("expires_in", 600L) * 1000L,
                     scope = reply.optString("scope"),
                 )
+            if (!withContext(Dispatchers.IO) {
+                    node.registerCaller(connectionId, requestSecret)
+                }
+            ) {
+                throw HarmionException(
+                    "not_authorized",
+                    "the node did not register this app as an approved caller",
+                )
+            }
             store.save(stored)
             invalidate()
             credentials = stored
@@ -305,7 +315,28 @@ class HarmionSession internal constructor(
 
     private val refreshMutex = Mutex()
 
+    /** The runtime reports running slightly before discovery is published. */
+    private suspend fun awaitConnection(): NodeConnection {
+        var last: Throwable? = null
+        repeat(6) {
+            runCatching {
+                    withContext(Dispatchers.IO) { node.connectionInfo() }
+                }
+                .onSuccess { return it }
+                .onFailure { last = it }
+            delay(600)
+        }
+        throw HarmionException(
+            "node_unavailable",
+            last?.message ?: "node discovery is not ready",
+            last,
+        )
+    }
+
     private suspend fun <T> authed(block: (Long) -> T): T {
+        if (!withContext(Dispatchers.IO) { node.ensureRunning() }) {
+            throw HarmionException("node_unavailable", "the Harmion node could not start")
+        }
         val first = ensureHandle()
         val used = credentials?.accessToken
         return try {
@@ -321,7 +352,7 @@ class HarmionSession internal constructor(
 
     private suspend fun ensureHandle(): Long {
         if (handle != 0L) return handle
-        val connection = withContext(Dispatchers.IO) { node.connectionInfo() }
+        val connection = awaitConnection()
         val stored =
             credentials ?: store.load()?.also { credentials = it }
                 ?: throw HarmionException("not_authorized", "call authorize() first")
@@ -367,7 +398,7 @@ class HarmionSession internal constructor(
         }
 
     private suspend fun refreshLocked(stored: StoredCredentials): StoredCredentials {
-        val connection = withContext(Dispatchers.IO) { node.connectionInfo() }
+        val connection = awaitConnection()
         val origin = connection.oauthOrigin
             ?: throw HarmionException("not_authorized", "the node has no OAuth origin")
         val root = connection.oauthRoot
