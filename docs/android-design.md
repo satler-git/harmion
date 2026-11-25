@@ -231,8 +231,8 @@ AIDL `IHarmionNodeService`:
   セキュリティ上重要な警告（強い権限、所有者キー失効、回復コード再表示不可）だけを残す。
 - 承認Activityは`taskAffinity=""`の専用タスクで開き、完了時に`finishAndRemoveTask()`で
   タスクごと閉じる。これにより承認後はノードアプリではなく要求元アプリへ戻る（F-17の緩和も兼ねる）。
-- 画面: Onboarding（作成 / QR参加）、ホーム（状態・同期・競合・ノード）、
-  ピア（招待QR・メンバー）、アプリ（接続要求・認可済みアプリのgrant/期限管理）、
+- 画面: Onboarding（作成 / QR参加 / 参加要求QR / コード貼り付け）、
+  ホーム（状態・同期・競合・ノード）、ピア（招待QR・参加承認・メンバー）、アプリ（接続要求・認可済みアプリのgrant/期限管理）、
   設定（同期ポリシー・常時稼働・所有者承認・回復コード再登録）、接続承認Activity、
   競合解決シート（候補選択・本文3-way merge）。
 - 通知: 同期・承認・競合/ストレージ（`issues`）。競合とストレージ異常は
@@ -271,8 +271,9 @@ AIDL `IHarmionNodeService`:
 3. OAuth（ブラウザ）認可時の期限選択: SDK接続は選択可能。OAuth offer側の期限選択は未対応。
 4. 競合解決の実Peer間E2E: 2ノードのRust E2Eで、UIが送る`select`/`resolve` JSONと
    `merge_plan`を通した解決まで確認済み。エミュレータ2台での画面操作のみ未実施。
-5. QR参加の完全自動化: 参加側の読み取りと`join`は実装。既存ノード側で参加要求を
-   承認するUI導線は未整備（`approve`はowner assertion必須）。
+5. QR参加: 参加側の読み取り/貼り付け→`join`→**参加要求QRの表示**、既存ノード側の
+   **参加要求の読み取り/貼り付け→owner承認（`approve`）**まで実装。既存ノードの
+   メンバー一覧に追加されるところまで確認済み。
 6. Interpreterのオンデマンド起動・Wasm Runner。
 7. 部分同期・履歴削減（Core共通）。
 8. クイック設定タイル。
@@ -335,6 +336,8 @@ JNI実装上の注意（実測）: `JString` を `JavaVM` シングルトン経�
 - Glanceウィジェットをランチャーに配置→「稼働中 / 0 ピア / 開く / 同期」を描画。
 - F-04検証: 未承認の`status`が拒否されること、承認後は`status`が通り、HOME+40秒で
   `running=false/stopped`、次の`createContent`でオンデマンド起動して保存できることを確認。
+- 参加承認E2E（2 Androidユーザー）: Aを作成＋所有者登録、Bが招待コードを貼り付けて`join`、
+  Bの参加要求コードをAの「参加要求を承認」に貼り付け→指紋→Aのメンバーが2台になることを確認。
 - 承認後の戻り先: 承認完了直後のtop activityが`org.harmion.testclient/.MainActivity`で
   あること、ApprovalActivityのタスクが残らないことを確認。
 - 承認E2E: debug専用`android/testclient`（`:testclient`）から接続要求→承認画面

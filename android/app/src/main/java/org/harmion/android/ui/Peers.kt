@@ -1,6 +1,8 @@
 package org.harmion.android.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -13,8 +15,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.PersonAdd
+import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
@@ -22,8 +26,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -36,6 +42,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
+import org.harmion.android.HarmionApplication
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -51,6 +64,35 @@ fun PeersScreen(controller: NodeRuntimeController) {
     var members by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
+    var approvalOpen by remember { mutableStateOf(false) }
+    var approvalCode by remember { mutableStateOf("") }
+    var approvalBusy by remember { mutableStateOf(false) }
+    var approvalError by remember { mutableStateOf<String?>(null) }
+    var approvalNotice by remember { mutableStateOf<String?>(null) }
+    val activity = context as? FragmentActivity
+    val application = context.applicationContext as HarmionApplication
+
+    val scanLauncher =
+        rememberLauncherForActivityResult(ScanContract()) { result ->
+            result?.contents?.let { approvalCode = it }
+        }
+    val cameraPermission =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                scanLauncher.launch(scanOptions())
+            } else {
+                approvalError = "カメラ権限が必要です"
+            }
+        }
+    fun scanApproval() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            scanLauncher.launch(scanOptions())
+        } else {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        }
+    }
 
     fun reload() {
         loading = true
@@ -155,6 +197,24 @@ fun PeersScreen(controller: NodeRuntimeController) {
             }
         }
 
+        item {
+            OutlinedButton(
+                onClick = {
+                    approvalCode = ""
+                    approvalError = null
+                    approvalNotice = null
+                    approvalOpen = true
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                Text("参加要求を承認", modifier = Modifier.padding(start = 8.dp))
+            }
+            approvalNotice?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+
         item { SectionHeader("メンバー", "${members.size} 台のノード") }
 
         if (members.isEmpty()) {
@@ -197,4 +257,82 @@ fun PeersScreen(controller: NodeRuntimeController) {
 
         item { androidx.compose.foundation.layout.Spacer(Modifier.size(8.dp)) }
     }
+
+    if (approvalOpen) {
+        val decoded =
+            remember(approvalCode) {
+                runCatching {
+                    PeerCode.decode(approvalCode)?.let { JSONObject(String(it, Charsets.UTF_8)) }
+                }.getOrNull()
+            }
+        AlertDialog(
+            onDismissRequest = { if (!approvalBusy) approvalOpen = false },
+            title = { Text("参加を承認") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = approvalCode,
+                        onValueChange = { approvalCode = it.trim() },
+                        label = { Text("参加コード") },
+                        minLines = 3,
+                        maxLines = 6,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    decoded?.let {
+                        Text(
+                            "クラスタ ${shortId(it.optString("cluster_id"))} / " +
+                                "ノード ${shortId(it.optString("node_id"))}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    approvalError?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    TextButton(onClick = { scanApproval() }, enabled = !approvalBusy) {
+                        Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Text("QRを読み取る", modifier = Modifier.padding(start = 6.dp))
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !approvalBusy && decoded != null && activity != null,
+                    onClick = {
+                        val bytes = PeerCode.decode(approvalCode) ?: return@TextButton
+                        approvalBusy = true
+                        approvalError = null
+                        scope.launch {
+                            runCatching {
+                                withContext(Dispatchers.IO) {
+                                    val admin = controller.adminClient()
+                                    try {
+                                        application.ownerAdmin.approveNode(admin, activity, bytes)
+                                    } finally {
+                                        admin.close()
+                                    }
+                                }
+                            }.onSuccess {
+                                approvalOpen = false
+                                approvalNotice = "承認しました。相手の同期後にメンバーへ反映されます。"
+                                reload()
+                            }.onFailure {
+                                approvalError = it.message ?: "承認できませんでした"
+                            }
+                            approvalBusy = false
+                        }
+                    },
+                ) { Text(if (approvalBusy) "承認中…" else "承認") }
+            },
+            dismissButton = {
+                TextButton(onClick = { if (!approvalBusy) approvalOpen = false }) { Text("キャンセル") }
+            },
+        )
+    }
 }
+
+private fun scanOptions(): ScanOptions =
+    ScanOptions()
+        .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+        .setPrompt("参加コードを読み取ります")
+        .setBeepEnabled(false)
+        .setOrientationLocked(false)

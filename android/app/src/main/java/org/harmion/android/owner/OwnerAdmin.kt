@@ -53,6 +53,12 @@ class OwnerAdmin(
             }
         }
 
+    suspend fun approveNode(
+        admin: HarmionAdminClient,
+        activity: FragmentActivity?,
+        registration: ByteArray,
+    ): JSONObject = call(admin, activity, "approve", registration)
+
     suspend fun decideConnection(
         admin: HarmionAdminClient,
         activity: FragmentActivity?,
