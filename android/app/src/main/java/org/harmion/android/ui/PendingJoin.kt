@@ -11,10 +11,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.HourglassTop
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -34,7 +36,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.harmion.android.core.NodeRuntimeController
 
 /** Join request code kept until the existing node approves this device. */
@@ -60,6 +64,31 @@ object PendingJoin {
             .remove(KEY)
             .apply()
     }
+
+    /**
+     * Rebuilds the registration from the node's current identity. The iroh
+     * endpoint/relay and signing key live there, so a changed endpoint produces
+     * a fresh code instead of a stale one.
+     */
+    suspend fun refresh(context: Context, controller: NodeRuntimeController): String? {
+        val stored = code(context) ?: return null
+        val registration =
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    if (!controller.ensureStarted()) return@withContext null
+                    val admin = controller.adminClient()
+                    try {
+                        admin.identity()
+                    } finally {
+                        admin.close()
+                    }
+                }
+            }.getOrNull() ?: return stored
+        if (registration.optString("cluster_root").isBlank()) return stored
+        val fresh = PeerCode.encode(registration.toString().toByteArray(Charsets.UTF_8))
+        if (fresh != stored) save(context, fresh)
+        return fresh
+    }
 }
 
 /**
@@ -83,6 +112,11 @@ fun PendingJoinCard(controller: NodeRuntimeController) {
             code = null
         }
     }
+    LaunchedEffect(Unit) {
+        if (!active) {
+            PendingJoin.refresh(context, controller)?.let { code = it }
+        }
+    }
     val current = code ?: return
 
     HarmionCard(containerColor = MaterialTheme.colorScheme.tertiaryContainer) {
@@ -97,6 +131,18 @@ fun PendingJoinCard(controller: NodeRuntimeController) {
                     "既存ノードで読み取って承認",
                     style = MaterialTheme.typography.bodySmall,
                 )
+            }
+            IconButton(
+                onClick = {
+                    scope.launch {
+                        val before = code
+                        val refreshed = PendingJoin.refresh(context, controller)
+                        if (refreshed != null) code = refreshed
+                        message = if (refreshed != null && refreshed != before) "更新しました" else "最新です"
+                    }
+                },
+            ) {
+                Icon(Icons.Rounded.Refresh, contentDescription = "参加コードを更新")
             }
             TextButton(
                 onClick = {

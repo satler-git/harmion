@@ -340,7 +340,8 @@ JNI実装上の注意（実測）: `JString` を `JavaVM` シングルトン経�
 - 参加承認E2E（2 Androidユーザー）: Aを作成＋所有者登録、Bが招待コードを貼り付けて`join`、
   Bの参加要求コードをAの「参加要求を承認」に貼り付け→指紋→Aのメンバーが2台になることを確認。
 - 「参加承認待ち」カード: Bで参加後にホーム/ピアへ表示され、アプリを強制終了→再起動しても
-  同じQRが再表示されることを確認。
+  同じQRが再表示されることを確認。保存コードのrelay_urlを意図的に古い値へ書き換えて起動し、
+  現在の`identity()`の値（relay_url=null）へ自動更新されることも確認。
 - 承認後の戻り先: 承認完了直後のtop activityが`org.harmion.testclient/.MainActivity`で
   あること、ApprovalActivityのタスクが残らないことを確認。
 - 承認E2E: debug専用`android/testclient`（`:testclient`）から接続要求→承認画面
