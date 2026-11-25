@@ -282,7 +282,7 @@ private fun ApprovalScreen(
                         request.optString("redirect_uri").takeIf { it.isNotEmpty() }?.let {
                             Text("リダイレクト先: $it", style = MaterialTheme.typography.bodySmall)
                         }
-                        request.optString("web_origin").takeIf { it.isNotEmpty() }?.let {
+                        request.optString("web_origin").takeIf { it.isNotEmpty() && it != "null" }?.let {
                             Text("Web origin: $it", style = MaterialTheme.typography.bodySmall)
                         }
                     }

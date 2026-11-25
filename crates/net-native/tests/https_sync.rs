@@ -130,6 +130,50 @@ impl Node {
             .await
             .unwrap()
     }
+
+    async fn start_app_api(
+        &self,
+    ) -> (
+        harmion_client::Client,
+        watch::Sender<bool>,
+        tokio::task::JoinHandle<Result<(), harmion_net_native::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let client = harmion_client::Client::new(
+            ConnectionInfo {
+                version: 1,
+                cluster_id: hex(&self.identity.cluster.0),
+                node_id: hex(&self.identity.node.0),
+                certificate: hex(self.tls.certificate()),
+                endpoint: endpoint.to_string(),
+                oauth_origin: None,
+            },
+            *self.admin.expose_bytes(),
+        )
+        .unwrap();
+        let registration = PeerRegistration {
+            version: 2,
+            signing_key: None,
+            cluster_root: None,
+            cluster_id: hex(&self.identity.cluster.0),
+            node_id: hex(&self.identity.node.0),
+            binding: PeerBinding::Https {
+                certificate: hex(self.tls.certificate()),
+                endpoint: self.endpoint.clone(),
+            },
+        };
+        let (stop, receiver) = watch::channel(false);
+        let task = tokio::spawn(harmion_net_native::app::serve(
+            listener,
+            self.store.clone(),
+            self.tls.clone(),
+            registration,
+            receiver,
+        ));
+        (client, stop, task)
+    }
+
     async fn finish(self) {
         self.stop.send(true).unwrap();
         self.task.await.unwrap().unwrap();
@@ -666,6 +710,208 @@ async fn rejected_update_reports_id_and_reason_after_rolling_back_page_prefix() 
         .await
         .unwrap();
     assert_eq!(b.count().await, 1);
+    a.finish().await;
+    b.finish().await;
+}
+
+async fn conflicting_body(node: &Node) {
+    node.save(
+        1,
+        Command::Create {
+            fields: fields("left\nmiddle\nright"),
+        },
+    )
+    .await;
+}
+
+async fn make_body_conflict(a: &Node, b: &Node) {
+    conflicting_body(a).await;
+    peer::sync_once(&a.store, &a.tls, b.identity.node)
+        .await
+        .unwrap();
+    let at = a.get().await.edit_token;
+    let bt = b.get().await.edit_token;
+    a.save(
+        2,
+        Command::Edit {
+            token: at,
+            fields: fields("A-left\nmiddle\nright"),
+        },
+    )
+    .await;
+    b.save(
+        1,
+        Command::Edit {
+            token: bt,
+            fields: fields("left\nmiddle\nB-right"),
+        },
+    )
+    .await;
+    peer::sync_once(&a.store, &a.tls, b.identity.node)
+        .await
+        .unwrap();
+    assert_eq!(a.snapshot().await.fields[&Field::Body].candidates.len(), 2);
+}
+
+fn body_versions(view: &serde_json::Value) -> (String, Vec<String>, serde_json::Value) {
+    let group = view["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["field"]["type"] == "body")
+        .expect("body candidates");
+    let versions = group["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|candidate| {
+            candidate["versions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+        })
+        .collect();
+    let token = view["view"]["edit_token"].as_str().unwrap().to_owned();
+    (token, versions, group.clone())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_shaped_select_request_resolves_a_body_conflict() {
+    use harmion_sdk_native::spec::save_request;
+    let dir = Directory::new();
+    let a = Node::start(&dir, 1).await;
+    let b = Node::start(&dir, 2).await;
+    a.approve(&b).await;
+    b.approve(&a).await;
+    make_body_conflict(&a, &b).await;
+    let (client, stop, task) = a.start_app_api().await;
+    let id = ContentId([1; 32]);
+    let view = client.call("inspect", &id.0).await.unwrap();
+    let (token, versions, group) = body_versions(&view);
+    let chosen = group["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["value"]["value"] == "A-left\nmiddle\nright")
+        .expect("A candidate");
+    let version = chosen["versions"][0].as_str().unwrap();
+    let json = serde_json::json!({
+        "request_id": "11".repeat(32),
+        "content_id": hex(&id.0),
+        "command": {
+            "type": "select",
+            "token": token,
+            "selections": [{
+                "field": "body",
+                "version": version,
+                "replaces": versions,
+            }],
+        },
+    });
+    let request = save_request(&json.to_string()).unwrap();
+    client.save(&request).await.unwrap();
+    peer::sync_once(&b.store, &b.tls, a.identity.node)
+        .await
+        .unwrap();
+    assert_eq!(a.snapshot().await.fields[&Field::Body].candidates.len(), 1);
+    assert_eq!(
+        a.snapshot().await.fields[&Field::Body].candidates[0].value,
+        Value::Body("A-left\nmiddle\nright".into())
+    );
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+    a.finish().await;
+    b.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_shaped_merge_plan_and_resolve_clear_a_body_conflict() {
+    use harmion_protocol::resolution::{MergeInputRequest, MergePart, MergePlan};
+    use harmion_sdk_native::spec::save_request;
+    let dir = Directory::new();
+    let a = Node::start(&dir, 1).await;
+    let b = Node::start(&dir, 2).await;
+    a.approve(&b).await;
+    b.approve(&a).await;
+    make_body_conflict(&a, &b).await;
+    let (client, stop, task) = a.start_app_api().await;
+    let id = ContentId([1; 32]);
+    let view = client.call("inspect", &id.0).await.unwrap();
+    let (token, versions, group) = body_versions(&view);
+    let left = group["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["value"]["value"] == "A-left\nmiddle\nright")
+        .unwrap()["versions"][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let right = group["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["value"]["value"] == "left\nmiddle\nB-right")
+        .unwrap()["versions"][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut part = MergePart::Base(None);
+    let text = loop {
+        let plan = client
+            .merge_plan(MergeInputRequest {
+                content: id,
+                token: EditToken(unhex(&token).unwrap()),
+                left: UpdateId(unhex(&left).unwrap()),
+                right: UpdateId(unhex(&right).unwrap()),
+                part,
+            })
+            .await
+            .unwrap();
+        match plan {
+            MergePlan::Proposed {
+                text,
+                has_conflicts,
+                ..
+            } => {
+                assert!(!has_conflicts);
+                break text;
+            }
+            MergePlan::ChooseBase { versions } => {
+                part = MergePart::Base(Some(UpdateId(
+                    unhex(versions.first().expect("base version")).unwrap(),
+                )));
+            }
+            MergePlan::NoBase => panic!("merge base is missing"),
+        }
+    };
+    assert_eq!(text, "A-left\nmiddle\nB-right");
+    let json = serde_json::json!({
+        "request_id": "22".repeat(32),
+        "content_id": hex(&id.0),
+        "command": {
+            "type": "resolve",
+            "token": token,
+            "changes": [{
+                "field": "body",
+                "text": text,
+                "replaces": versions,
+            }],
+        },
+    });
+    let request = save_request(&json.to_string()).unwrap();
+    client.save(&request).await.unwrap();
+    peer::sync_once(&b.store, &b.tls, a.identity.node)
+        .await
+        .unwrap();
+    assert_eq!(a.snapshot().await.fields[&Field::Body].candidates.len(), 1);
+    assert_eq!(
+        a.snapshot().await.fields[&Field::Body].candidates[0].value,
+        Value::Body("A-left\nmiddle\nB-right".into())
+    );
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
     a.finish().await;
     b.finish().await;
 }

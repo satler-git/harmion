@@ -71,6 +71,10 @@ class HarmionAdminClient private constructor(private val handle: Long) : AutoClo
     fun conflicts(contentHex: String): JSONObject =
         nativeReply(HarmionNative.conflicts(handle, contentHex)) { it.getJSONObject("response") }
 
+    /** Management conflict view (Manage token) required for three-way merge. */
+    fun inspect(contentHex: String): JSONObject =
+        nativeReply(HarmionNative.inspect(handle, contentHex)) { it.getJSONObject("response") }
+
     fun mergeInput(
         contentHex: String,
         tokenHex: String,

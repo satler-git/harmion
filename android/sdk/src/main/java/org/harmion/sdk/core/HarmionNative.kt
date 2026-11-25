@@ -58,6 +58,8 @@ internal object HarmionNative {
 
     external fun conflicts(handle: Long, content: String): String
 
+    external fun inspect(handle: Long, content: String): String
+
     external fun mergeInput(
         handle: Long,
         content: String,

@@ -32,7 +32,9 @@ impl FakeServer {
         ));
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path).expect("bind fake server");
-        listener.set_nonblocking(true).expect("nonblocking listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let handle = thread::spawn(move || {
@@ -166,11 +168,7 @@ fn stdio_binary_frames_initialize_and_diagnostics() {
         &json!({ "jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": null }),
     )
     .unwrap();
-    write_message(
-        &mut input,
-        &json!({ "jsonrpc": "2.0", "method": "exit" }),
-    )
-    .unwrap();
+    write_message(&mut input, &json!({ "jsonrpc": "2.0", "method": "exit" })).unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_wiki-lsp"))
         .arg("--socket")

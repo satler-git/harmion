@@ -174,7 +174,7 @@ private fun ConflictDetail(
                 withContext(Dispatchers.IO) {
                     val admin = controller.adminClient()
                     try {
-                        admin.conflicts(contentId)
+                        admin.inspect(contentId)
                     } finally {
                         admin.close()
                     }

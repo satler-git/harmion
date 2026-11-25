@@ -392,9 +392,17 @@ fn watch_blocks_until_a_mutation_and_returns_new_generation() {
         )
     });
     std::thread::sleep(Duration::from_millis(100));
-    ok(&socket, "update_meta", json!({"id": "p-home", "title": "watch test"}));
+    ok(
+        &socket,
+        "update_meta",
+        json!({"id": "p-home", "title": "watch test"}),
+    );
     let changed = watcher.join().expect("watch thread");
     assert_eq!(changed["changed"], true);
     assert!(changed["generation"].as_u64().unwrap_or(0) > generation);
-    assert!(changed["items"].as_array().is_some_and(|items| !items.is_empty()));
+    assert!(
+        changed["items"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    );
 }

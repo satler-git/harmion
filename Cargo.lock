@@ -1691,6 +1691,7 @@ dependencies = [
  "harmion-local-web",
  "harmion-node",
  "harmion-protocol",
+ "harmion-sdk-native",
  "harmion-store-sqlite",
  "http-body-util",
  "hyper",

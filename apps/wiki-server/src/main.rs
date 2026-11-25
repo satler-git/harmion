@@ -543,7 +543,10 @@ fn connect(options: ConnectOptions) -> Result<(), Box<dyn std::error::Error>> {
         println!("provider: no manifest registered");
     } else {
         for binding in &credentials.providers {
-            println!("provider: {} (provider_id {})", binding.name, binding.provider_id);
+            println!(
+                "provider: {} (provider_id {})",
+                binding.name, binding.provider_id
+            );
         }
     }
     println!(

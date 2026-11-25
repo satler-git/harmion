@@ -261,8 +261,8 @@ AIDL `IHarmionNodeService`:
 1. 物理端末でのKeystore/BiometricPrompt/Doze/着信の検証（エミュレータでは完了）。
 2. 接続承認以外のR2操作（join/retire/confirm-retirement等）への`OwnerAdmin.call`適用。
 3. OAuth（ブラウザ）認可時の期限選択: SDK接続は選択可能。OAuth offer側の期限選択は未対応。
-4. 競合解決の実Peer間E2E: UI・FFI・Core解決テストは実装済みだが、2台の実機/Peerを
-   使った画面操作は未実施（API/JSON仕様は単体テストで固定）。
+4. 競合解決の実Peer間E2E: 2ノードのRust E2Eで、UIが送る`select`/`resolve` JSONと
+   `merge_plan`を通した解決まで確認済み。エミュレータ2台での画面操作のみ未実施。
 5. QR参加の完全自動化: 参加側の読み取りと`join`は実装。既存ノード側で参加要求を
    承認するUI導線は未整備（`approve`はowner assertion必須）。
 6. Interpreterのオンデマンド起動・Wasm Runner。
@@ -290,6 +290,8 @@ AIDL `IHarmionNodeService`:
   と、所有者鍵のenroll→署名→ノード検証（enforce含む）。
 - `cargo test -p harmion-sdk-native`: 保存要求の正規エンコード、条件JSON、エラー、
   `select`/`resolve`スペックのパース（UIが送るJSON形状）。
+- `cargo test -p harmion-net-native --test https_sync ui_shaped`: 2ノードで実際に本文競合を作り、
+  Android UIと同じ`select`/`resolve` JSONと`merge_plan`で解決するE2E。
 - `cargo test -p harmion-store-sqlite --test application`: `apps()`の管理読み出し権限、
   `change-grants`の期限延長（過去/過大の拒否）、Select/Resolve、grant世代。
 - `android/scripts/jni-smoke.sh`: ノードcdylibをJVMから呼ぶ（JNIシンボルと初期化）。
@@ -317,7 +319,10 @@ JNI実装上の注意（実測）: `JString` を `JavaVM` シングルトン経�
 - アプリ一覧（`apps`）→ grant管理シート→90日延長（owner承認）→期限更新を確認。
 - 回復コード再登録→新コード発行・新fingerprint・enforce有効を確認。
 - Glanceウィジェットをランチャーに配置→「稼働中 / 0 ピア / 開く / 同期」を描画。
-- `target/emulator/` に各画面のPNGとUIダンプを保存。
+- 承認E2E: debug専用`android/testclient`（`:testclient`）から接続要求→承認画面
+  （パッケージ・証明書・リダイレクト・期限30/90/365）→90日選択→指紋→connectComplete→
+  createContentまで確認。ノードのアプリ一覧に90日期限で反映。
+- `target/emulator/` に各画面のPNGとUIダンプを保存。`testclient`はデバッグ専用で配布しない。
 
 物理端末（未実施）: Wi-Fi/モバイル切替、Doze、プロセス終了、機種変更、着信接続、
 長時間のバッテリー・ストレージ挙動。要求文書の受け入れ条件は実機で確認する。

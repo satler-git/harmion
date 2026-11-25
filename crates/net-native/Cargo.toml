@@ -36,6 +36,7 @@ rustix = { version = "1.1.6", features = ["time"] }
 iroh-relay = { version = "1.4.1", default-features = false, features = ["server", "tls-ring"] }
 harmion-store-sqlite = { path = "../store-sqlite" }
 harmion-client = { path = "../client" }
+harmion-sdk-native = { path = "../client-ffi" }
 
 [lints]
 workspace = true

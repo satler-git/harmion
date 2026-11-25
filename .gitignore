@@ -22,6 +22,7 @@ __pycache__/
 /android/build/
 /android/app/build/
 /android/sdk/build/
+/android/testclient/build/
 /android/.gradle/
 /android/local.properties
 /android/.kotlin/

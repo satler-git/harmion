@@ -129,9 +129,11 @@ pub fn registration_for_connect(
     no_provider: bool,
     provider_name: Option<&str>,
 ) -> Result<Option<ProviderRegistration>, String> {
-    Ok(registrations_for_connect(provide, no_provider, provider_name)?
-        .into_iter()
-        .next())
+    Ok(
+        registrations_for_connect(provide, no_provider, provider_name)?
+            .into_iter()
+            .next(),
+    )
 }
 
 /// The grant names to request. All three built-in names are requested when the
@@ -597,8 +599,16 @@ mod tests {
                 .len(),
             1
         );
-        assert!(registrations_for_connect(false, false, None).unwrap().is_empty());
-        assert!(registrations_for_connect(true, true, None).unwrap().is_empty());
+        assert!(
+            registrations_for_connect(false, false, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            registrations_for_connect(true, true, None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

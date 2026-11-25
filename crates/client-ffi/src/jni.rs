@@ -377,3 +377,16 @@ pub extern "system" fn Java_org_harmion_sdk_core_HarmionNative_mergePlan<'local>
         ))
     })
 }
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_harmion_sdk_core_HarmionNative_inspect<'local>(
+    mut env: EnvUnowned<'local>,
+    _this: JObject<'local>,
+    handle: jlong,
+    content: JString<'local>,
+) -> JString<'local> {
+    call(&mut env, |env| {
+        let content = read(env, &content);
+        Ok(api::inspect(handle as u64, &content))
+    })
+}

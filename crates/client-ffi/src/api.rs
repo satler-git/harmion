@@ -610,6 +610,23 @@ mod tests {
     }
 }
 
+/// Management view (Manage edit token) used for three-way merge.
+pub fn inspect(handle: u64, content_hex: &str) -> String {
+    let content: [u8; 32] = match unhex(content_hex) {
+        Ok(content) => content,
+        Err(_) => return error_reply("invalid_content_id", "content id must be 32 hex bytes"),
+    };
+    match with_client(handle, |client| {
+        client
+            .tokio
+            .block_on(client.client.call("inspect", &content))
+            .map_err(|error| failure(&error))
+    }) {
+        Ok(value) => ok(json!({"response": value})),
+        Err(reply) => reply,
+    }
+}
+
 /// Returns the conflict view (edit token and candidate groups) for a content.
 pub fn conflicts(handle: u64, content_hex: &str) -> String {
     let content: [u8; 32] = match unhex(content_hex) {

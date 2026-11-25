@@ -387,8 +387,8 @@ pub fn filter_spec(all: bool, kinds: Vec<String>) -> Option<FilterSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{fs, os::unix::fs::PermissionsExt};
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     const ACCESS: &str = "1111111111111111111111111111111111111111111111111111111111111111";
