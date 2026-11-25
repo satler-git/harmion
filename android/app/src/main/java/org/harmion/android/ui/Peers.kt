@@ -132,6 +132,8 @@ fun PeersScreen(controller: NodeRuntimeController) {
         contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        item { PendingJoinCard(controller) }
+
         item {
             HarmionCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {

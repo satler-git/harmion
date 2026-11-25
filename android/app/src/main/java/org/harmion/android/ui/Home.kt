@@ -155,6 +155,8 @@ fun HomeScreen(controller: NodeRuntimeController, snapshot: RuntimeSnapshot?) {
             }
         }
 
+        item { PendingJoinCard(controller) }
+
         item { ConflictsSection(controller) }
 
         if (blocked != null) {

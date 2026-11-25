@@ -73,7 +73,9 @@ fun OnboardingScreen(
             message = null
             runCatching { joinCluster(controller, value) }
                 .onSuccess {
-                    joinRequest = PeerCode.encode(it)
+                    val code = PeerCode.encode(it)
+                    PendingJoin.save(context, code)
+                    joinRequest = code
                 }
                 .onFailure { error = it.message ?: "参加できませんでした" }
             scanned.value = null

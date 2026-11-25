@@ -272,8 +272,9 @@ AIDL `IHarmionNodeService`:
 4. 競合解決の実Peer間E2E: 2ノードのRust E2Eで、UIが送る`select`/`resolve` JSONと
    `merge_plan`を通した解決まで確認済み。エミュレータ2台での画面操作のみ未実施。
 5. QR参加: 参加側の読み取り/貼り付け→`join`→**参加要求QRの表示**、既存ノード側の
-   **参加要求の読み取り/貼り付け→owner承認（`approve`）**まで実装。既存ノードの
-   メンバー一覧に追加されるところまで確認済み。
+   **参加要求の読み取り/貼り付け→owner承認（`approve`）**まで実装。参加要求は
+   `PendingJoin`として保存し、ホーム/ピアの「参加承認待ち」カードに永続表示する。
+   membershipがactiveになると自動で消去する。既存ノードのメンバー追加まで確認済み。
 6. Interpreterのオンデマンド起動・Wasm Runner。
 7. 部分同期・履歴削減（Core共通）。
 8. クイック設定タイル。
@@ -338,6 +339,8 @@ JNI実装上の注意（実測）: `JString` を `JavaVM` シングルトン経�
   `running=false/stopped`、次の`createContent`でオンデマンド起動して保存できることを確認。
 - 参加承認E2E（2 Androidユーザー）: Aを作成＋所有者登録、Bが招待コードを貼り付けて`join`、
   Bの参加要求コードをAの「参加要求を承認」に貼り付け→指紋→Aのメンバーが2台になることを確認。
+- 「参加承認待ち」カード: Bで参加後にホーム/ピアへ表示され、アプリを強制終了→再起動しても
+  同じQRが再表示されることを確認。
 - 承認後の戻り先: 承認完了直後のtop activityが`org.harmion.testclient/.MainActivity`で
   あること、ApprovalActivityのタスクが残らないことを確認。
 - 承認E2E: debug専用`android/testclient`（`:testclient`）から接続要求→承認画面
