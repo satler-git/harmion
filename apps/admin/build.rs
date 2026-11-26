@@ -12,18 +12,32 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/vite.config.ts");
     println!("cargo:rerun-if-changed=ui/tsconfig.json");
     println!("cargo:rerun-if-env-changed=NPM");
+    println!("cargo:rerun-if-env-changed=HARMION_ADMIN_UI_DIST");
     let ui = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("ui");
-    assert!(
-        ui.join("node_modules").is_dir(),
-        "Run npm ci --prefix apps/admin/ui before building harmion-admin"
-    );
-    let result = Command::new(env::var_os("NPM").unwrap_or_else(|| "npm".into()))
-        .args(["run", "build"])
-        .current_dir(&ui)
-        .status()
-        .expect("npm is required to build harmion-admin (set NPM to its path)");
-    assert!(result.success(), "admin UI build failed");
-    let dist = ui.join("dist");
+    let dist = match env::var_os("HARMION_ADMIN_UI_DIST") {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            assert!(
+                path.join("index.html").is_file(),
+                "HARMION_ADMIN_UI_DIST must point at a built UI directory (index.html missing)"
+            );
+            println!("cargo:rerun-if-changed={}", path.display());
+            path
+        }
+        None => {
+            assert!(
+                ui.join("node_modules").is_dir(),
+                "Run npm ci --prefix apps/admin/ui before building harmion-admin, or set HARMION_ADMIN_UI_DIST"
+            );
+            let result = Command::new(env::var_os("NPM").unwrap_or_else(|| "npm".into()))
+                .args(["run", "build"])
+                .current_dir(&ui)
+                .status()
+                .expect("npm is required to build harmion-admin (set NPM to its path)");
+            assert!(result.success(), "admin UI build failed");
+            ui.join("dist")
+        }
+    };
     let mut entries = Vec::new();
     collect(&dist, &dist, &mut entries);
     let mut output = String::from(

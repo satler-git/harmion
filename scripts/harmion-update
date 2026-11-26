@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# Install or update the native Harmion binaries from the flake.
+#
+# The flake is the only source of native binaries. This script builds a tagged
+# revision, keeps the resulting store path alive as a GC root, and points
+# ~/.local/bin at it. It does not use dotfiles or home-manager.
+set -euo pipefail
+
+repo="${HARMION_REPO:-github:satler-git/harmion}"
+repo_url="${HARMION_REPO_URL:-https://github.com/satler-git/harmion.git}"
+prefix="${HARMION_PREFIX:-$HOME/.local}"
+state="${HARMION_STATE_DIR:-$prefix/share/harmion}"
+profiles="$state/profiles"
+bin="$prefix/bin"
+instance="${HARMION_INSTANCE:-main}"
+tag=""
+from_local=""
+dry_run=0
+with_systemd=0
+restart=0
+action="install"
+
+usage() {
+    cat <<'EOF'
+Usage: harmion-update [options]
+
+Install or update the native Harmion binaries (~/.local/bin).
+
+Options:
+  --version TAG     Install a specific tag (e.g. v0.1.0 or v0.2.0-rc.1)
+  --from-local DIR  Build DIR instead of the GitHub flake
+  --rollback        Switch back to the previous profile
+  --list            List installed profiles
+  --prune           Remove profiles other than current and previous
+  --systemd         Install harmion@.service and run daemon-reload
+  --restart         Restart harmion@<instance> after installing
+  --dry-run         Print what would be done
+  -h, --help        Show this help
+EOF
+}
+
+die() {
+    echo "harmion-update: $*" >&2
+    exit 1
+}
+
+log() {
+    echo "harmion-update: $*" >&2
+}
+
+require() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+latest_tag() {
+    git ls-remote --tags --refs "$repo_url" 'v*' \
+        | awk '{ sub("refs/tags/", "", $2); print $2 }' \
+        | { grep -v -- '-rc\.' || true; } \
+        | sort -V \
+        | tail -n 1
+}
+
+while (($# > 0)); do
+    case "$1" in
+        --version)
+            (($# >= 2)) || die "--version needs a tag"
+            tag="$2"
+            shift 2
+            ;;
+        --from-local)
+            (($# >= 2)) || die "--from-local needs a directory"
+            from_local="$2"
+            shift 2
+            ;;
+        --rollback)
+            action="rollback"
+            shift
+            ;;
+        --list)
+            action="list"
+            shift
+            ;;
+        --prune)
+            action="prune"
+            shift
+            ;;
+        --systemd)
+            with_systemd=1
+            shift
+            ;;
+        --restart)
+            restart=1
+            shift
+            ;;
+        --dry-run)
+            dry_run=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            die "unknown option: $1"
+            ;;
+    esac
+done
+
+require nix
+require git
+require readlink
+require sort
+
+mkdir -p "$profiles" "$bin"
+
+pointer() {
+    # Atomically replace a symlink.
+    local target="$1" link="$2"
+    ln -sfn "$target" "$link.new"
+    mv -Tf "$link.new" "$link"
+}
+
+case "$action" in
+    list)
+        if compgen -G "$profiles/v*" >/dev/null; then
+            ls -1 "$profiles" | sort -V
+        fi
+        if [[ -L "$state/current" ]]; then
+            echo "current -> $(readlink "$state/current")"
+        fi
+        exit 0
+        ;;
+    prune)
+        current_target="$(readlink "$state/current" 2>/dev/null || true)"
+        previous_target="$(readlink "$state/previous" 2>/dev/null || true)"
+        for profile in "$profiles"/v*; do
+            [[ -e "$profile" ]] || continue
+            target="$profile"
+            if [[ "$target" == "$current_target" || "$target" == "$previous_target" ]]; then
+                continue
+            fi
+            log "removing $profile"
+            if ((dry_run == 0)); then
+                rm -f "$profile"
+            fi
+        done
+        exit 0
+        ;;
+    rollback)
+        [[ -L "$state/previous" ]] || die "no previous profile"
+        target="$(readlink "$state/previous")"
+        [[ -d "$target" ]] || die "previous profile is missing: $target"
+        current="$(readlink "$state/current" 2>/dev/null || true)"
+        log "rolling back to $target"
+        if ((dry_run == 0)); then
+            pointer "$target" "$state/current"
+            if [[ -n "$current" ]]; then
+                pointer "$current" "$state/previous"
+            fi
+        fi
+        tag="$(basename "$target")"
+        ;;
+    install)
+        if [[ -n "$from_local" ]]; then
+            [[ -d "$from_local" ]] || die "not a directory: $from_local"
+            if [[ -z "$tag" ]]; then
+                tag="$(git -C "$from_local" describe --tags --always 2>/dev/null || echo local)"
+            fi
+            flake_ref="path:$from_local"
+        else
+            if [[ -z "$tag" ]]; then
+                tag="$(latest_tag)"
+                [[ -n "$tag" ]] || die "could not find a stable v* tag"
+            fi
+            [[ "$tag" == v* ]] || die "tag must start with v: $tag"
+            flake_ref="$repo/$tag"
+        fi
+        [[ "$tag" =~ ^[A-Za-z0-9._+-]+$ ]] || die "invalid tag: $tag"
+        ;;
+esac
+
+profile="$profiles/$tag"
+if ((dry_run == 0)); then
+    # Build into a temporary out-link, then move it into place so a failed
+    # build never replaces a working profile.
+    tmp="$profiles/.tmp-$tag"
+    rm -f "$tmp"
+    log "building $flake_ref#default"
+    nix build "$flake_ref#default" --out-link "$tmp" --print-build-logs
+    rm -f "$profile"
+    mv -Tf "$tmp" "$profile"
+else
+    log "would build $flake_ref#default into $profile"
+fi
+
+previous="$(readlink "$state/current" 2>/dev/null || true)"
+if ((dry_run == 0)); then
+    if [[ -n "$previous" && "$(readlink "$previous")" != "$(readlink "$profile")" ]]; then
+        pointer "$previous" "$state/previous"
+    fi
+    pointer "$profile" "$state/current"
+    for name in harmiond harmion harmion-admin harmion-update; do
+        if [[ -e "$bin/$name" && ! -L "$bin/$name" ]]; then
+            mkdir -p "$state/pre-install"
+            log "moving existing $bin/$name to $state/pre-install/"
+            mv "$bin/$name" "$state/pre-install/$name"
+        fi
+        pointer "$state/current/bin/$name" "$bin/$name"
+    done
+fi
+
+if ((with_systemd)); then
+    unit_dir="$HOME/.config/systemd/user"
+    unit="$state/current/share/systemd/user/harmion@.service"
+    [[ -f "$unit" ]] || die "unit not found in profile: $unit"
+    mkdir -p "$unit_dir"
+    if ((dry_run == 0)); then
+        install -m 644 "$unit" "$unit_dir/harmion@.service"
+        systemctl --user daemon-reload
+    else
+        log "would install $unit to $unit_dir"
+    fi
+fi
+
+if ((restart)); then
+    if ((dry_run == 0)); then
+        systemctl --user restart "harmion@$instance.service"
+    else
+        log "would restart harmion@$instance.service"
+    fi
+fi
+
+if ((dry_run == 0)); then
+    log "installed $tag"
+    "$bin/harmiond" --version
+    log "daemon restart may be required; use --restart or restart harmion@$instance.service"
+fi

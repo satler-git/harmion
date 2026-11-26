@@ -268,6 +268,7 @@ async fn execute(cli: &Cli, directory: &Path) -> Result<serde_json::Value> {
                 connection_id: id.to_string(),
                 allow: !deny,
                 replace: *replace,
+                expires_at: None,
             })?;
             owner
                 .call(

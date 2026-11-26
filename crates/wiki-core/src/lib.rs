@@ -185,7 +185,7 @@ pub fn scan_embedded_blocks(doc: &str) -> Result<Vec<EmbeddedBlock>, ParseError>
         let mut body_end = None;
         let mut end = offset;
 
-        while let Some(body_line) = lines.next() {
+        for body_line in lines.by_ref() {
             let this_start = offset;
             offset += body_line.len();
             line_no += 1;

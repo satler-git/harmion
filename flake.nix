@@ -137,6 +137,9 @@
               androidPkgs.sqlite
               androidPkgs.nodejs
               androidPkgs.python3
+              # Signing material is fetched from 1Password during release.
+              androidPkgs._1password-cli
+              androidPkgs.jq
             ];
             shellHook = ''
               export ANDROID_HOME="${androidSdk.androidsdk}/libexec/android-sdk"
@@ -150,6 +153,140 @@
               export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$PWD/target}"
               echo "harmion android shell: $(rustc --version), Java $(${androidPkgs.jdk}/bin/java -version 2>&1 | head -1), SDK $ANDROID_HOME"
             '';
+          };
+        }
+      );
+
+      packages = eachSystem (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          lib = pkgs.lib;
+          fenixPkgs = fenix.packages.${system};
+          rust = fenixPkgs.combine [
+            (fenixPkgs.stable.withComponents [
+              "cargo"
+              "rustc"
+            ])
+          ];
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = rust;
+            rustc = rust;
+          };
+
+          admin-ui = pkgs.buildNpmPackage {
+            pname = "harmion-admin-ui";
+            version = "0.1.0";
+            src = ./apps/admin/ui;
+            npmDepsHash = "sha256-1nM8RFpbtsW/hNJdHosZr0Kl9dhG3o9PmLafy5Bh/x0=";
+            npmBuildScript = "build";
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out
+              cp -r dist/. $out/
+              runHook postInstall
+            '';
+          };
+
+          mkHarmion =
+            {
+              pname,
+              package,
+              bins,
+              extraInstall ? "",
+              extraAttrs ? { },
+            }:
+            rustPlatform.buildRustPackage (
+              {
+                inherit pname;
+                version = "0.1.0";
+                src = self;
+                cargoLock = {
+                  lockFile = ./Cargo.lock;
+                  # AntiWebUI is a git dependency used by the Wiki GUI. The
+                  # workspace lockfile is vendored as a whole, so every crate
+                  # from that repository needs the same source hash.
+                  outputHashes = {
+                    "anti-webui-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                    "anti-webui-app-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                    "anti-webui-code-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                    "anti-webui-core-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                    "anti-webui-internal-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                    "anti-webui-macros-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                    "anti-webui-markdown-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                    "anti-webui-style-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                    "anti-webui-symbols-outlined-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                    "anti-webui-wayland-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                    "anti-webui-wgpu-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                    "anti-webui-widgets-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                    "anti-webui-x11-0.1.0" = "sha256-PLR9jCkBfWKA69L4qtDE1qFHkVPU1UgFRk9OC3Oqsqo=";
+                  };
+                };
+                cargoBuildFlags = [ "--package" package ];
+                doCheck = false;
+                nativeBuildInputs = [ pkgs.pkg-config ];
+                buildInputs = [ pkgs.sqlite ];
+                installPhase = ''
+                  runHook preInstall
+                  mkdir -p $out/bin
+                  ${lib.concatMapStrings (bin: ''
+                    binpath="$(find target -type f -path "*/release/${bin}" -print -quit)"
+                    [ -n "$binpath" ] || { echo "missing target binary: ${bin}" >&2; exit 1; }
+                    install -m755 "$binpath" $out/bin/${bin}
+                  '') bins}
+                  ${extraInstall}
+                  runHook postInstall
+                '';
+              }
+              // extraAttrs
+            );
+
+          harmiond = mkHarmion {
+            pname = "harmiond";
+            package = "harmiond";
+            bins = [ "harmiond" ];
+            extraInstall = ''
+              install -Dm644 ${./deploy/systemd}/harmion@.service $out/share/systemd/user/harmion@.service
+              install -Dm755 ${./deploy/backup/harmion-backup.sh} $out/share/harmion/harmion-backup.sh
+            '';
+          };
+
+          harmion = mkHarmion {
+            pname = "harmion";
+            package = "harmion";
+            bins = [ "harmion" ];
+          };
+
+          harmion-admin = mkHarmion {
+            pname = "harmion-admin";
+            package = "harmion-admin";
+            bins = [ "harmion-admin" ];
+            extraAttrs = {
+              HARMION_ADMIN_UI_DIST = "${admin-ui}";
+            };
+          };
+
+          harmion-update = pkgs.writeShellScriptBin "harmion-update" (
+            builtins.readFile ./scripts/harmion-update
+          );
+        in
+        {
+          inherit
+            admin-ui
+            harmion
+            harmion-admin
+            harmion-update
+            harmiond
+            ;
+
+          default = pkgs.buildEnv {
+            name = "harmion";
+            paths = [
+              harmiond
+              harmion
+              harmion-admin
+              harmion-update
+            ];
           };
         }
       );
