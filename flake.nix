@@ -166,6 +166,8 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           lib = pkgs.lib;
+          workspaceVersion =
+            (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
           fenixPkgs = fenix.packages.${system};
           rust = fenixPkgs.combine [
             (fenixPkgs.stable.withComponents [
@@ -180,7 +182,7 @@
 
           admin-ui = pkgs.buildNpmPackage {
             pname = "harmion-admin-ui";
-            version = "0.1.0";
+            version = workspaceVersion;
             src = ./apps/admin/ui;
             npmDepsHash = "sha256-1nM8RFpbtsW/hNJdHosZr0Kl9dhG3o9PmLafy5Bh/x0=";
             npmBuildScript = "build";
@@ -203,7 +205,7 @@
             rustPlatform.buildRustPackage (
               {
                 inherit pname;
-                version = "0.1.0";
+                version = workspaceVersion;
                 src = self;
                 cargoLock = {
                   lockFile = ./Cargo.lock;
