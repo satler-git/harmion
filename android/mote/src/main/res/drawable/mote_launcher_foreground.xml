@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="44"
+    android:viewportHeight="44">
+    <!-- The same four dots as ClusterMark in MoteIcons.kt, inset for adaptive icon masks. -->
+    <group android:translateX="10" android:translateY="10">
+        <path android:fillColor="@color/mote_lavender" android:pathData="M13,12.8a4.3,4.3 0,1 1,-8.6,0a4.3,4.3 0,1 1,8.6,0Z" />
+        <path android:fillColor="@color/mote_lavender" android:pathData="M18.65,6.5a2.85,2.85 0,1 1,-5.7,0a2.85,2.85 0,1 1,5.7,0Z" />
+        <path android:fillColor="@color/mote_lavender" android:pathData="M19.9,14.9a2.15,2.15 0,1 1,-4.3,0a2.15,2.15 0,1 1,4.3,0Z" />
+        <path android:fillColor="@color/mote_lavender" android:pathData="M12.45,20a1.45,1.45 0,1 1,-2.9,0a1.45,1.45 0,1 1,2.9,0Z" />
+    </group>
+</vector>

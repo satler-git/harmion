@@ -18,3 +18,4 @@ rootProject.name = "harmion-android"
 include(":app")
 include(":sdk")
 include(":testclient")
+include(":mote")

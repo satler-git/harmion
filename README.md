@@ -8,6 +8,7 @@ Rustで初期実装を進めています。Content・SQLite保存・App HTTPS AP
 
 - [Androidノードの要件定義・実装指針](docs/android-node.md)
 - [Androidノードの設計・実装状態](docs/android-design.md)
+- [Mote（Android Captureアプリ）の設計・起動手順](docs/mote-design.md)
 
 Android版は、Rust CoreをJNIで埋め込んだ単一プロセスのノードアプリ（管理UI・接続承認Activity・Bound Service）と、
 外部アプリ向けSDK（AIDLで発見・承認、pinned HTTPSでデータ操作）で構成します。同期は`harmion-runtime`が所有し、

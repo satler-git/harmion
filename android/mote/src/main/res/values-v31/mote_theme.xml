@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Mote" parent="Theme.Mote.Base">
+        <item name="android:windowSplashScreenBackground">@color/mote_window</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/mote_launcher_foreground</item>
+    </style>
+</resources>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="mote_window">#14111D</color>
+    <color name="mote_lavender">#D9C0FF</color>
+
+    <style name="Theme.Mote.Base" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/mote_window</item>
+        <item name="android:colorAccent">@color/mote_lavender</item>
+        <item name="android:statusBarColor">@color/mote_window</item>
+        <item name="android:navigationBarColor">@color/mote_window</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+
+    <style name="Theme.Mote" parent="Theme.Mote.Base" />
+</resources>
