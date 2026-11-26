@@ -11,11 +11,11 @@ real quota/cost measurements and DO time-travel restore remain operator tasks.
 
 ## Build
 
-From the repository root, install the admin UI dependencies once and build
-inside `nix develop` (the dev shell provides `wasm-bindgen-cli` 0.2.130):
+From the repository root, build inside `nix develop`. The script builds the
+admin UI through `nix build .#admin-ui` and the wasm bridge with the dev shell's
+`wasm-bindgen-cli` and clang:
 
 ```sh
-npm ci --prefix apps/admin/ui
 nix develop --command bash deploy/cloudflare/build.sh
 ```
 

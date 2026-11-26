@@ -1,43 +1,125 @@
 # Harmion
 
-一人のユーザーが所有する、アプリから独立した個人データ基盤。
+Harmion は、アプリから独立した個人データ基盤です。データと権限は自分のノードに置いたまま、Android アプリや Linux の CLI/管理 UI から同じデータを使います。ノード間は同期し、必要な場合だけ Cloudflare Worker を中継に使います。
 
-Rustで初期実装を進めています。Content・SQLite保存・App HTTPS API・daemon/CLI・HTTPS/irohのPeer同期、署名付き参加・退役・却下証明の伝播を実装しています。nativeではQuery/Subscribe、所有者向けExport、専用CAを使うブラウザOAuth、ローカルInterpreterの登録・承認・Provider WebSocket・呼び出し仲介も利用できます。初回接続はアプリ開始→管理UI「接続」承認→アプリのポーリング完了に統合し、OAuth grantとProvider登録を同じ承認で確定します。5つの独立プロセスで中継・分断・再起動・周期同期を検証し、管理情報の伝播・保留・所有者回復は別の実プロセステストで確認しています。Workers/DOはローカルworkerdまで実装・検証済みで、実Cloudflareには未配置です。各機能の範囲は[実装全体レビュー](docs/implementation-review.md)を参照してください。
+現在は Rust 実装です。Android ノード、Mote、Linux native、Cloudflare Worker/DO まで動作し、Worker は `hub.satler.dev` にデプロイ済みです。機能ごとの実装範囲は[実装全体レビュー](docs/implementation-review.md)を参照してください。
 
-ネイティブの App HTTPS と Rust SDK は、固定スナップショットの Query、初回取得と変更通知をつなぐ Subscribe、購読キャッシュを提供します。所有者向けの `sync-status` では、最後の自発同期の成功・失敗と、保存した更新のPeerごとの受領確認を取得できます。ローカル保存成功・過去の受領確認・現在の到達性は区別します。
+## 配布物
+
+| 対象 | 説明 | 入手 |
+|---|---|---|
+| Harmion node | Android 10+。ノード本体・管理UI・接続承認 | Obtainium / GitHub Releases |
+| Mote | Android 10+。Capture アプリ | Obtainium / GitHub Releases |
+| native | Linux。`harmiond`、`harmion` CLI、`harmion-admin` | flake / `harmion-update` |
+| Worker | Cloudflare Workers + Durable Objects。任意の中継 | [`deploy/cloudflare`](deploy/cloudflare/README.md) |
+
+## Android（Obtainium）
+
+[Obtainium](https://obtainium.imranr.dev/) で GitHub Releases を追跡します。下のボタンは Add App 画面を開き、このリポジトリ用の filter まで入力済みです。内容を確認して追加してください。Obtainium が未導入の場合は導入先を案内するページが開きます。
+
+| アプリ | Obtainium に追加 |
+|---|---|
+| Harmion node | <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium%3A%2F%2Fapp%2F%7B%22id%22%3A%22dev.satler.harmion%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fsatler-git%2Fharmion%22%2C%22author%22%3A%22satler-git%22%2C%22name%22%3A%22Harmion%22%2C%22additionalSettings%22%3A%7B%22filterReleaseTitlesByRegEx%22%3A%22%5Enode-v%22%2C%22apkFilterRegEx%22%3A%22%5Eharmion-node-%22%2C%22versionExtractionRegEx%22%3A%22v%28%5B0-9%5D%2B%5C%5C.%5B0-9%5D%2B%5C%5C.%5B0-9%5D%2B%29%22%2C%22matchGroupToUse%22%3A%221%22%2C%22includePrereleases%22%3Afalse%7D%7D"><img src="docs/assets/obtainium-badge.png" alt="Add Harmion node to Obtainium" width="180"></a> |
+| Mote | <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium%3A%2F%2Fapp%2F%7B%22id%22%3A%22dev.satler.mote%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fsatler-git%2Fharmion%22%2C%22author%22%3A%22satler-git%22%2C%22name%22%3A%22Mote%22%2C%22additionalSettings%22%3A%7B%22filterReleaseTitlesByRegEx%22%3A%22%5Emote-v%22%2C%22apkFilterRegEx%22%3A%22%5Emote-%22%2C%22versionExtractionRegEx%22%3A%22v%28%5B0-9%5D%2B%5C%5C.%5B0-9%5D%2B%5C%5C.%5B0-9%5D%2B%29%22%2C%22matchGroupToUse%22%3A%221%22%2C%22includePrereleases%22%3Afalse%7D%7D"><img src="docs/assets/obtainium-badge.png" alt="Add Mote to Obtainium" width="180"></a> |
+
+ボタンを使わず手動で追加する場合の設定は次のとおりです。Obtainium の filter は **APK ファイル名**に対する正規表現で、パッケージ名では絞れません。同じリポジトリに node と Mote の Release があるため、release title と APK filename の両方で分けます。
+
+| 設定 | Harmion node | Mote |
+|---|---|---|
+| App Source URL | `https://github.com/satler-git/harmion` | 同じ |
+| Filter release titles by regex | `^node-v` | `^mote-v` |
+| Filter APKs by regex | `^harmion-node-` | `^mote-` |
+| Trim version string by regex | `v([0-9]+\.[0-9]+\.[0-9]+)` | 同じ |
+| Match group | `1` | `1` |
+| Include prereleases | off | off |
+
+パッケージ名は、インストール済みアプリの確認に使えます。
+
+- Harmion node: `dev.satler.harmion`
+- Mote: `dev.satler.mote`
+
+初回起動後のノード設定・参加は[Androidノードの要件定義](docs/android-node.md)、Mote の使い方は[Mote の設計・起動手順](docs/mote-design.md)を参照してください。新しい Release は `node-v*` / `mote-v*` タグで作られます。
+
+## Linux native
+
+native のバイナリは GitHub Release に置きません。flake が唯一の配布元です。
+
+インストール済みの `harmion-update` を使う場合:
+
+```sh
+harmion-update --version v0.1.1
+harmion-update --rollback
+```
+
+clone から初めて入れる場合:
+
+```sh
+./scripts/harmion-update --version v0.1.1
+```
+
+`~/.local/bin` に symlink し、`~/.local/share/harmion/profiles/<tag>` を GC root として保持します。dotfiles や home-manager は介しません。`--systemd` で unit を配置し、`--restart` で `harmion@main.service` を再起動できます。
+
+flake から直接ビルドする場合:
+
+```sh
+nix build .#default
+nix build .#harmiond .#harmion .#harmion-admin
+```
+
+日常運用は[Linuxユーザーサービスと日常運用](docs/linux-service.md)、複数ノードの起動は[native 複数ノード同期](docs/native-quickstart.md)を参照してください。
+
+## Cloudflare Worker
+
+Worker は常設の中継・同期先を使う場合だけ必要です。通常の Android / Linux 利用だけなら不要です。デプロイ、secret、Access の設定は[`deploy/cloudflare/README.md`](deploy/cloudflare/README.md)にあります。
+
+本番 endpoint: `https://hub.satler.dev`
+
+## ドキュメント
+
+### 使う
 
 - [Androidノードの要件定義・実装指針](docs/android-node.md)
 - [Androidノードの設計・実装状態](docs/android-design.md)
 - [Mote（Android Captureアプリ）の設計・起動手順](docs/mote-design.md)
-
-Android版は、Rust CoreをJNIで埋め込んだ単一プロセスのノードアプリ（管理UI・接続承認Activity・Bound Service）と、
-外部アプリ向けSDK（AIDLで発見・承認、pinned HTTPSでデータ操作）で構成します。同期は`harmion-runtime`が所有し、
-Wi-Fi・従量制・バッテリー・ローミングのポリシーとWorkManagerを組み合わせます。ビルドは`nix develop .#android`を使います。
-
 - [Linuxユーザーサービスと日常運用](docs/linux-service.md)
+- [native 複数ノード同期の実行](docs/native-quickstart.md)
+- [Android のリリースと署名](docs/android-release.md)
+
+### 仕様・設計
 
 - [現時点の仕様と設計方針](docs/specification.md)
-- [過去の議論との照合・整合性レビュー](docs/review.md)
-- [実装全体レビュー・仕様との差異・暫定対応](docs/implementation-review.md)
-- [実用化改善の引継ぎ・停止位置と再開手順](docs/implementation-handoff.md)
-- [参加・退役の設計判断](docs/membership-design.md)
-- [署名付き参加・退役・却下証明の契約](contracts/membership-v1.md)
-- [内部表現と同期の初期設計](docs/internal-design.md)
 - [ArchitectureとRustパッケージ構成](docs/architecture.md)
 - [取得・編集・Subscribe・OAuthの契約](docs/app-api.md)
-- [Wikiアプリの要件定義（草案）](docs/wiki-app-requirements.md)
-- [Wiki GUIの刷新とフレームワーク判断](docs/wiki-ui-refresh.md)
-- [設計の実行可能な意味モデル](design_checks/model_check.py)
-- [2ノード同期までの実装・レビュー記録](docs/implementation-progress.md)
-- [更新レコードの保存・転送形式v1](contracts/record-v1.md)
-- [App保存要求・認可・ローカル状態](contracts/app-save-v1.md)
+- [内部表現と同期の初期設計](docs/internal-design.md)
+- [参加・退役の設計判断](docs/membership-design.md)
+- [署名付き参加・退役・却下証明の契約](contracts/membership-v1.md)
 - [HTTPS Peerと直接承認の契約](contracts/peer-v1.md)
 - [Interpreter v1の登録・呼び出し契約](contracts/interpreter-v1.md)
-- [所有者認証の将来設計メモ](docs/owner-authentication-memo.md)
+- [App保存要求・認可・ローカル状態](contracts/app-save-v1.md)
+- [更新レコードの保存・転送形式v1](contracts/record-v1.md)
+- [Export v1](contracts/export-v1.md)
+- [Wikiアプリの要件定義](docs/wiki-app-requirements.md)
+- [Wiki GUIの刷新とフレームワーク判断](docs/wiki-ui-refresh.md)
 
-`crates/domain` はI/Oや非同期ランタイムに依存しないRustライブラリです。エラー型の定義には `thiserror` を使います。型で区別したID、create/edit/delete/keep/restore、項目と存在の候補、通常値選択、重複受理と不正参照の検証を扱います。Python意味モデルの10シナリオに対応する到着順テストと、追加の境界テストを用意しています。
+### 開発・運用
 
-Nixを使う場合、`nix develop`でrustc/cargo/clippy/rustfmt（wasm32 std込み）、管理UI用のnode/npm、検証スクリプト用のpython3、C toolchainが揃う。`flake.nix`・`flake.lock`はgitの追跡対象に含める必要がある。Nixを使わない場合は、同じものを個別に用意する。
+- [実装全体レビュー・仕様との差異](docs/implementation-review.md)
+- [実用化改善の引継ぎ・停止位置と再開手順](docs/implementation-handoff.md)
+- [2ノード同期までの実装・レビュー記録](docs/implementation-progress.md)
+- [過去の議論との照合・整合性レビュー](docs/review.md)
+- [CI/CD とリリース運用の計画](docs/ci-plan.md)
+- [ship 戦略とロールアウト](docs/shipping.md)
+- [Cloudflare 中継の設計](docs/cloudflare-design.md)
+- [実装メモ（README から移した詳細）](docs/implementation-notes.md)
+
+## 開発
+
+Nix を使うと、rustc/cargo/clippy/rustfmt（wasm32 std 込み）、管理UI用の node/npm、検証用の python3、C toolchain が揃います。`flake.nix` と `flake.lock` は git の追跡対象に含めてください。
+
+```sh
+nix develop
+nix develop .#android
+```
 
 ```sh
 npm ci --prefix apps/admin/ui
@@ -46,34 +128,8 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets
 ```
 
-nativeのバイナリはflakeからビルドできます。GitHub Releaseのバイナリは作りません。
+native は GitHub Release のバイナリを作らず、flake からビルドします。Android は `node-v*` / `mote-v*`、Worker は `v*` タグでリリースします。詳細は[CI/CD 計画](docs/ci-plan.md)と[ship 戦略](docs/shipping.md)を参照してください。
 
-```sh
-nix build .#harmiond .#harmion .#harmion-admin
-nix build .#default
-```
+## ライセンス
 
-手元の`~/.local/bin`へは、タグからビルドしてsymlinkする`harmion-update`を使います。dotfilesやhome-managerは介しません。
-
-```sh
-./scripts/harmion-update --version v0.1.0
-./scripts/harmion-update --rollback
-```
-
-`harmion-update`は`~/.local/share/harmion/profiles/<tag>`をGC rootとして残し、`~/.local/bin`から`current`を参照します。初回は既存の実ファイルを`~/.local/share/harmion/pre-install/`へ退避します。`--systemd`でunitを配置し、`--restart`で`harmion@main.service`を再起動できます。
-
-`harmion`・`harmiond`・`harmion-admin` の引数・サブコマンドは `--help` で確認できます。引数エラーは終了コード2、実行時エラーは終了コード1を返します。daemonのログは標準エラー出力に書き、`RUST_LOG=harmiond=debug,harmion_net_native=debug` で同期の再試行間隔・転送件数・接続エラーも確認できます。JSONやPEMの結果は標準出力に返します。
-
-`Content` はID・本文・名前空間付き属性・kindsをまとめた通常値です。`Graph::snapshot(id)` は存在状態、固定basis、値ごとにまとめた競合候補と版IDも持つ、所有された `ContentSnapshot` を返します。同じ値の版IDを保持するため、その値を編集しても他の競合値を解決しません。snapshotは後から更新を受理しても変わりません。
-
-削除済みデータも内部snapshotでは保持し、`visible_content()` は削除済みなら `None`、削除競合なら通常値を返します。属性のunsetとkindのfalseは通常値から省きますが、編集元の版情報は保持します。snapshotは認可前の内部表現です。node層はこれを直接公開せず、認可・情報制限を行い、不透明な編集トークン付きのReadViewへ変換します。
-
-属性は標準で `AttributeValue` を使い、null・真偽値・数値・文字列・配列・オブジェクトを表します。不存在はnullとは別です。数値は正確な10進数で、`1`・`1.0`・`10e-1` を等値、負のゼロをゼロとして扱います。係数は任意桁、入力指数と正規化後の指数はi64範囲に制限します。配列は順序・重複を保持し、オブジェクトはキー順によらず比較します。record codecでは重複キー・非canonical入力を拒否し、1 MiB・深さ64・コンテナ要素合計32,768の上限を適用します。`Graph<V>` の型引数は意味モデル等のテスト用に残しています。
-
-IDは32バイトの型として扱い、乱数生成はホスト側の責任です。現在のGraphは全履歴をメモリ上に保持し、読出し時に候補を再計算します。SQLite adapterは正本レコードと受理ログ・Peerカーソルを永続化しますが、索引はまだ持ちません。
-
-実ファイルのSQLite DBとTCP/TLSでページ転送・再送・再起動・競合収束をテストしています。承認済み証明書とNode IDを照合し、退役は既存接続にも適用します。nodeのアプリ操作ではcredential・失効・期限・変更前後の権限を同じトランザクションで検査し、固定編集トークンとrequest_idの保存結果を保持します。独立2プロセスの検証は`cargo build --workspace`後に`python3 design_checks/two_process_sync.py`で実行できます。ネットワークテストにはlocalhostの待受け権限が必要です。未決定事項を確定仕様として扱わず、仕様・内部設計・レビューを併せて参照してください。
-
-モデル検証はPython 3.10以降で `python3 design_checks/model_check.py` を実行できます。外部パッケージは不要です。
-
-5プロセスのデータ同期検証は、`cargo build --workspace`後に`python3 design_checks/multi_process_sync.py`で実行します。管理情報の伝播・保留・回復は`python3 design_checks/membership_process_sync.py`で実行します。iroh経路は`cargo build -p harmion-net-native --example local_relay`後に各スクリプトへ`--iroh`を付けます。公開探索を使わず、テストが起動するローカルリレーを使用します。
+[LICENSE](LICENSE)

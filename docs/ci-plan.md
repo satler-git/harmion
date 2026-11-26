@@ -393,12 +393,15 @@ systemctl --user start harmion@main.service
 
 ### 7.4 Obtainium
 
-- アプリごとに登録する。
+- アプリごとに登録する。README の「Add to Obtainium」ボタンは、この設定を入れた full config deep link。
   - node: repo `satler-git/harmion`、パッケージ名 `dev.satler.harmion`
   - mote: 同じ repo、`dev.satler.mote`
-- 「Filter APKs by package name」を有効にする。Release に別アプリの APK が混ざっても拾わない。
+- Obtainium の filter は APK ファイル名への正規表現で、パッケージ名では絞れない。同じ repo に2アプリあるため、release title と APK filename の両方で分ける。
+  - node: title `^node-v`、APK `^harmion-node-`
+  - mote: title `^mote-v`、APK `^mote-`
+- tag が `node-v0.1.0` のままなので、version trim を `v([0-9]+\.[0-9]+\.[0-9]+)`、match group `1` にして Android の `versionName` と比較する。
 - prerelease は含めない（RC を試すときだけ一時的に有効化）。
-- 更新は APK の `versionCode` で判定されるので、タグの semver と `versionCode` の両方を上げる。
+- 更新判定は versionName（必要なら versionCode）で行う。タグの semver と `versionCode` の両方を上げる。
 
 ### 7.5 完了条件
 

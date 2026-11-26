@@ -1,6 +1,6 @@
 # native 複数ノード同期の実行
 
-Unix用のnative管理CLIで、署名付き参加・退役・却下証明をノード間で伝播する。Query/Subscribeと、任意で有効化するブラウザOAuthを提供する。Interpreterはnativeで登録・承認・Provider WebSocket・呼び出し仲介を実装する。Worker/DOはローカルworkerdまで実装・検証済みで、実Cloudflareには未配置。CLIは所有者限定ファイルから接続先と管理資格情報を読み、証明書を固定したloopback HTTPSで操作する。
+Unix用のnative管理CLIで、署名付き参加・退役・却下証明をノード間で伝播する。Query/Subscribeと、任意で有効化するブラウザOAuthを提供する。Interpreterはnativeで登録・承認・Provider WebSocket・呼び出し仲介を実装する。Worker/DOはローカルworkerdで実装・検証し、2026-11-26にhub.satler.devへ初回デプロイ済み。CLIは所有者限定ファイルから接続先と管理資格情報を読み、証明書を固定したloopback HTTPSで操作する。
 
 ## 起動と参加
 
