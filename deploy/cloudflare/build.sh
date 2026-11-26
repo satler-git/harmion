@@ -20,8 +20,8 @@ wasm-bindgen --target web --out-dir "$here/src/pkg" --out-name harmion_worker_do
 # relative module so wrangler and workerd both resolve it from src/pkg.
 cp "$here/src/host-api.js" "$here/src/pkg/host-api.js"
 sed -i "s|from 'host-api'|from './host-api.js'|; s|from \"host-api\"|from \"./host-api.js\"|" "$here/src/pkg/harmion_worker_do.js"
-(cd apps/admin/ui && npm run build)
+admin_ui="$(nix build .#admin-ui --no-link --print-out-paths)"
 rm -rf "$here/public"
 mkdir -p "$here/public"
-cp -R apps/admin/ui/dist/. "$here/public/"
+cp -R "$admin_ui"/. "$here/public/"
 echo "built $here/public and $here/src/pkg"
