@@ -37,6 +37,7 @@
     confirmNode = $state<string | null>(null);
   let lastSync = $state<Record<string, { time: string; report: SyncResult }>>({});
   let showScanner = $state(false);
+  let qrZoom = $state(false);
   let retirement = $state<{
     certificate: string;
     target: string;
@@ -44,7 +45,10 @@
   } | null>(null);
 
   $effect(() => {
-    if (!active) showScanner = false;
+    if (!active) {
+      showScanner = false;
+      qrZoom = false;
+    }
   });
   let qrGeneration = 0;
   $effect(() => {
@@ -55,7 +59,11 @@
       qrError = '';
       return;
     }
-    QRCode.toDataURL(transfer, { width: 360, margin: 3, errorCorrectionLevel: 'L' })
+    // Render at a high resolution and keep the full four-module quiet zone.
+    // The image is scaled down for the sidebar and shown nearly 1:1 in the
+    // enlarge overlay; small or tightly cropped QR codes are hard to read from
+    // a phone camera, especially on a dark page.
+    QRCode.toDataURL(transfer, { width: 960, margin: 4, errorCorrectionLevel: 'L' })
       .then((url) => {
         if (generation === qrGeneration) {
           qr = url;
@@ -153,6 +161,12 @@
   }
 </script>
 
+<svelte:window
+  onkeydown={(event) => {
+    if (event.key === 'Escape' && qrZoom) qrZoom = false;
+  }}
+/>
+
 <div class="page-title">
   <div>
     <p class="eyebrow">PEER CONNECTIONS</p>
@@ -234,7 +248,16 @@
         相手の管理画面で読み取るか、接続コードを貼り付けてください。参加の向きによって使う操作が異なります。
       </p>
       {#if qr}
-        <img class="qr" src={qr} alt="このノードの接続コードを含む QR" width="300" height="300" />
+        <button class="qr-button" type="button" title="QR を拡大" onclick={() => (qrZoom = true)}>
+          <img class="qr" src={qr} alt="このノードの接続コードを含む QR" width="360" height="360" />
+        </button>
+        <div class="qr-actions">
+          <button type="button" onclick={() => (qrZoom = true)}>QR を拡大</button>
+          <a class="button" href={qr} download="harmion-peer.png">QR を保存</a>
+        </div>
+        <p class="muted small">
+          Android のカメラで読み取れない場合は、下の接続コードをコピーして貼り付けてください。
+        </p>
       {/if}
       {#if qrError}<p class="warning">{qrError}</p>{/if}
       {#if overview && overview.peer_transfer}
@@ -335,6 +358,17 @@
       {/if}
     </section>
   </div>
+
+  {#if qrZoom && qr}
+    <div class="qr-overlay" role="dialog" aria-modal="true" aria-label="接続コードの QR">
+      <button class="qr-close" type="button" aria-label="閉じる" onclick={() => (qrZoom = false)}>
+        ×
+      </button>
+      <img src={qr} alt="拡大した接続コードの QR" />
+      <p>Android のカメラで読み取るか、接続コードをコピーしてください。</p>
+      <button type="button" onclick={() => (qrZoom = false)}>閉じる</button>
+    </div>
+  {/if}
 
   <section class="panel">
     <div class="section-head">

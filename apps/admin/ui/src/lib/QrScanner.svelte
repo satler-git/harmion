@@ -19,6 +19,53 @@
     scanning = false;
   }
 
+  function cameraError(cause: unknown) {
+    if (cause instanceof DOMException) {
+      switch (cause.name) {
+        case 'NotAllowedError':
+        case 'SecurityError':
+          return 'カメラの使用が許可されていません。ブラウザのサイト設定で許可するか、QR 画像を選択してください。';
+        case 'NotFoundError':
+        case 'OverconstrainedError':
+          return '利用できるカメラが見つかりません。QR 画像を選択するか、接続コードを貼り付けてください。';
+        case 'NotReadableError':
+          return 'カメラを開始できませんでした。他のアプリが使用していないか確認してください。';
+      }
+    }
+    return errorMessage(cause);
+  }
+
+  async function openCamera(): Promise<MediaStream> {
+    if (!window.isSecureContext) {
+      throw new Error(
+        'カメラは HTTPS の管理画面でのみ利用できます。管理画面の証明書を信頼するか、QR 画像を選択してください。',
+      );
+    }
+    const media = navigator.mediaDevices;
+    if (!media?.getUserMedia) {
+      throw new Error(
+        'このブラウザではカメラを利用できません。QR 画像を選択するか、接続コードを貼り付けてください。',
+      );
+    }
+    const size = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+    try {
+      return await media.getUserMedia({
+        video: { ...size, facingMode: { ideal: 'environment' } },
+        audio: false,
+      });
+    } catch (cause) {
+      if (
+        cause instanceof DOMException &&
+        (cause.name === 'NotAllowedError' || cause.name === 'SecurityError')
+      ) {
+        throw cause;
+      }
+      // A front-only or fixed-focus camera may reject the environment hint or
+      // the preferred resolution. Ask for the defaults before giving up.
+      return await media.getUserMedia({ video: size, audio: false });
+    }
+  }
+
   async function start() {
     const attempt = ++sequence;
     error = '';
@@ -26,41 +73,58 @@
     try {
       const { default: jsQR } = await import('jsqr');
       if (attempt !== sequence) return;
-      const camera = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: { ideal: 1600 } },
-        audio: false,
-      });
+      const camera = await openCamera();
       if (attempt !== sequence) {
         camera.getTracks().forEach((track) => track.stop());
         return;
       }
       stream = camera;
+      const track = camera.getVideoTracks()[0];
+      if (track) {
+        // Continuous autofocus helps with a phone screen held close to a
+        // webcam. Ignore browsers and cameras that do not expose the control.
+        try {
+          await track.applyConstraints({
+            advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet],
+          });
+        } catch {
+          // Not supported; the default focus mode is still usable.
+        }
+      }
       video.srcObject = camera;
       await video.play();
       const canvas = document.createElement('canvas');
       const context = canvas.getContext('2d', { willReadFrequently: true })!;
       function frame() {
         if (attempt !== sequence) return;
-        if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-          const scale = Math.min(1, 1600 / Math.max(video.videoWidth, video.videoHeight));
-          canvas.width = Math.round(video.videoWidth * scale);
-          canvas.height = Math.round(video.videoHeight * scale);
-          context.drawImage(video, 0, 0, canvas.width, canvas.height);
-          const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-          const result = jsQR(pixels.data, pixels.width, pixels.height);
-          if (result) {
-            stop();
-            onread(result.data);
-            return;
+        try {
+          if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0) {
+            const scale = Math.min(1, 1600 / Math.max(video.videoWidth, video.videoHeight));
+            canvas.width = Math.round(video.videoWidth * scale);
+            canvas.height = Math.round(video.videoHeight * scale);
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+            const result = jsQR(pixels.data, pixels.width, pixels.height);
+            if (result) {
+              stop();
+              onread(result.data);
+              return;
+            }
           }
+        } catch (cause) {
+          if (attempt === sequence) {
+            stop();
+            error = cameraError(cause);
+          }
+          return;
         }
-        timer = setTimeout(frame, 200);
+        timer = setTimeout(frame, 150);
       }
       frame();
     } catch (cause) {
       if (attempt === sequence) {
         stop();
-        error = errorMessage(cause);
+        error = cameraError(cause);
       }
     }
   }
@@ -69,7 +133,10 @@
     stop();
     error = '';
     const attempt = sequence;
-    const file = (event.currentTarget as HTMLInputElement).files?.[0];
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    // Allow choosing the same file again after a failed attempt.
+    input.value = '';
     if (!file) return;
     const url = URL.createObjectURL(file);
     try {
@@ -112,8 +179,14 @@
     bind:this={video}
     class:hidden={!scanning}
     muted
+    autoplay
     playsinline
     aria-label="Peer の QR スキャナー"
   ></video>
+  {#if scanning}
+    <p class="muted small" role="status">
+      QR コードをカメラの中央に収めてください。読み取ると自動で停止します。
+    </p>
+  {/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
 </div>
