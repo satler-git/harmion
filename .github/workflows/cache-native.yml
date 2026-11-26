@@ -1,0 +1,42 @@
+name: cache-native
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: cache-native-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    accept-flake-config = true
+
+jobs:
+  cache:
+    name: build and push the native profile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+      - uses: cachix/cachix-action@v17
+        with:
+          name: satler
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          push: true
+      - name: Build
+        run: |
+          set -euo pipefail
+          nix build .#default --no-link --print-build-logs
+      - name: Push to Cachix
+        run: |
+          set -euo pipefail
+          nix build .#default --no-link --print-out-paths | xargs cachix push satler
