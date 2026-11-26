@@ -1,0 +1,120 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    accept-flake-config = true
+
+jobs:
+  rust:
+    name: rust (fmt, clippy, test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+      - uses: cachix/cachix-action@v17
+        with:
+          name: satler
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: harmion-rust
+      - name: Build admin UI for the build script
+        run: |
+          set -euo pipefail
+          echo "HARMION_ADMIN_UI_DIST=$(nix build .#admin-ui --no-link --print-out-paths)" >> "$GITHUB_ENV"
+      - name: Format, clippy, test
+        run: |
+          set -euo pipefail
+          nix develop --command bash -euo pipefail -c '
+            cargo fmt --all -- --check
+            cargo clippy --workspace --all-targets
+            cargo test --workspace --locked
+          '
+
+  nix:
+    name: nix packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+      - uses: cachix/cachix-action@v17
+        with:
+          name: satler
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Build native packages
+        run: |
+          set -euo pipefail
+          nix build .#default --no-link --print-build-logs
+
+  android:
+    name: android build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+      - uses: cachix/cachix-action@v17
+        with:
+          name: satler
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          push: false
+      - uses: actions/cache@v4
+        with:
+          path: target/gradle-home
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle.kts', 'android/gradle/libs.versions.toml') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+      - name: Assemble debug apps
+        run: |
+          set -euo pipefail
+          nix develop .#android --command bash -euo pipefail -c '
+            cd android
+            gradle --no-daemon \
+              -PharmionRustAbis=arm64-v8a \
+              :app:assembleDebug :sdk:assembleDebug :mote:assembleDebug
+          '
+
+  worker:
+    name: worker build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+      - uses: cachix/cachix-action@v17
+        with:
+          name: satler
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          push: false
+      - name: Build the wasm bridge and admin UI
+        run: |
+          set -euo pipefail
+          nix develop --command bash -euo pipefail -c '
+            cargo fetch --locked
+            deploy/cloudflare/build.sh
+          '

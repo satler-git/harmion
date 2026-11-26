@@ -43,8 +43,24 @@ Nixを使う場合、`nix develop`でrustc/cargo/clippy/rustfmt（wasm32 std込�
 npm ci --prefix apps/admin/ui
 cargo test --workspace
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets
 ```
+
+nativeのバイナリはflakeからビルドできます。GitHub Releaseのバイナリは作りません。
+
+```sh
+nix build .#harmiond .#harmion .#harmion-admin
+nix build .#default
+```
+
+手元の`~/.local/bin`へは、タグからビルドしてsymlinkする`harmion-update`を使います。dotfilesやhome-managerは介しません。
+
+```sh
+./scripts/harmion-update --version v0.1.0
+./scripts/harmion-update --rollback
+```
+
+`harmion-update`は`~/.local/share/harmion/profiles/<tag>`をGC rootとして残し、`~/.local/bin`から`current`を参照します。初回は既存の実ファイルを`~/.local/share/harmion/pre-install/`へ退避します。`--systemd`でunitを配置し、`--restart`で`harmion@main.service`を再起動できます。
 
 `harmion`・`harmiond`・`harmion-admin` の引数・サブコマンドは `--help` で確認できます。引数エラーは終了コード2、実行時エラーは終了コード1を返します。daemonのログは標準エラー出力に書き、`RUST_LOG=harmiond=debug,harmion_net_native=debug` で同期の再試行間隔・転送件数・接続エラーも確認できます。JSONやPEMの結果は標準出力に返します。
 

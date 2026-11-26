@@ -1,0 +1,67 @@
+name: release-android
+
+on:
+  push:
+    tags:
+      - "node-v*"
+      - "mote-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (node-vX.Y.Z or mote-vX.Y.Z)"
+        required: true
+
+concurrency:
+  group: release-android-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    accept-flake-config = true
+
+jobs:
+  release:
+    name: build and publish APK
+    runs-on: ubuntu-24.04
+    environment: release-android
+    timeout-minutes: 90
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+      - uses: cachix/cachix-action@v17
+        with:
+          name: satler
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          push: false
+      - name: Build and sign
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+        run: |
+          set -euo pipefail
+          nix develop .#android --command bash -euo pipefail -c '
+            ./android/scripts/release-app.sh "$TAG"
+          '
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(target/release/*"$TAG"*.apk target/release/*"$TAG"*-mapping.txt target/release/*"$TAG"*-cert-sha256.txt target/release/*"$TAG"*-SHA256SUMS)
+          ((${#assets[@]} > 0)) || { echo "no release assets found" >&2; exit 1; }
+          prerelease=()
+          if [[ "$TAG" == *-rc.* ]]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" "${assets[@]}" \
+            --title "$TAG" \
+            --generate-notes \
+            "${prerelease[@]}"

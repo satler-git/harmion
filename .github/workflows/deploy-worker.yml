@@ -1,0 +1,55 @@
+name: deploy-worker
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: cloudflare-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NIX_CONFIG: |
+    experimental-features = nix-command flakes
+    accept-flake-config = true
+
+jobs:
+  deploy:
+    name: deploy to Cloudflare
+    runs-on: ubuntu-24.04
+    environment: cloudflare-prod
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: ${{ env.NIX_CONFIG }}
+      - uses: cachix/cachix-action@v17
+        with:
+          name: satler
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          push: false
+      - name: Build worker
+        run: |
+          set -euo pipefail
+          nix develop --command bash -euo pipefail -c '
+            cargo fetch --locked
+            deploy/cloudflare/build.sh
+          '
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          nix develop --command wrangler deploy --cwd deploy/cloudflare
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 5 --retry-delay 3 https://hub.satler.dev/state
+          curl -fsS --retry 5 --retry-delay 3 https://hub.satler.dev/ready

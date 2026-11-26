@@ -238,7 +238,7 @@ PR では Cachix への **push をしない**（fork PR に token を渡さな�
 
 **前提（先に直すこと）**
 
-- `release-1password.sh` は `:app:assembleRelease` しか呼ばず、`android/scripts/build-rust.sh` を呼んでいない。`jniLibs/` は gitignore されているため、**clean checkout からの release は native lib なしで APK を作ってしまう**。CI 化の前に、release script から `build-rust.sh` を呼ぶ（または Gradle の `preBuild` にタスクを足す）。
+- **対応済み**: `android/build.gradle.kts` の `buildRust` タスクを各 module の `preBuild` に接続した。clean checkout からでも Gradle が `android/scripts/build-rust.sh` を呼び、`jniLibs/` を生成してから APK を組み立てる。
 - `versionCode` / `versionName` をアプリごとの `version.properties` に移す。mote は現在ハードコード。
 - `compileSdk 37.2` / build-tools `37.0.0` / NDK `30.0.16248370` はかなり新しい。CI は `nix develop .#android` で同じものを使う。emulator と system image は release job には不要なので、devShell を `android`（ビルド用）と `android-emu`（emulator 用）に分けると CI が軽くなる。
 
@@ -556,8 +556,14 @@ jobs:
       TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@<sha>
+        with:
+          fetch-depth: 0
       - uses: cachix/install-nix-action@<sha>
-      - uses: 1password/install-cli-action@<sha>
+      - uses: cachix/cachix-action@<sha>
+        with:
+          name: satler
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          push: false
       - name: build and sign
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
@@ -565,31 +571,34 @@ jobs:
           nix develop .#android --command bash -euo pipefail -c '
             ./android/scripts/release-app.sh "$TAG"
           '
-      - uses: actions/upload-artifact@<sha>
-        with:
-          name: apk
-          path: target/release/*.apk
-      - run: gh release create "$TAG" --notes-file "release-notes/$TAG.md" target/release/*
+      - name: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(target/release/*"$TAG"*.apk target/release/*"$TAG"*-mapping.txt target/release/*"$TAG"*-cert-sha256.txt target/release/*"$TAG"*-SHA256SUMS)
+          prerelease=()
+          if [[ "$TAG" == *-rc.* ]]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" "${assets[@]}" --title "$TAG" --generate-notes "${prerelease[@]}"
 ```
 
 `release-app.sh` は manifest を読み、version を検査し、1Password から keystore を取得し、JNI → Gradle → `apksigner verify` までを行う。workflow 自体はアプリを知らない。
 
-### A.3 native / Worker の release
+### A.3 native cache / Worker deploy
+
+native は GitHub Release を作らない。タグ時に `.#default` を Cachix に載せ、`harmion-update` のビルドを速くする。
 
 ```yaml
-name: release
+name: cache-native
 on:
   push:
     tags: ["v*"]
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
-  native:
+  cache:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -600,23 +609,28 @@ jobs:
           name: satler
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           push: true
-      - run: nix build .#default --print-build-logs
       - run: |
-          mkdir -p dist
-          tar -C result -czf "dist/harmion-${GITHUB_REF_NAME}.tar.gz" .
-          (cd dist && sha256sum ./* > SHA256SUMS)
-      - uses: actions/attest-build-provenance@<sha>
-        with:
-          subject-path: "dist/*"
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --notes-file "release-notes/${GITHUB_REF_NAME}.md"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          set -euo pipefail
+          nix build .#default --no-link --print-build-logs
+          nix build .#default --no-link --print-out-paths | xargs cachix push satler
+```
 
-  worker:
-    needs: native
+Worker は別 workflow（`.github/workflows/deploy-worker.yml`）で、`cloudflare-prod` Environment の承認を経て deploy する。
+
+```yaml
+name: deploy-worker
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+
+jobs:
+  deploy:
     runs-on: ubuntu-24.04
     environment: cloudflare-prod
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@<sha>
       - uses: cachix/install-nix-action@<sha>

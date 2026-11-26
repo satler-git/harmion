@@ -365,10 +365,10 @@ systemctl --user start harmion@main.service
 2. `version.properties` とタグの `versionName` を照合
 3. 前回タグの `versionCode` より大きいことを確認
 4. 1Password から keystore とパスワードを取得（`op_item` を使用）
-5. `build-rust.sh` で `arm64-v8a` をビルド（release 用。x86_64 は debug/emulator 用）
-6. `gradle :<module>:assembleRelease` に `versionCode` / `versionName` / 証明書ピンを渡す
+5. Gradle の `buildRust` タスクが `arm64-v8a` をビルド（`-PharmionRustAbis` で指定）
+6. `gradle :<module>:assembleRelease` に証明書ピンを渡す（version は `version.properties` から読む）
 7. `apksigner verify --print-certs` で検証
-8. `target/release/<app>-vX.Y.Z.apk`、`mapping.txt`、`cert-sha256.txt` を出力
+8. `target/release/<artifact>-vX.Y.Z.apk`、`mapping.txt`、`cert-sha256.txt`、`SHA256SUMS` を出力
 
 ### 7.2 workflow
 
