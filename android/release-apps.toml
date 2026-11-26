@@ -4,6 +4,11 @@
 # `tag_prefix` determines which git tag releases which app.
 # `version_file` is the single source of truth for versionCode/versionName.
 # `op_item` is the 1Password item holding the release keystore.
+#
+# The node app's certificate is the SDK trust anchor. Every app that embeds the
+# SDK is built with this SHA-256, not with its own signing certificate.
+[node]
+op_item = "Harmion release keystore"
 
 [[app]]
 module = "app"

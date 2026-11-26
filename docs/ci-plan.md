@@ -125,6 +125,9 @@ flake.nix                      # packages を追加
   ```
 - [ ] `android/release-apps.toml` を追加
   ```toml
+  [node]
+  op_item = "Harmion release keystore"
+
   [[app]]
   module = "app"
   application_id = "dev.satler.harmion"

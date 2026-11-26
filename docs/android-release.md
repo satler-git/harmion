@@ -84,6 +84,8 @@ HARMION_KEYSTORE_PASSWORD=... HARMION_KEY_ALIAS=harmion HARMION_KEY_PASSWORD=...
 
 ## 5. 証明書ピン（重要）
 - SDKはノードアプリの署名証明書SHA-256を `BuildConfig.NODE_CERT_SHA256` で照合する。
+- `release-app.sh` は `release-apps.toml` の `[node].op_item` から `cert_sha256` を読み、SDKのピンに使う。
+  Mote自身の署名証明書とは別物。ローカル鍵で試すときは `HARMION_NODE_CERT_SHA256` で上書きできる。
 - debugの既定値は開発用debug証明書。**release APKを配布する場合、クライアントアプリが使う
   SDKも同じrelease証明書のSHA-256でビルドする必要がある**:
   ```bash

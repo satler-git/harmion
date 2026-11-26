@@ -45,6 +45,7 @@ for app in data.get("app", []):
             "APP_OP_ITEM": app.get("op_item", ""),
             "APP_ARTIFACT": app.get("artifact", app["module"]),
             "APP_SHIP": "true" if app.get("ship", False) else "false",
+            "NODE_OP_ITEM": data.get("node", {}).get("op_item", ""),
         }
         for key, value in fields.items():
             print(f"{key}={shlex.quote(str(value))}")
@@ -164,6 +165,38 @@ if [[ -n "$stored_cert" && "$stored_cert" != "$cert_sha256" ]]; then
 fi
 echo "Signing certificate SHA-256: $cert_sha256" >&2
 
+# The SDK pins the node app's certificate, not the certificate of the app being
+# released. Read the node item's cert_sha256 for client apps; the node app
+# itself uses its own signing certificate.
+node_cert_sha256="${HARMION_NODE_CERT_SHA256:-}"
+if [[ -z "$node_cert_sha256" ]]; then
+    if [[ "$APP_MODULE" == "app" ]]; then
+        node_cert_sha256="$cert_sha256"
+    else
+        [[ -n "$NODE_OP_ITEM" ]] || {
+            echo "$APP_MODULE needs [node].op_item in $manifest" >&2
+            exit 1
+        }
+        command -v op >/dev/null 2>&1 || {
+            echo "op is required to read the node certificate, or set HARMION_NODE_CERT_SHA256" >&2
+            exit 1
+        }
+        node_item_json="$(op item get "$NODE_OP_ITEM" --vault "$vault" --format=json)" || {
+            echo "could not read node keystore item: $NODE_OP_ITEM" >&2
+            exit 1
+        }
+        node_cert_sha256="$(
+            jq -r 'first(.fields[] | select(.label == "cert_sha256") | .value) // empty' \
+                <<<"$node_item_json"
+        )"
+    fi
+fi
+[[ "$node_cert_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "missing or invalid node certificate SHA-256 for $APP_MODULE" >&2
+    exit 1
+}
+echo "SDK node certificate SHA-256: $node_cert_sha256" >&2
+
 release_abis="${HARMION_RELEASE_ABIS:-arm64-v8a}"
 (
     cd android
@@ -172,7 +205,7 @@ release_abis="${HARMION_RELEASE_ABIS:-arm64-v8a}"
     HARMION_KEY_ALIAS="$alias_name" \
     HARMION_KEY_PASSWORD="$HARMION_KEY_PASSWORD" \
         gradle --no-daemon ":$APP_MODULE:assembleRelease" \
-            -PharmionNodeCertSha256="$cert_sha256" \
+            -PharmionNodeCertSha256="$node_cert_sha256" \
             -PharmionRustAbis="$release_abis"
 )
 
