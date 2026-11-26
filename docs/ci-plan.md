@@ -7,7 +7,7 @@
 | 項目 | 決定 |
 |---|---|
 | Android の配布 | **GitHub Releases + Obtainium**。Play は使わない（app signing cert のピン問題を避ける） |
-| native の配布 | `harmion-update` が GitHub のタグから **`nix build`** し、`~/.local/bin` に symlink する。store path は profile の out-link で GC root にする。**musl は使わない**（非 Nix 環境向けの static が要る場合だけ任意で追加） |
+| native の配布 | `harmion-update` が GitHub のタグから **`nix build`** し、`~/.local/bin` に symlink する。store path は profile を `nix-store --add-root` で GC root にして保持する。**musl は使わない**（非 Nix 環境向けの static が要る場合だけ任意で追加） |
 | 更新 | `harmion-update` を再実行。version ごとの profile を残し、`--rollback` で前の profile に戻す |
 | Nix | `nix build .#harmiond` などを必須にする。インストールも Nix ビルドを使うが、dotfiles は介さない |
 | Worker | **初期は staging を作らない**。prod のみ、Environment 承認 + smoke + 前 version 保持。DO migration を入れる回だけ staging を一時構築する |
@@ -197,7 +197,7 @@ RUNPATH:     /nix/store/r3h...-glibc-2.44-57/lib:...
 
 これが動いているのは、その store path がまだ存在するから。`nix-collect-garbage` で消えると動かなくなる。だから **静的化するのではなく、profile の out-link を GC root にして store path を保持する**。
 
-- `nix build ... --out-link ~/.local/share/harmion/profiles/<tag>` が GC root になる。
+- `nix build --out-link` の後、`nix-store --add-root ~/.local/share/harmion/profiles/<tag> --indirect -r <store-path>` で profile を GC root として登録する（out-link を mv すると auto root が切れるため）。
 - その profile の `bin/` を `~/.local/bin` から symlink する。
 - 旧 profile を残せば rollback もできる。
 - マシン移動や Nix なし環境への配布が必要になったら、そのときだけ `harmion-static`（musl）を追加する。今はやらない。
@@ -282,7 +282,7 @@ native は GitHub Release のバイナリを作らない。**タグ + flake + `n
 ~/.local/bin/harmion-update              -> ../share/harmion/current/bin/harmion-update
 ```
 
-- `profiles/<tag>` は `nix build --out-link` が作る symlink で、そのまま GC root になる。
+- `profiles/<tag>` は `nix build --out-link` の後、`nix-store --add-root` で GC root として登録する。out-link をそのまま `mv` すると Nix の auto root が切れるので、移動後に登録し直す。
 - `current` は「今使う profile」を指すだけ。`profiles/<tag>` を消さない限り store path は GC されない。
 - 旧 profile を残すので、`--rollback` で `current` を前の profile に戻せる。
 - `~/.local/bin` にあるのは symlink だが、PATH からは普通のコマンドとして使える。
@@ -290,11 +290,12 @@ native は GitHub Release のバイナリを作らない。**タグ + flake + `n
 **処理の流れ**
 
 1. tag を解決（引数、または最新の stable tag）
-2. `nix build "github:satler-git/harmion/$tag#default" --out-link "$HOME/.local/share/harmion/profiles/$tag" --print-build-logs`
-3. `current` を新しい profile に原子的に付け替える（`ln -sfn` + `mv`）
-4. `~/.local/bin` の symlink を作り直す
-5. `harmiond --version` で確認
-6. `--systemd` なら `harmion@.service` を `~/.config/systemd/user/` に置いて `daemon-reload`。`--restart` のときだけサービスを再起動
+2. `nix build "github:satler-git/harmion/$tag#default" --out-link "$HOME/.local/share/harmion/profiles/.tmp-$tag"` でビルド
+3. `nix-store --add-root "$HOME/.local/share/harmion/profiles/$tag" --indirect -r "$(readlink -f ...)"` で profile を GC root にする
+4. `current` を新しい profile に原子的に付け替える（`ln -sfn` + `mv`）
+5. `~/.local/bin` の symlink を作り直す
+6. `harmiond --version` で確認
+7. `--systemd` なら `harmion@.service` を `~/.config/systemd/user/` に置いて `daemon-reload`。`--restart` のときだけサービスを再起動
 
 **オプション**
 
@@ -470,7 +471,7 @@ Phase 3 と 4 は Phase 1 の後に並行できる。最初の 1 週間で「`ha
 
 | リスク | 影響 | 対策 |
 |---|---|---|
-| Nix store の GC でバイナリが壊れる | `~/.local/bin` の symlink 先が消える | `profiles/<tag>` を `nix build --out-link` の GC root にし、`current` はその上に張る。`--prune` は明示時だけ |
+| Nix store の GC でバイナリが壊れる | `~/.local/bin` の symlink 先が消える | `profiles/<tag>` を `nix-store --add-root` で GC root にし、`current` はその上に張る。`--prune` は明示時だけ |
 | `admin-ui` の `npmDepsHash` が面倒 | Phase 1 が伸びる | 最初は `harmiond` / `harmion` だけ package 化し、admin は後回しにしてもよい。ただし `default` には admin を含めたいので Phase 3 までに解消 |
 | Android の署名鍵・versionCode 事故 | 更新不能・ストア不整合 | 鍵は 1Password + オフライン backup。versionCode はタグとファイルの二重検査。RC でリハーサル |
 | GitHub runner の Nix 初回が遅い | CI が 30 分超え | cache-nix-action + Cachix。PR では `default` をビルドしない |

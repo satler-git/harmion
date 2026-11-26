@@ -428,7 +428,7 @@ checks.<system> = { ... };
 ~/.local/bin/harmion-update             -> ../share/harmion/current/bin/harmion-update
 ```
 
-- `profiles/<tag>` は `nix build --out-link` が作る symlink で、そのまま GC root。
+- `profiles/<tag>` は `nix build --out-link` の後、`nix-store --add-root` で GC root として登録する。out-link を `mv` すると auto root が切れるため。
 - `current` を付け替えるだけで version が変わる。旧 profile を残せば `--rollback` できる。
 - 初回は既存の `~/.local/bin/harmion*`（実ファイル）を `~/.local/share/harmion/pre-install/` に退避してから symlink に置き換える。
 - systemd unit は `harmion-update --systemd` で `~/.config/systemd/user/` に置く。`--restart` のときだけサービスを再起動する。

@@ -107,6 +107,7 @@ while (($# > 0)); do
 done
 
 require nix
+require nix-store
 require git
 require readlink
 require sort
@@ -187,8 +188,11 @@ if ((dry_run == 0)); then
     rm -f "$tmp"
     log "building $flake_ref#default"
     nix build "$flake_ref#default" --out-link "$tmp" --print-build-logs
+    store_path="$(readlink -f "$tmp")"
+    [ -d "$store_path" ] || die "build did not produce a store path"
     rm -f "$profile"
-    mv -Tf "$tmp" "$profile"
+    nix-store --add-root "$profile" --indirect -r "$store_path"
+    rm -f "$tmp"
 else
     log "would build $flake_ref#default into $profile"
 fi
