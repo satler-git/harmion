@@ -1,0 +1,31 @@
+# Android apps that can be released as signed APKs.
+#
+# `module` is the Gradle project name without the leading colon.
+# `tag_prefix` determines which git tag releases which app.
+# `version_file` is the single source of truth for versionCode/versionName.
+# `op_item` is the 1Password item holding the release keystore.
+
+[[app]]
+module = "app"
+application_id = "dev.satler.harmion"
+tag_prefix = "node-v"
+version_file = "android/app/version.properties"
+op_item = "Harmion node release keystore"
+artifact = "harmion-node"
+ship = true
+
+[[app]]
+module = "mote"
+application_id = "dev.satler.mote"
+tag_prefix = "mote-v"
+version_file = "android/mote/version.properties"
+op_item = "Mote release keystore"
+artifact = "mote"
+ship = true
+
+[[app]]
+module = "testclient"
+application_id = "org.harmion.testclient"
+tag_prefix = "testclient-v"
+version_file = "android/testclient/version.properties"
+ship = false

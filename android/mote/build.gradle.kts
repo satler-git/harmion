@@ -1,6 +1,12 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+}
+
+val versionProps = Properties().apply {
+    project.file("version.properties").inputStream().use { load(it) }
 }
 
 android {
@@ -13,8 +19,34 @@ android {
         applicationId = "dev.satler.mote"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = versionProps.getProperty("versionCode").toInt()
+        versionName = versionProps.getProperty("versionName")
+    }
+
+    signingConfigs {
+        create("release") {
+            val path = System.getenv("HARMION_KEYSTORE")
+            if (!path.isNullOrBlank()) {
+                storeFile = file(path)
+                storePassword = System.getenv("HARMION_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("HARMION_KEY_ALIAS") ?: "harmion"
+                keyPassword = System.getenv("HARMION_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            signingConfig =
+                if (!System.getenv("HARMION_KEYSTORE").isNullOrBlank()) {
+                    signingConfigs.getByName("release")
+                } else {
+                    null
+                }
+        }
     }
 
     buildFeatures { compose = true }
