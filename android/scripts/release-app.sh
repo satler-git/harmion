@@ -100,7 +100,7 @@ work="$(mktemp -d)"
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT
 
-vault="${OP_VAULT:-harmion-release}"
+vault="${OP_VAULT:-harmion}"
 op_item="${APP_OP_ITEM:-}"
 alias_name="${HARMION_KEY_ALIAS:-harmion}"
 stored_cert=""

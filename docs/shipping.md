@@ -339,7 +339,7 @@ nix develop --command bash -euo pipefail -c '
 | Play upload key（使う場合） | AAB 署名 | 1Password | CI が一時取得 | app signing cert は Play Console |
 | Access service token（任意） | 管理 API の smoke | 1Password | CI が一時取得 | 最初は不要 |
 
-**1Password の vault 設計**: 個人の `dev` vault 全体を CI に読ませない。`harmion-release` のような専用 vault を作り、必要な item だけ置く。service account はその vault の read-only にする。keystore の Document もこの vault に移す（人間の owner は両方見られる）。
+**1Password の vault 設計**: 個人の `dev` vault 全体を CI に読ませない。`harmion` のような専用 vault を作り、必要な item だけ置く。service account はその vault の read-only にする。keystore の Document もこの vault に移す（人間の owner は両方見られる）。
 
 ### 7.3 CI での扱い
 
@@ -350,16 +350,16 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 # 1Password から取得（値は標準出力に出さない）
-op document get "Harmion release keystore" --vault harmion-release \
+op document get "Harmion release keystore" --vault harmion \
   --out-file "$work/release.jks"
 chmod 600 "$work/release.jks"
 
-password="$(op item get "Harmion release keystore" --vault harmion-release \
+password="$(op item get "Harmion release keystore" --vault harmion \
   --fields label=pass --reveal)"
 echo "::add-mask::$password"
 ```
 
-- `op run --env-file` を使うなら、テンプレートに `op://harmion-release/...` を書き、値は env にだけ入れる。テンプレート自体はコミットしてよい（値は入らない）。
+- `op run --env-file` を使うなら、テンプレートに `op://harmion/...` を書き、値は env にだけ入れる。テンプレート自体はコミットしてよい（値は入らない）。
 - keystore は job の最後に必ず削除する。GitHub の workspace は job 終了で破棄されるが、`$RUNNER_TEMP` と artifact upload の対象を確認する。
 - secret を `echo` して確かめない。`set -x` を有効にしない。`op` のエラーに item 名が出ることはあるが、値は出さない。
 - GitHub の secret masking は「GitHub に登録した secret」だけ。`op` で取ってきた値は自動では mask されないので、必ず `::add-mask::` する。
@@ -477,7 +477,7 @@ musl static が必要になるのは、GitHub Release のバイナリを Nix の
 
 1. **native の入れ方**: タグから `nix build` して `profiles/<tag>` + `~/.local/bin` symlink（推奨）か、`~/.local/bin` に実ファイルを置くか。
 2. **最初のタグ**: `v0.1.0` か、CI 整備後の最初を `v0.2.0` にするか。
-3. **1Password の vault 名**: `harmion-release` でよいか。
+3. **1Password の vault 名**: `harmion` でよいか。
 4. **native の aarch64**: 当面 x86_64 のみか、必要になったら追加するか。
 5. **SDK の外部配布**: リポジトリ内の `project(":sdk")` で足りる間は AAR を出さない、でよいか。
 6. **Worker の staging**: 初期は prod のみ + migration 時だけ一時 staging、でよいか。

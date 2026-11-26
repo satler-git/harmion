@@ -185,6 +185,28 @@ If a Durable Object was provisioned by an older build, it has no
 `NODE_ID`. Changing `ORIGIN` changes the fingerprint too; re-register the node
 after an origin change.
 
+## CI deploy token
+
+GitHub Actions deploys with a scoped Cloudflare API token stored in the
+`cloudflare-prod` Environment. Create a **custom token** with:
+
+| Scope | Permission | Why |
+|---|---|---|
+| Account | Workers Scripts: Edit | Upload/deploy the Worker and apply Durable Object migrations |
+| Zone `satler.dev` | Workers Routes: Edit | Keep the `hub.satler.dev` route/custom domain |
+| Zone `satler.dev` | Zone: Read | Required by wrangler for zone lookup in some versions |
+
+- `Workers Scripts: Edit` covers the deployed Durable Object script; there is no
+  separate Durable Objects permission in the current token permission list.
+- `DNS: Edit` is only needed if wrangler creates the custom domain's DNS record.
+  `hub.satler.dev` already exists; do not grant DNS by default.
+- Do not grant Access, account settings, billing, KV or R2. Access/DNS changes
+  use the separate operator token described above.
+- Set the token as `CLOUDFLARE_API_TOKEN` in the GitHub Environment
+  `cloudflare-prod`, and `CLOUDFLARE_ACCOUNT_ID` as the repository/environment
+  variable. The Worker's runtime secrets (`SEED`, `ADMIN_TOKEN`,
+  `BOOTSTRAP_TOKEN`) are not part of this token and must not be set by CI.
+
 ## Operations
 
 - Rotation: a changed `NODE_ID` maps to a new Durable Object (`node:<NODE_ID>`),

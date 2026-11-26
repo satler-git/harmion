@@ -9,7 +9,7 @@ cd "${repo_root}"
 out="${1:-target/release-keystore/harmion-release.jks}"
 alias="${HARMION_KEY_ALIAS:-harmion}"
 dname="${HARMION_DNAME:-CN=Harmion, O=Satler, C=JP}"
-vault="${OP_VAULT:-dev}"
+vault="${OP_VAULT:-harmion}"
 
 if [[ -e "${out}" ]]; then
   echo "refusing to overwrite ${out}" >&2

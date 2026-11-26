@@ -13,7 +13,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
-OP_VAULT="${OP_VAULT:-dev}"
+OP_VAULT="${OP_VAULT:-harmion}"
 OP_ITEM="${OP_ITEM:-Harmion release keystore}"
 OP_PASSWORD_LABEL="${OP_PASSWORD_LABEL:-pass}"
 OP_KEY_PASSWORD_LABEL="${OP_KEY_PASSWORD_LABEL:-key psas}"

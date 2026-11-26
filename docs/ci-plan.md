@@ -130,7 +130,7 @@ flake.nix                      # packages を追加
   application_id = "dev.satler.harmion"
   tag_prefix = "node-v"
   version_file = "android/app/version.properties"
-  op_item = "Harmion node release keystore"
+  op_item = "Harmion release keystore"
   ship = true
 
   [[app]]
@@ -480,4 +480,4 @@ Phase 3 と 4 は Phase 1 の後に並行できる。最初の 1 週間で「`ha
 2. `~/.local/bin` は実ファイル置き場か、`profiles/<tag>` + symlink（推奨）でよいか。
 3. 最初のタグは `v0.1.0` でよいか（CI 整備後の最初のリリースを `v0.2.0` にするか）。
 4. Cachix（`satler.cachix.org`）へ `.#default` を push してよいか。
-5. 1Password の専用 vault 名は `harmion-release`、Worker の prod domain は `hub.satler.dev` のままでよいか。
+5. 1Password の専用 vault 名は `harmion`、Worker の prod domain は `hub.satler.dev` のままでよいか。

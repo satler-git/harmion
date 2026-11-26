@@ -10,7 +10,7 @@ module = "app"
 application_id = "dev.satler.harmion"
 tag_prefix = "node-v"
 version_file = "android/app/version.properties"
-op_item = "Harmion node release keystore"
+op_item = "Harmion release keystore"
 artifact = "harmion-node"
 ship = true
 

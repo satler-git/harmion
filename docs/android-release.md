@@ -12,7 +12,7 @@
 
 | 項目 | 値 |
 |---|---|
-| Vault | `dev`（`OP_VAULT`で変更可） |
+| Vault | `harmion`（`OP_VAULT`で変更可） |
 | アイテム | `Harmion release keystore`（Document） |
 | ファイル | `harmion-release.jks` |
 | フィールド `pass` | keystoreパスワード（concealed） |
@@ -20,8 +20,16 @@
 | フィールド `alias` | 鍵エイリアス（`harmion`） |
 | フィールド `cert_sha256` | 署名証明書のSHA-256 |
 
+アプリごとに別のDocumentアイテムを持つ。現在は vault `harmion` に次の2つがある。
+
+- `Harmion release keystore` — node app (`android/app`)
+- `Mote release keystore` — Mote (`android/mote`)
+
+新しいリリースは `android/release-apps.toml` と `android/scripts/release-app.sh` を使う。
+`release-1password.sh` は node app 用の旧スクリプトとして残している。
+
 `release-1password.sh` は次の順で読み出す:
-1. `op document get "Harmion release keystore" --vault dev --out-file ...`
+1. `op document get "Harmion release keystore" --vault harmion --out-file ...`
 2. `op item get ... --format=json` からラベルで `pass` / `key psas` / `alias` / `cert_sha256` を取得
 3. keystoreから証明書SHA-256を再計算し、`cert_sha256` と不一致ならビルドを中止
 
@@ -41,8 +49,8 @@ nix develop .#android
 1Passwordへ保存（スクリプトが表示するコマンド）:
 ```bash
 op document create target/release-keystore/harmion-release.jks \
-  --title "Harmion release keystore" --vault "dev"
-op item edit "Harmion release keystore" --vault "dev" \
+  --title "Harmion release keystore" --vault "harmion"
+op item edit "Harmion release keystore" --vault "harmion" \
   "pass=..." "key psas=..." "alias=harmion" "cert_sha256=..."
 ```
 保存後、作業ディレクトリのkeystoreは削除してよい（1Passwordが正）。
