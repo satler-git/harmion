@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "harmion"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-admin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-android"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "harmion-net-native",
  "harmion-node",
@@ -1636,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1656,14 +1656,14 @@ dependencies = [
 
 [[package]]
 name = "harmion-domain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "harmion-local"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "getrandom 0.3.4",
  "rustix",
@@ -1671,7 +1671,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-local-web"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "rcgen",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-net-native"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1714,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "harmion-domain",
@@ -1745,7 +1745,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures-util",
  "harmion-client",
@@ -1764,7 +1764,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-sdk-native"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "harmion-client",
  "harmion-domain",
@@ -1777,7 +1777,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-store-sqlite"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "harmion-domain",
  "harmion-node",
@@ -1788,11 +1788,11 @@ dependencies = [
 
 [[package]]
 name = "harmion-wiki-core"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "harmion-wiki-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anti-webui",
  "anti-webui-markdown",
@@ -1804,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-wiki-lsp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "harmion-wiki-core",
  "serde",
@@ -1813,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-wiki-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1829,7 +1829,7 @@ dependencies = [
 
 [[package]]
 name = "harmion-worker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -1853,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "harmiond"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "harmion-domain",
