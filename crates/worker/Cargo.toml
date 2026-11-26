@@ -32,3 +32,6 @@ crate-type = ["rlib", "cdylib"]
 wasm-bindgen = "=0.2.130"
 js-sys = "=0.3.107"
 wasm-bindgen-futures = "=0.4.80"
+# ring pulls getrandom 0.2 without the wasm backend; enable it for the Worker.
+getrandom = { version = "0.2", features = ["js"] }
+ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"] }

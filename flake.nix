@@ -79,6 +79,9 @@
               pkgs.stdenv.cc
               # deploy/cloudflare/build.sh post-processes the wasm bridge.
               pkgs.wasm-bindgen-cli
+              # ring's wasm C sources need an unwrapped clang; the wrapped
+              # compiler injects x86 hardening flags that wasm rejects.
+              pkgs.llvmPackages.clang-unwrapped
               # apps/admin/build.rs shells out to npm to build the Svelte UI.
               pkgs.nodejs
               # Cloudflare Workers/DO の OAuth ログインと deploy。
@@ -112,6 +115,7 @@
             ];
             shellHook = ''
               echo "harmion dev shell: $(rustc --version), node $(node --version), $(python3 --version)"
+              export HARMION_WASM_CC="${pkgs.llvmPackages.clang-unwrapped}/bin/clang"
               # wgpu and AntiWebUI load Vulkan/EGL at runtime. NixOS puts the
               # drivers in /run/opengl-driver, outside the default loader
               # search path of a dev shell.

@@ -4,6 +4,14 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 cd "$repo"
+
+# ring compiles a few C files for wasm32. Without a target-specific compiler,
+# cc-rs falls back to the host gcc and produces x86 objects that rust-lld
+# cannot link. Use the unwrapped clang from the dev shell when available.
+export CC_wasm32_unknown_unknown="${HARMION_WASM_CC:-clang}"
+export CFLAGS_wasm32_unknown_unknown="${HARMION_WASM_CFLAGS:---target=wasm32-unknown-unknown -Wno-unused-command-line-argument}"
+export AR_wasm32_unknown_unknown="${HARMION_WASM_AR:-ar}"
+
 cargo build -p harmion-worker --target wasm32-unknown-unknown --release --offline
 rm -rf "$here/src/pkg"
 wasm-bindgen --target web --out-dir "$here/src/pkg" --out-name harmion_worker_do \
