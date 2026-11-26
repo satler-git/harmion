@@ -1718,6 +1718,65 @@ fn admin_can_list_app_credentials_without_exposing_secrets() {
 }
 
 #[test]
+fn change_grants_cannot_remove_the_callers_own_management_grants() {
+    let mut t = Test::new();
+    let admin = t.admin.clone();
+    let id = t
+        .store
+        .transaction(|tx| Ok(tx.app_by_verifier(admin.verifier())?.unwrap().id))
+        .unwrap();
+    let error = app::change_grants(
+        &mut t.store,
+        t.host.now,
+        &admin,
+        id,
+        Grants::administrator(),
+        true,
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::Forbidden));
+
+    let error = app::change_grants(
+        &mut t.store,
+        t.host.now,
+        &admin,
+        id,
+        read_write(),
+        false,
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::Forbidden));
+    let error = app::change_grants(
+        &mut t.store,
+        t.host.now,
+        &admin,
+        id,
+        Grants::administrator(),
+        false,
+        Some(t.host.now + 1_000_000),
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::Forbidden));
+    // The credential still manages other apps and itself keeps its grants.
+    let (other, _) = t.issue(read_write());
+    app::change_grants(
+        &mut t.store,
+        t.host.now,
+        &admin,
+        other,
+        read_write(),
+        true,
+        None,
+    )
+    .unwrap();
+    let current = t.store.transaction(|tx| tx.app_by_id(id)).unwrap().unwrap();
+    assert!(current.grants.is_administrator());
+    assert!(!current.revoked);
+}
+
+#[test]
 fn change_grants_can_extend_expiry_within_bounds() {
     let mut t = Test::new();
     let (id, _) = t.issue(read_write());

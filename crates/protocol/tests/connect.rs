@@ -158,3 +158,28 @@ fn connection_offer_rejects_both_provider_fields_duplicates_and_oversized_lists(
         Err(harmion_protocol::CodecError::UnsupportedVersion(2))
     ));
 }
+
+#[test]
+fn android_sdk_offer_without_web_origin_is_accepted() {
+    // Mirrors `AuthorizationRequest.toOfferJson` in android/sdk. A malformed
+    // shape here would make connect-start fail with HTTP 400 before the owner
+    // approval screen can open.
+    let value = json!({
+        "version": 1,
+        "name": "Harmion E2E",
+        "redirect_uri": "http://127.0.0.1/harmion-sdk/callback",
+        "challenge": "A".repeat(43),
+        "state": "0123456789abcdef0123456789abcdef",
+        "grants": {
+            "read": {"type": "all"},
+            "write": {"type": "all"},
+            "call": false
+        },
+        "providers": [],
+        "provider_replace": false
+    });
+    let offer = decode_offer(value.to_string().as_bytes()).unwrap();
+    assert!(offer.web_origin.is_none());
+    assert!(!offer.grants.manage_apps);
+    assert!(!offer.grants.manage_nodes);
+}

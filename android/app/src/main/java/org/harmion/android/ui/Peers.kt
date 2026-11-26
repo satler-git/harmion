@@ -46,8 +46,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 import org.harmion.android.HarmionApplication
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -71,6 +71,8 @@ fun PeersScreen(controller: NodeRuntimeController) {
     var approvalNotice by remember { mutableStateOf<String?>(null) }
     val activity = context as? FragmentActivity
     val application = context.applicationContext as HarmionApplication
+    val snapshot by controller.snapshot.collectAsStateWithLifecycle()
+    val active = snapshot?.membership == "active"
 
     val scanLauncher =
         rememberLauncherForActivityResult(ScanContract()) { result ->
@@ -79,7 +81,7 @@ fun PeersScreen(controller: NodeRuntimeController) {
     val cameraPermission =
         rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
-                scanLauncher.launch(scanOptions())
+                scanLauncher.launch(harmionScanOptions())
             } else {
                 approvalError = "カメラ権限が必要です"
             }
@@ -88,7 +90,7 @@ fun PeersScreen(controller: NodeRuntimeController) {
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
         ) {
-            scanLauncher.launch(scanOptions())
+            scanLauncher.launch(harmionScanOptions())
         } else {
             cameraPermission.launch(Manifest.permission.CAMERA)
         }
@@ -120,7 +122,7 @@ fun PeersScreen(controller: NodeRuntimeController) {
                 members = list
                 invite = code
                 error = null
-            }.onFailure { error = it.message }
+            }.onFailure { error = errorLabel(it) }
             loading = false
         }
     }
@@ -132,88 +134,95 @@ fun PeersScreen(controller: NodeRuntimeController) {
         contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        item { PendingJoinCard(controller) }
-
-        item {
-            HarmionCard {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        SectionHeader("招待")
-                    }
-                    IconButton(onClick = { reload() }) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = "再読み込み")
-                    }
-                }
-                when {
-                    loading -> CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
-                    invite != null -> {
-                        val bitmap = remember(invite) { QrCode.render(invite!!, 720) }
-                        Surface(
-                            shape = MaterialTheme.shapes.medium,
-                            color = androidx.compose.ui.graphics.Color.White,
-                        ) {
-                            Image(
-                                bitmap = bitmap.asImageBitmap(),
-                                contentDescription = "招待コード",
-                                modifier = Modifier.fillMaxWidth().padding(12.dp),
-                            )
+        // Show one direction at a time: a node that is still waiting for
+        // admission cannot invite others, and an active node no longer has a
+        // pending request to display.
+        if (!active) {
+            item { PendingJoinCard(controller) }
+        } else {
+            item {
+                HarmionCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            SectionHeader("招待QR")
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            FilledTonalButton(
-                                onClick = {
-                                    val text = invite ?: return@FilledTonalButton
-                                    val send =
-                                        Intent(Intent.ACTION_SEND)
-                                            .setType("text/plain")
-                                            .putExtra(Intent.EXTRA_TEXT, text)
-                                    context.startActivity(
-                                        Intent.createChooser(send, "招待コードを共有"),
-                                    )
-                                },
-                                modifier = Modifier.weight(1f),
+                        IconButton(onClick = { reload() }) {
+                            Icon(Icons.Rounded.Refresh, contentDescription = "再読み込み")
+                        }
+                    }
+                    when {
+                        loading -> CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp)
+                        invite != null -> {
+                            val bitmap = remember(invite) { QrCode.render(invite!!, 720) }
+                            Surface(
+                                shape = MaterialTheme.shapes.medium,
+                                color = androidx.compose.ui.graphics.Color.White,
                             ) {
-                                Icon(
-                                    Icons.Rounded.Share,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp),
+                                Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = "招待コード",
+                                    modifier = Modifier.fillMaxWidth().padding(12.dp),
                                 )
-                                Text("共有", modifier = Modifier.padding(start = 8.dp))
                             }
-                            OutlinedButton(onClick = { reload() }, modifier = Modifier.weight(1f)) {
-                                Text("更新")
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                FilledTonalButton(
+                                    onClick = {
+                                        val text = invite ?: return@FilledTonalButton
+                                        val send =
+                                            Intent(Intent.ACTION_SEND)
+                                                .setType("text/plain")
+                                                .putExtra(Intent.EXTRA_TEXT, text)
+                                        context.startActivity(
+                                            Intent.createChooser(send, "招待コードを共有"),
+                                        )
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Share,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Text("共有", modifier = Modifier.padding(start = 8.dp))
+                                }
+                                OutlinedButton(onClick = { reload() }, modifier = Modifier.weight(1f)) {
+                                    Text("更新")
+                                }
                             }
                         }
+                        else -> {
+                            Text(
+                                "招待コードを取得できませんでした。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Button(onClick = { reload() }) { Text("再試行") }
+                        }
                     }
-                    else -> {
-                        Text(
-                            "招待コードを取得できませんでした。ノードが稼働しているか確認してください。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Button(onClick = { reload() }) { Text("再試行") }
+                    error?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     }
-                }
-                error?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
             }
         }
 
-        item {
-            OutlinedButton(
-                onClick = {
-                    approvalCode = ""
-                    approvalError = null
-                    approvalNotice = null
-                    approvalOpen = true
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
-                Text("参加要求を承認", modifier = Modifier.padding(start = 8.dp))
-            }
-            approvalNotice?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall)
+        if (active) {
+            item {
+                OutlinedButton(
+                    onClick = {
+                        approvalCode = ""
+                        approvalError = null
+                        approvalNotice = null
+                        approvalOpen = true
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Text("参加要求を承認", modifier = Modifier.padding(start = 8.dp))
+                }
+                approvalNotice?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
 
@@ -318,7 +327,7 @@ fun PeersScreen(controller: NodeRuntimeController) {
                                 approvalNotice = "承認しました。相手の同期後にメンバーへ反映されます。"
                                 reload()
                             }.onFailure {
-                                approvalError = it.message ?: "承認できませんでした"
+                                approvalError = errorLabel(it)
                             }
                             approvalBusy = false
                         }
@@ -331,10 +340,3 @@ fun PeersScreen(controller: NodeRuntimeController) {
         )
     }
 }
-
-private fun scanOptions(): ScanOptions =
-    ScanOptions()
-        .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-        .setPrompt("参加コードを読み取ります")
-        .setBeepEnabled(false)
-        .setOrientationLocked(false)

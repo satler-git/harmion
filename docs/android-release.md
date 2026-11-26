@@ -6,6 +6,8 @@
   SDKは `dev.satler.harmion/org.harmion.android.service.HarmionNodeService` を bind する）
 - 署名を変えると同一applicationIdの更新としてインストールできない。release鍵は
   **アプリの寿命と同じ**期間保持する。
+- `versionName` はGitHub Actionsのrelease workflowだけが `HARMION_OFFICIAL_RELEASE=true`
+  で `0.1.1` にする。debugとローカルの `release-app.sh` は `0.1.1-dev`。
 
 ## 2. 鍵の保管（1Password）
 1Passwordの **1つのDocumentアイテム** にkeystoreとメタデータをまとめる。

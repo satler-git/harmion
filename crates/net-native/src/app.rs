@@ -621,6 +621,21 @@ async fn owner_operation<S: Store + Send + 'static>(
                 .await?;
             Ok(json!({"enforce":request.enforce}))
         }
+        "owner-rotate-recovery" => {
+            if !body.is_empty() {
+                return Err(invalid().into());
+            }
+            let new_recovery_code = SystemHost.random_bytes()?;
+            let now = SystemHost.now_micros();
+            store
+                .run(move |store| {
+                    store.transaction(|tx| {
+                        owner::rotate_recovery(tx, &new_recovery_code, "owner", now)
+                    })
+                })
+                .await?;
+            Ok(json!({"recovery_code":hex(&new_recovery_code)}))
+        }
         _ => Err(harmion_node::Error::NotFound.into()),
     }
 }
@@ -998,7 +1013,7 @@ async fn dispatch<S: Store + Send + 'static>(
                     "permissions" => json!(GrantSpec::from(permissions)),
                     _ => {
                         let mut methods = vec!["get","query","apps","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","provision-manifest","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants","interpreter-list","interpreter-describe","interpreter-register","interpreter-approve","interpreter-call","interpreter-call-stream","interpreter-cancel"];
-                        methods.extend(["metrics", "sync-status", "owner-status", "owner-challenge", "owner-enroll", "owner-revoke", "owner-recover", "owner-enforce"]);
+                        methods.extend(["metrics", "sync-status", "owner-status", "owner-challenge", "owner-enroll", "owner-revoke", "owner-recover", "owner-rotate-recovery", "owner-enforce"]);
                         if oauth.is_some() { methods.extend(["oauth-register","oauth-consent","oauth-preview"]); }
                         json!({"version":1,"oauth":oauth.is_some(),"query":true,"subscriptions":true,
                         "interpreter":true,

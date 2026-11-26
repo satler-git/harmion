@@ -52,6 +52,7 @@ pub fn risk(operation: &str) -> Risk {
         | "export"
         | "owner-enroll"
         | "owner-revoke"
+        | "owner-rotate-recovery"
         | "owner-enforce" => Risk::Owner,
         "save"
         | "resolve"
@@ -158,6 +159,7 @@ mod tests {
             "oauth-consent",
             "export",
             "owner-enroll",
+            "owner-rotate-recovery",
         ] {
             assert_eq!(risk(operation), Risk::Owner, "{operation}");
         }

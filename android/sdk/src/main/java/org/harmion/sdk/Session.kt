@@ -81,6 +81,11 @@ class HarmionSession internal constructor(
 
     suspend fun authorize(request: AuthorizationRequest, appName: String): Authorization =
         serialized {
+            require(
+                appName.isNotBlank() &&
+                    appName.toByteArray(Charsets.UTF_8).size <= 128 &&
+                    appName.none { it.isISOControl() },
+            ) { "appName must be 1-128 UTF-8 bytes without control characters" }
             ensureRunning()
             val connection = awaitConnection()
             val verifier = Requests.pkceVerifier()

@@ -11,4 +11,15 @@
         <item name="android:windowCloseOnTouchOutside">false</item>
         <item name="android:windowNoTitle">true</item>
     </style>
+
+    <!-- The scanner uses a platform theme because CaptureActivity extends the
+         platform Activity, not AppCompatActivity. -->
+    <style name="Theme.Harmion.Scanner" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
 </resources>

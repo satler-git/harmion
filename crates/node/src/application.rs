@@ -153,6 +153,14 @@ pub fn change_grants(
             return Err(Error::Forbidden);
         }
         let mut app = tx.app_by_id(id)?.ok_or(Error::NotFound)?;
+        // An app must not lock the management surface out of itself. This used to
+        // let the hidden Android admin credential drop manage_apps/manage_nodes
+        // or shorten its own deadline and make Apps/Peers/approval fail with 403.
+        if app.id == principal.app.id
+            && (revoked || !grants.manage_apps || !grants.manage_nodes || expires_at.is_some())
+        {
+            return Err(Error::Forbidden);
+        }
         if app.grants == grants && app.revoked == revoked && expires_at.is_none() {
             return Ok(());
         }

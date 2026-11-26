@@ -41,6 +41,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.harmion.android.HarmionApplication
 import org.harmion.android.service.CallerAccess
+import org.harmion.android.ui.errorLabel
 import org.harmion.android.ui.theme.HarmionTheme
 import org.harmion.sdk.Hex
 import org.harmion.sdk.NodeClient
@@ -156,9 +157,14 @@ class ApprovalActivity : FragmentActivity() {
                                 if (appId.isEmpty()) {
                                     null
                                 } else {
-                                    admin.apps()
-                                        .firstOrNull { it.optString("app_id") == appId }
-                                        ?.optJSONObject("grants")
+                                    // The grant comparison is helpful context, not
+                                    // a prerequisite for showing the approval.
+                                    runCatching {
+                                            admin.apps()
+                                                .firstOrNull { it.optString("app_id") == appId }
+                                                ?.optJSONObject("grants")
+                                        }
+                                        .getOrNull()
                                 }
                             Triple(request, label, existing)
                         } finally {
@@ -177,7 +183,7 @@ class ApprovalActivity : FragmentActivity() {
                         previousGrants = value.third
                     }
                 }
-                .onFailure { error = it.message ?: "承認要求を読み込めませんでした。" }
+                .onFailure { error = errorLabel(it) }
         }
     }
 
@@ -238,7 +244,7 @@ class ApprovalActivity : FragmentActivity() {
                     finishAndRemoveTask()
                 }
                 .onFailure {
-                    error = it.message ?: "承認を記録できませんでした。"
+                    error = errorLabel(it)
                     deciding = false
                 }
         }

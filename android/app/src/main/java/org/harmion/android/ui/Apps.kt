@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -49,26 +50,45 @@ fun AppsScreen(controller: NodeRuntimeController) {
     var apps by remember { mutableStateOf<List<JSONObject>>(emptyList()) }
     var managing by remember { mutableStateOf<JSONObject?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var errorTitle by remember { mutableStateOf("アプリ一覧を取得できませんでした") }
     var busy by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(true) }
 
     fun reload() {
         loading = true
+        error = null
+        errorTitle = "アプリ一覧を取得できませんでした"
         scope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    val admin = controller.adminClient()
-                    try {
-                        admin.connections() to admin.apps()
-                    } finally {
-                        admin.close()
+            val failures = mutableListOf<String>()
+            // Fetch independently: a failure in one list must not hide data from
+            // the other, and an empty node still shows its empty state.
+            val nextConnections =
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        val admin = controller.adminClient()
+                        try {
+                            admin.connections()
+                        } finally {
+                            admin.close()
+                        }
                     }
-                }
-            }.onSuccess { (requests, credentials) ->
-                connections = requests
-                apps = credentials
-                error = null
-            }.onFailure { error = it.message }
+                }.onFailure { failures += "接続アプリ: ${errorLabel(it)}" }
+                    .getOrDefault(emptyList())
+            val nextApps =
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        val admin = controller.adminClient()
+                        try {
+                            admin.apps()
+                        } finally {
+                            admin.close()
+                        }
+                    }
+                }.onFailure { failures += "認可済みアプリ: ${errorLabel(it)}" }
+                    .getOrDefault(emptyList())
+            connections = nextConnections
+            apps = nextApps
+            error = failures.takeIf { it.isNotEmpty() }?.joinToString("\n")
             loading = false
         }
     }
@@ -123,7 +143,10 @@ fun AppsScreen(controller: NodeRuntimeController) {
                                     }
                                 }
                             }.onSuccess { reload() }
-                                .onFailure { error = it.message }
+                                .onFailure {
+                                    errorTitle = "操作できませんでした"
+                                    error = errorLabel(it)
+                                }
                             busy = false
                         }
                     },
@@ -184,7 +207,7 @@ fun AppsScreen(controller: NodeRuntimeController) {
             }
         }
 
-        if (!loading && connections.isEmpty()) {
+        if (!loading && connections.isEmpty() && error == null) {
             item {
                 EmptyState(
                     icon = Icons.Rounded.Apps,
@@ -194,10 +217,27 @@ fun AppsScreen(controller: NodeRuntimeController) {
             }
         }
 
-        error?.let {
+        error?.let { message ->
             item {
                 HarmionCard(containerColor = MaterialTheme.colorScheme.errorContainer) {
-                    Text(it, style = MaterialTheme.typography.bodyMedium)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(Icons.Rounded.ErrorOutline, contentDescription = null)
+                        Column(Modifier.weight(1f)) {
+                            Text(errorTitle, style = MaterialTheme.typography.titleSmall)
+                            Text(message, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = { reload() },
+                        enabled = !loading,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Text("再試行", modifier = Modifier.padding(start = 8.dp))
+                    }
                 }
             }
         }
@@ -240,8 +280,10 @@ fun AppsScreen(controller: NodeRuntimeController) {
                         }
                         managing = null
                         reload()
+                    }.onFailure {
+                        errorTitle = "操作できませんでした"
+                        error = errorLabel(it)
                     }
-                        .onFailure { error = it.message }
                 }
             },
         )

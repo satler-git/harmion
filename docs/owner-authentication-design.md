@@ -107,7 +107,7 @@ membership v1はEd25519署名、root-firstのAdmission証明列、退役、未�
 | R1 内容変更 | resolve、merge、merge-base、oauth-register、node sync | セッション + 監査 |
 | R2 権限・信頼・持ち出し | change-grants、node approve/join/retire/confirm-retirement/dismiss-retirement、peer-confirm、oauth-consent、connect-approve、interpreter-approve、export | セッション + 操作単位の端末承認 + 監査 |
 
-削除・復元（`resolve`のDelete/Restore）をR1に置くかR2に上げるかは未決とする。履歴は残るが、失いたくない場合はR2にする。所有者credential自体の管理（`owner-enroll`、`owner-revoke`、`owner-recover`、`owner-enforce`）もR2とする（§4.8.10）。
+削除・復元（`resolve`のDelete/Restore）をR1に置くかR2に上げるかは未決とする。履歴は残るが、失いたくない場合はR2にする。所有者credential自体の管理（`owner-enroll`、`owner-revoke`、`owner-recover`、`owner-rotate-recovery`、`owner-enforce`）もR2とする（§4.8.10）。
 
 ### 4.3 R2の承認フロー
 
@@ -141,7 +141,8 @@ Admin server -> Browser: 成功
 ### 4.5 管理資格情報
 
 - `admin.secret`は当面残す。CLIと管理サーバーがノードへ接続するためのルート資格情報であり、ブラウザへ渡さない。0600、ピアへコピーしない、を維持する。
-- `harmion --node DIR owner-status`でcredential、enforce、回復コードの有無、監査を表示する（実装済み）。所有者鍵の追加・失効・回復は`owner-enroll`・`owner-revoke`・`owner-recover`で行う（実装済み）。
+- `harmion --node DIR owner-status`でcredential、enforce、回復コードの有無、監査を表示する（実装済み）。所有者鍵の追加・失効・回復は`owner-enroll`・`owner-revoke`・`owner-recover`、回復コードの再発行は
+  `owner-rotate-recovery`で行う（実装済み）。
 - `admin.secret`の二段階ローテーションは未実装。実装する場合は、クライアントが新しい32バイトを生成し、そのverifierだけをノードへ送り、新しい`admin.secret`を書き込んだ後にcommitする。commit前に失敗した場合は旧資格情報が有効なままにする。
 - 短い有効期限を付けるだけの変更はしない。更新経路なしの期限切れはロックアウトになる。
 - OS鍵保管への移動、Unix socket + peer credentialによるローカルIPCはPhase 3以降の候補とする。管理APIを通常のApp APIに統一する現在の仕様を変えるため、単独では行わない。
@@ -340,6 +341,7 @@ ssh-keygen -Y verify -f allowed_signers -I owner -n harmion-owner -s statement.s
 | `owner-enroll` | R2 | 2つ目以降のcredential追加。既存assertion必須 |
 | `owner-revoke` | R2 | 既存assertion必須。最後のcredentialは回復コード必須 |
 | `owner-recover` | R2 | 回復コード + TTY |
+| `owner-rotate-recovery` | R2 | 既存assertionで回復コードを再発行。旧コードは即時失効 |
 | `owner-enforce` | R2 | enforceの切り替え。既存assertion必須。全credentialを失った場合は`owner-recover`を使う |
 
 - schema migrationでは空テーブルを作り、既存ノードは`enforce=0`のまま動かす。所有者がofflineで最初のcredentialを登録した時点で`enforce=1`にする。

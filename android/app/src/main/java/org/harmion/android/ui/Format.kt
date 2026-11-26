@@ -70,6 +70,32 @@ internal fun syncBlockedLabel(code: String): String =
         else -> "停止中"
     }
 
+/**
+ * User-facing text for admin/App API failures. The SDK reports transport
+ * status as `Http(403)`; showing that verbatim tells the user nothing.
+ */
+internal fun errorLabel(error: Throwable?): String {
+    val raw = error?.message?.trim().orEmpty()
+    if (raw.isEmpty()) return "不明なエラーが発生しました。"
+    return when {
+        raw.contains("Http(400)") -> "要求を処理できませんでした。もう一度お試しください。"
+        raw.contains("Http(401)") -> "認証に失敗しました。ノードを開き直してください。"
+        raw.contains("Http(403)") -> "この端末に必要な管理権限がありません。"
+        raw.contains("Http(404)") -> "対象が見つかりません。画面を更新してください。"
+        raw.startsWith("Http(5") -> "ノードで一時的なエラーが発生しました。時間をおいて再試行してください。"
+        raw.contains("timeout", ignoreCase = true) -> "ノードの応答がありません。再試行してください。"
+        raw.contains("not_running") -> "ノードが停止しています。少し待ってから再試行してください。"
+        raw.contains("OwnerRecoveryInvalid") || raw.contains("owner_recovery_invalid") ->
+            "リカバリコードが違います。"
+        raw.contains("OwnerAssertionRequired") || raw.contains("owner_assertion_required") ->
+            "所有者の承認が必要です。"
+        raw.contains("OwnerChallengeExpired") || raw.contains("owner_challenge_expired") ->
+            "承認の有効期限が切れました。"
+        raw.contains("cancelled", ignoreCase = true) -> "キャンセルしました。"
+        else -> raw
+    }
+}
+
 internal fun grantSummary(grants: JSONObject?): List<String> {
     if (grants == null) return emptyList()
     val summary = mutableListOf<String>()

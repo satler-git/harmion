@@ -102,6 +102,38 @@ async fn owner_enrollment_requires_a_node_verified_assertion() {
         Err(Error::Http(403))
     ));
 
+    // Rotating the recovery code needs the owner assertion and invalidates the
+    // code shown at enrollment.
+    assert!(matches!(
+        client.call("owner-rotate-recovery", &[]).await,
+        Err(Error::Http(403))
+    ));
+    let rotated = client
+        .call_owner("owner-rotate-recovery", &[], None, None, &signer)
+        .await
+        .unwrap();
+    let new_code = rotated["recovery_code"].as_str().unwrap().to_owned();
+    let recovered_key = key(&keys, "recovered");
+    let old_body = serde_json::to_vec(
+        &json!({"recovery_code": hex(&[7; 32]), "public_key": recovered_key.clone()}),
+    )
+    .unwrap();
+    assert!(matches!(
+        client.call("owner-recover", &old_body).await,
+        Err(Error::Http(403))
+    ));
+    let new_body = serde_json::to_vec(
+        &json!({"recovery_code": new_code.clone(), "public_key": recovered_key}),
+    )
+    .unwrap();
+    let recovered = client.call("owner-recover", &new_body).await.unwrap();
+    assert!(
+        recovered["fingerprint"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert!(recovered["recovery_code"].as_str().is_some());
+
     stop.send(true).unwrap();
     server.await.unwrap().unwrap();
     let _ = std::fs::remove_dir_all(keys);

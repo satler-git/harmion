@@ -45,7 +45,6 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.harmion.android.HarmionApplication
@@ -78,14 +77,14 @@ class MainActivity : FragmentActivity() {
         val cameraPermission =
             registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
                 if (granted) {
-                    scanLauncher.launch(scanOptions())
+                    scanLauncher.launch(harmionScanOptions())
                 }
             }
         val notificationPermission =
             registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
         val requestScan = {
             if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                scanLauncher.launch(scanOptions())
+                scanLauncher.launch(harmionScanOptions())
             } else {
                 cameraPermission.launch(Manifest.permission.CAMERA)
             }
@@ -122,13 +121,6 @@ class MainActivity : FragmentActivity() {
             }
         }
     }
-
-    private fun scanOptions(): ScanOptions =
-        ScanOptions()
-            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-            .setPrompt("Harmionの招待コードを読み取ります")
-            .setBeepEnabled(false)
-            .setOrientationLocked(false)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

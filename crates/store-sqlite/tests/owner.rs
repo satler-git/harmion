@@ -276,6 +276,51 @@ fn recovery_replaces_all_credentials_and_rotates_the_code() {
 }
 
 #[test]
+fn recovery_rotation_invalidates_the_old_code() {
+    let mut test = Test::new();
+    test.enroll();
+    let public = test.public_key();
+    test.store
+        .transaction(|tx| owner::rotate_recovery(tx, &[11; 32], "test", 250))
+        .unwrap();
+
+    let status = test.store.transaction(|tx| owner::status(tx)).unwrap();
+    assert!(status.recovery_configured);
+    assert!(
+        status
+            .audit
+            .iter()
+            .any(|entry| entry.operation == "owner-rotate-recovery")
+    );
+
+    let id = test.host.random_bytes().unwrap();
+    let error = test
+        .store
+        .transaction(|tx| owner::recover(tx, &[7; 32], &public, "old", &[9; 32], id, 300))
+        .unwrap_err();
+    assert!(matches!(error, Error::OwnerRecoveryInvalid));
+
+    let id = test.host.random_bytes().unwrap();
+    test.store
+        .transaction(|tx| owner::recover(tx, &[11; 32], &public, "new", &[12; 32], id, 310))
+        .unwrap();
+}
+
+#[test]
+fn recovery_rotation_requires_enforced_owner_credentials() {
+    let mut test = Test::new();
+    test.enroll();
+    test.store
+        .transaction(|tx| owner::set_enforce(tx, false, "test", 200))
+        .unwrap();
+    let error = test
+        .store
+        .transaction(|tx| owner::rotate_recovery(tx, &[11; 32], "test", 250))
+        .unwrap_err();
+    assert!(matches!(error, Error::OwnerAssertionRequired));
+}
+
+#[test]
 fn disabled_enforcement_still_requires_an_administrator() {
     let mut test = Test::new();
     test.enroll();

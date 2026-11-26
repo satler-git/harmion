@@ -1,3 +1,5 @@
+import java.time.OffsetDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Properties
 
 plugins {
@@ -8,6 +10,23 @@ plugins {
 val versionProps = Properties().apply {
     project.file("version.properties").inputStream().use { load(it) }
 }
+
+// GitHub Actions release workflow sets this. Local builds (including a local
+// signed release) are development artifacts and carry -dev.
+val officialRelease = System.getenv("HARMION_OFFICIAL_RELEASE") == "true"
+
+fun git(vararg args: String): String =
+    runCatching {
+        providers.exec {
+            commandLine("git", *args)
+            workingDir = rootProject.projectDir.parentFile
+        }.standardOutput.asText.get().trim()
+    }.getOrDefault("")
+
+val gitRevision = git("rev-parse", "--short=12", "HEAD").ifEmpty { "unknown" }
+val gitBranch = git("rev-parse", "--abbrev-ref", "HEAD").ifEmpty { "unknown" }
+val gitDirty = git("status", "--porcelain").isNotEmpty()
+val buildTime = OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
 
 android {
     namespace = "org.harmion.android"
@@ -24,6 +43,11 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
+        buildConfigField("String", "GIT_REVISION", "\"$gitRevision\"")
+        buildConfigField("String", "GIT_BRANCH", "\"$gitBranch\"")
+        buildConfigField("boolean", "GIT_DIRTY", gitDirty.toString())
+        buildConfigField("String", "BUILD_TIME", "\"$buildTime\"")
+        buildConfigField("boolean", "OFFICIAL_RELEASE", officialRelease.toString())
     }
 
     signingConfigs {
@@ -39,7 +63,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            versionNameSuffix = "-dev"
+        }
         release {
+            if (!officialRelease) {
+                versionNameSuffix = "-dev"
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

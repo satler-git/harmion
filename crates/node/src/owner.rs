@@ -571,6 +571,48 @@ pub fn recover(
     Ok(credential)
 }
 
+/// Replace the recovery code while an active owner credential remains.
+///
+/// The caller has already verified an owner assertion for this operation. The
+/// old code becomes invalid immediately; the host returns the new code once.
+pub fn rotate_recovery(
+    tx: &mut dyn Transaction,
+    new_recovery_code: &[u8; 32],
+    actor: &str,
+    now: i64,
+) -> Result<(), Error> {
+    let mut policy = tx.owner_policy()?;
+    if !policy.enforce
+        || !tx
+            .owner_credentials()?
+            .iter()
+            .any(|credential| !credential.revoked)
+    {
+        return Err(Error::OwnerAssertionRequired);
+    }
+    policy.recovery_hash = Some(recovery_hash(new_recovery_code));
+    policy.updated_at = now;
+    tx.put_owner_policy(&policy)?;
+    append_audit(
+        tx,
+        OwnerAudit {
+            seq: 0,
+            at: now,
+            actor: actor.to_owned(),
+            operation: "owner-rotate-recovery".to_owned(),
+            target: None,
+            args_hash: protocol::args_hash(&[]),
+            credential: None,
+            challenge: None,
+            session: None,
+            result: "rotated".to_owned(),
+            prev_hash: [0; 32],
+            entry_hash: [0; 32],
+        },
+    )?;
+    Ok(())
+}
+
 pub fn set_enforce(
     tx: &mut dyn Transaction,
     enforce: bool,

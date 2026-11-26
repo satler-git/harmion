@@ -1,8 +1,8 @@
 # Harmion for Android — 設計・実装状態
 本ドキュメントは [android-node.md](android-node.md) の要求に対するAndroid固有の設計判断と、
 現時点の実装範囲・既存仕様との差分をまとめる。要求文書を置き換えるものではない。
-最終更新: 2026-11-25。ノード本体・SDK・所有者承認・M3 Expressive UI・
-アプリ認可管理・競合解決・ウィジェット・通知・回復コード再登録まで実装。
+最終更新: 2026-11-26。ノード本体・SDK・所有者承認・M3 Expressive UI・
+アプリ認可管理・競合解決・ウィジェット・通知・回復コード再登録/再発行まで実装。
 x86_64 API 36 エミュレータで動作確認済み（物理端末は未検証、第14節）。
 ## 1. スコープと方針
 - 既存Rust Core（`crates/node`、`crates/protocol`、`crates/store-sqlite`、
@@ -177,6 +177,10 @@ AIDL `IHarmionNodeService`:
   `now < expires_at <= now + 10年` のみ受理し、owner assertion（R2）を要求する。
 - 管理画面の「権限を管理」では、grant・失効に加えて「変更なし / 30日 / 90日 / 1年」を
   選べる。延長は同じowner承認1回でgrant変更と同時に適用される。
+- 管理資格情報自身はgrant管理の対象にしない。`change-grants`は呼び出し元が自分自身の
+  `manage_apps`/`manage_nodes`/`revoked`/`expires_at`を外す変更を拒否する。旧版で
+  自己ロックしたノードは、起動時にホストの管理credentialをadministratorへ戻す。
+
 ## 9. 所有者認証
 所有者承認は、Androidでも`ssh-keygen`なしで完結する。
 - 検証: `crates/node/src/sshsig.rs` がOpenSSHのSSHSIGを内製検証する。
@@ -194,7 +198,14 @@ AIDL `IHarmionNodeService`:
   残課題）。
 - 登録: `NodeRuntimeController.enrollOwner` → 実行中ランタイムのstoreで
   `owner::enroll_initial`を呼ぶ。初回のみ成功し、回復コードを一度だけ返す。
-  UIは回復コードをダイアログ表示し（FLAG_SECURE）、再表示しない。
+  UIは回復コードをダイアログ表示し（FLAG_SECURE）、再表示しない。コードは
+  ClipboardManagerへコピーでき、Android 13+ではsensitive clipにする。
+  閉じる前には保存確認を挟む。
+- 回復コードの再発行: 設定の「リカバリコードを再発行」→ 生体認証 → App API
+  `owner-rotate-recovery`（R2）。`owner_policy`のrecovery_hashだけを差し替える。
+  Keystoreと生体認証が生きている間は、コードを紛失しても再発行できる。
+  アプリデータ削除・機種変更・生体登録変更でKeystore鍵が失効した場合は
+  回復コードが唯一の復旧経路になる。
 - 回復コード再登録: 設定の「リカバリコードで再登録/復元」→ 新しいseedと公開鍵を生成し、
   App API `owner-recover` に回復コードと公開鍵を送る。ノードは既存owner credentialを
   すべて失効させ、新しいcredentialと**新しい回復コード**を返す。端末側は新seedを
@@ -212,7 +223,6 @@ AIDL `IHarmionNodeService`:
   - 物理端末でのKeystore/BiometricPrompt動作確認（エミュレータでは指紋登録と
     `adb -e emu finger touch 1`で確認済み）。
   - join/retire/confirm-retirement等、未接続のR2操作への`OwnerAdmin.call`適用。
-  - 回復コードのクリップボード/パスワードマネージャ連携。
 ## 10. 着信接続
 - 主経路はiroh（UDP）。Androidからの発信は必須要件として満たす。
 - irohのbindに失敗した場合、HTTPS Peerリスナーを現在のLANアドレスにbindする
@@ -232,9 +242,10 @@ AIDL `IHarmionNodeService`:
 - 承認Activityは`taskAffinity=""`の専用タスクで開き、完了時に`finishAndRemoveTask()`で
   タスクごと閉じる。これにより承認後はノードアプリではなく要求元アプリへ戻る（F-17の緩和も兼ねる）。
 - 画面: Onboarding（作成 / QR参加 / 参加要求QR / コード貼り付け）、
-  ホーム（状態・同期・競合・ノード）、ピア（招待QR・参加承認・メンバー）、アプリ（接続要求・認可済みアプリのgrant/期限管理）、
-  設定（同期ポリシー・常時稼働・所有者承認・回復コード再登録）、接続承認Activity、
-  競合解決シート（候補選択・本文3-way merge）。
+  ホーム（状態・同期・競合・ノード）、ピア（参加待ちなら参加承認QR、承認済みなら招待QRの片方だけを表示）、
+  アプリ（接続要求・認可済みアプリのgrant/期限管理）、
+  設定（同期ポリシー・常時稼働・所有者承認・回復コード再登録/再発行）、接続承認Activity、
+  競合解決シート（候補選択・本文3-way merge）。QRスキャナーは縦固定・独自フレーム・ライト付き。
 - 通知: 同期・承認・競合/ストレージ（`issues`）。競合とストレージ異常は
   `IssueCheckWorker`（30分間隔、WorkManager）が検出して通知し、解消時に取り消す。
   常時稼働中は `KeepAliveService` の継続通知に「稼働中 / 同期待機 / 同期中」とピア数を表示。

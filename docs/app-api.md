@@ -136,6 +136,7 @@ SDKは通知を適用してから対応カーソルを保存する。購読キ�
 | `owner-enroll` | R2 | 2つ目以降のSSH公開鍵を追加。既存assertion必須 |
 | `owner-revoke` | R2 | credentialを失効。最後のcredentialは回復コード必須 |
 | `owner-recover` | 管理 | 回復コードと新しいSSH公開鍵で全credentialを置き換える。assertionは要求しない |
+| `owner-rotate-recovery` | R2 | 既存assertionで回復コードを再発行し、旧コードを失効させる |
 | `owner-enforce` | R2 | enforceの切り替え。既存assertion必須 |
 
 R2要求には次のヘッダーを付ける。署名はchallenge発行時の`statement`（canonical bytes）に対して行う。

@@ -1,10 +1,15 @@
 use harmion_client::Client;
 use harmion_domain::*;
 use harmion_local::ProtectedDir;
+use harmion_node::{
+    access::{Credential, Grants},
+    storage::Store,
+};
 use harmion_protocol::*;
 use harmion_runtime::{
     ConfigOverrides, InitializeOptions, NodeRuntime, RuntimeOptions, initialize, is_initialized,
 };
+use harmion_store_sqlite::SqliteStore;
 use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -200,4 +205,45 @@ async fn join_approve_and_sync_both_directions_through_the_app_api() {
 
     a_runtime.shutdown().await.unwrap();
     b_runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_repairs_a_host_admin_credential_without_management_grants() {
+    let base = Base::new();
+    let root = base.node("node");
+    let initialized = initialize(&root, &InitializeOptions::default()).unwrap();
+    let secret: [u8; 32] = std::fs::read(root.join("admin.secret"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    // Simulate a node written by an older build that let the hidden admin app
+    // remove its own manage_apps/manage_nodes grants.
+    {
+        let identity = initialized.config.identity().unwrap();
+        let mut store = SqliteStore::open(root.join("node.db"), identity).unwrap();
+        let credential = Credential::from_bytes(secret);
+        store
+            .transaction(|tx| {
+                let mut app = tx.app_by_verifier(credential.verifier())?.unwrap();
+                app.grants = Grants::default();
+                app.revoked = false;
+                tx.update_app(&app)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    let runtime = NodeRuntime::start(&root, options()).await.unwrap();
+    let client = client(&root);
+    let apps = client.call("apps", &[]).await.unwrap();
+    assert!(
+        apps["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|app| app["grants"]["manage_apps"] == true)
+    );
+    let connections = client.connect_list().await.unwrap();
+    assert!(connections["connections"].as_array().unwrap().is_empty());
+    runtime.shutdown().await.unwrap();
 }

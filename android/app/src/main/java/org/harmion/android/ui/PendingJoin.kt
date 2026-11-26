@@ -128,7 +128,7 @@ fun PendingJoinCard(controller: NodeRuntimeController) {
             Column(Modifier.weight(1f)) {
                 Text("参加承認待ち", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "既存ノードで読み取って承認",
+                    "既存ノードの「参加要求を承認」でこのQRを読み取る",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

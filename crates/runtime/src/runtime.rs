@@ -20,6 +20,7 @@ use harmion_net_native::{
     NativeTransport, SharedStore, SystemHost, app, iroh_peer, oauth_browser, peer, recovery, sync,
 };
 use harmion_node::{
+    access::{Credential, Grants},
     application::Host,
     membership_state::{self, MembershipSigner},
     storage::Store,
@@ -94,6 +95,37 @@ pub struct NodeRuntime {
     failures: tokio::sync::watch::Receiver<Option<String>>,
     parts: Mutex<Option<Parts>>,
 }
+
+/// Restore the host admin credential's management grants.
+///
+/// `admin.secret` is the host's root App credential and is never managed by the
+/// UI. Older Android builds exposed that hidden app in the grant editor and let
+/// the owner remove `manage_apps`/`manage_nodes` from it, after which Apps,
+/// Peers and the approval screen failed with HTTP 403. Reconcile it at startup
+/// so such a node recovers without losing data.
+async fn reconcile_host_admin(store: &SharedStore<SqliteStore>, secret: [u8; 32]) -> Result<()> {
+    store
+        .run(move |store| {
+            store.transaction(|tx| {
+                let credential = Credential::from_bytes(secret);
+                let Some(mut app) = tx.app_by_verifier(credential.verifier())? else {
+                    return Err(harmion_node::Error::Unauthenticated);
+                };
+                if app.grants.is_administrator() && !app.revoked && app.expires_at == i64::MAX {
+                    return Ok(());
+                }
+                tracing::warn!("restoring the host admin credential's management grants");
+                app.grants = Grants::administrator();
+                app.revoked = false;
+                app.expires_at = i64::MAX;
+                tx.update_app(&app)?;
+                Ok(())
+            })
+        })
+        .await?;
+    Ok(())
+}
+
 impl NodeRuntime {
     /// Opens the node directory and starts every listener, the scheduler and the
     /// maintenance loop. The runtime takes the directory lock: a second start
@@ -111,6 +143,7 @@ impl NodeRuntime {
             directory.path().join(crate::config::DATABASE_FILE),
             identity,
         )?);
+        reconcile_host_admin(&store, storage::admin_secret(&directory)?).await?;
         let app_listener = TcpListener::bind(config.app_listen)
             .await
             .map_err(|error| Error::Start(format!("app listener: {error}")))?;

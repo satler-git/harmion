@@ -1,5 +1,11 @@
 package org.harmion.android.ui
 
+import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
+import android.content.Intent
+import android.os.Build
+import android.os.PersistableBundle
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -11,8 +17,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BatteryChargingFull
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Key
@@ -26,6 +34,7 @@ import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -58,6 +67,7 @@ import java.security.SecureRandom
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.harmion.android.BuildConfig
 import org.harmion.android.HarmionApplication
 import org.harmion.android.core.BatteryRule
 import org.harmion.android.core.NetworkRule
@@ -78,6 +88,12 @@ fun SettingsScreen(controller: NodeRuntimeController, policy: PolicyEvaluator) {
     var settings by remember { mutableStateOf(controller.settings()) }
     var saved by remember { mutableStateOf<String?>(null) }
     var identifiers by remember { mutableStateOf<JSONObject?>(null) }
+
+    fun copy(value: String) {
+        context.getSystemService(ClipboardManager::class.java)
+            .setPrimaryClip(ClipData.newPlainText("Harmion", value))
+        Toast.makeText(context, "コピーしました", Toast.LENGTH_SHORT).show()
+    }
 
     fun persist(updated: SyncSettings) {
         settings = updated
@@ -218,14 +234,36 @@ fun SettingsScreen(controller: NodeRuntimeController, policy: PolicyEvaluator) {
         item {
             HarmionCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
                 SectionHeader("ノード")
+                InfoRow("アプリ", BuildConfig.VERSION_NAME)
                 identifiers?.let { ids ->
-                    InfoRow("ノードID", shortId(ids.optString("node_id")), emphasis = true)
-                    InfoRow("クラスタID", shortId(ids.optString("cluster_id")), emphasis = true)
+                    val nodeId = ids.optString("node_id")
+                    val clusterId = ids.optString("cluster_id")
+                    InfoRow(
+                        "ノードID",
+                        shortId(nodeId),
+                        emphasis = true,
+                        onCopy = if (nodeId.isBlank()) null else ({ copy(nodeId) }),
+                    )
+                    InfoRow(
+                        "クラスタID",
+                        shortId(clusterId),
+                        emphasis = true,
+                        onCopy = if (clusterId.isBlank()) null else ({ copy(clusterId) }),
+                    )
                 }
 
             }
         }
 
+        item {
+            OutlinedButton(
+                onClick = { context.startActivity(Intent(context, AboutActivity::class.java)) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Rounded.Info, contentDescription = null, modifier = Modifier.size(18.dp))
+                Text("このアプリについて", modifier = Modifier.padding(start = 8.dp))
+            }
+        }
         item { Spacer(Modifier.height(8.dp)) }
     }
 }
@@ -239,27 +277,35 @@ private fun OwnerSection(controller: NodeRuntimeController) {
     var ownerEnrolled by remember { mutableStateOf(ownerKeys.enrolled) }
     var ownerFingerprint by remember { mutableStateOf(ownerKeys.fingerprint) }
     var ownerEnforced by remember { mutableStateOf<Boolean?>(null) }
+    var ownerRecoveryConfigured by remember { mutableStateOf<Boolean?>(null) }
     var ownerBusy by remember { mutableStateOf(false) }
     var ownerError by remember { mutableStateOf<String?>(null) }
     var recoveryCode by remember { mutableStateOf<String?>(null) }
+    var recoveryCopied by remember { mutableStateOf(false) }
+    var recoveryCloseWarning by remember { mutableStateOf(false) }
     var recoverOpen by remember { mutableStateOf(false) }
     var recoverInput by remember { mutableStateOf("") }
     var recoverError by remember { mutableStateOf<String?>(null) }
     var recoverBusy by remember { mutableStateOf(false) }
+    var reissueOpen by remember { mutableStateOf(false) }
+    var reissueBusy by remember { mutableStateOf(false) }
+    var reissueError by remember { mutableStateOf<String?>(null) }
     val activity = context as? FragmentActivity
 
     LaunchedEffect(ownerEnrolled) {
-        ownerEnforced =
+        val status =
             runCatching {
                 withContext(Dispatchers.IO) {
                     val admin = controller.adminClient()
                     try {
-                        admin.ownerStatus().optBoolean("enforce")
+                        admin.ownerStatus()
                     } finally {
                         admin.close()
                     }
                 }
             }.getOrNull()
+        ownerEnforced = status?.optBoolean("enforce")
+        ownerRecoveryConfigured = status?.optBoolean("recovery_configured")
     }
 
     HarmionCard {
@@ -295,11 +341,23 @@ private fun OwnerSection(controller: NodeRuntimeController) {
                     null -> "確認できません"
                 },
             )
-            Text(
-                "リカバリコードは初回のみ表示",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            InfoRow(
+                "リカバリコード",
+                when (ownerRecoveryConfigured) {
+                    true -> "設定済み"
+                    false -> "未設定"
+                    null -> "確認できません"
+                },
             )
+            TextButton(
+                enabled = !reissueBusy,
+                onClick = {
+                    reissueOpen = true
+                    reissueError = null
+                },
+            ) {
+                Text("生体認証で再発行")
+            }
             TextButton(onClick = { recoverOpen = true; recoverInput = ""; recoverError = null }) {
                 Text("リカバリコードで再登録")
             }
@@ -326,10 +384,12 @@ private fun OwnerSection(controller: NodeRuntimeController) {
                             ownerKeys.markEnrolled()
                             ownerEnrolled = true
                             ownerFingerprint = fingerprint
+                            recoveryCopied = false
+                            recoveryCloseWarning = false
                             recoveryCode = enrollment.getString("recovery_code")
                         }.onFailure {
                             ownerKeys.clear()
-                            ownerError = it.message ?: "所有者キーを登録できませんでした"
+                            ownerError = errorLabel(it)
                         }
                         ownerBusy = false
                     }
@@ -394,8 +454,10 @@ private fun OwnerSection(controller: NodeRuntimeController) {
                                 ownerEnrolled = true
                                 ownerFingerprint = fingerprint
                                 recoverOpen = false
+                                recoveryCopied = false
+                                recoveryCloseWarning = false
                                 recoveryCode = recovered.getString("recovery_code")
-                            }.onFailure { recoverError = it.message ?: "復元できませんでした" }
+                            }.onFailure { recoverError = errorLabel(it) }
                             recoverBusy = false
                         }
                     },
@@ -407,22 +469,156 @@ private fun OwnerSection(controller: NodeRuntimeController) {
         )
     }
 
-    recoveryCode?.let { code ->
+    if (reissueOpen) {
         AlertDialog(
-            onDismissRequest = { recoveryCode = null },
-            title = { Text("リカバリコード") },
+            onDismissRequest = { if (!reissueBusy) reissueOpen = false },
+            title = { Text("生体認証で再発行") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("閉じると再表示できません")
-                    Text(code, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Medium)
+                    Text("現在のリカバリコードは無効になります。")
+                    reissueError?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
                 }
             },
             properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
             confirmButton = {
-                TextButton(onClick = { recoveryCode = null }) { Text("保存しました") }
+                TextButton(
+                    enabled = !reissueBusy && activity != null,
+                    onClick = {
+                        if (activity == null || reissueBusy) return@TextButton
+                        reissueBusy = true
+                        reissueError = null
+                        scope.launch {
+                            runCatching {
+                                withContext(Dispatchers.IO) {
+                                    val admin = controller.adminClient()
+                                    try {
+                                        application.ownerAdmin.call(
+                                            admin,
+                                            activity,
+                                            "owner-rotate-recovery",
+                                            ByteArray(0),
+                                        )
+                                    } finally {
+                                        admin.close()
+                                    }
+                                }
+                            }.onSuccess { response ->
+                                reissueOpen = false
+                                ownerRecoveryConfigured = true
+                                recoveryCopied = false
+                                recoveryCloseWarning = false
+                                recoveryCode = response.getString("recovery_code")
+                            }.onFailure { reissueError = errorLabel(it) }
+                            reissueBusy = false
+                        }
+                    },
+                ) { Text(if (reissueBusy) "発行中…" else "再発行") }
+            },
+            dismissButton = {
+                TextButton(onClick = { if (!reissueBusy) reissueOpen = false }) { Text("キャンセル") }
             },
         )
     }
+
+    recoveryCode?.let { code ->
+        if (recoveryCloseWarning) {
+            AlertDialog(
+                onDismissRequest = { recoveryCloseWarning = false },
+                title = { Text("保存しましたか？") },
+                text = { Text("このコードは再表示できません。") },
+                properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            recoveryCode = null
+                            recoveryCloseWarning = false
+                            recoveryCopied = false
+                        },
+                    ) { Text("保存した") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { recoveryCloseWarning = false }) { Text("戻る") }
+                },
+            )
+        } else {
+            AlertDialog(
+                onDismissRequest = { recoveryCloseWarning = true },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Rounded.Key, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Text("リカバリコード")
+                    }
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Surface(
+                            shape = MaterialTheme.shapes.medium,
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            SelectionContainer {
+                                Text(
+                                    code,
+                                    modifier = Modifier.padding(14.dp),
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                            }
+                        }
+                        if (recoveryCopied) {
+                            Text(
+                                "コピーしました",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                },
+                properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
+                confirmButton = {
+                    FilledTonalButton(
+                        onClick = {
+                            copySecret(context, "Harmionのリカバリコード", code)
+                            recoveryCopied = true
+                            Toast.makeText(
+                                context,
+                                "リカバリコードをコピーしました",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        },
+                    ) {
+                        Icon(
+                            Icons.Rounded.ContentCopy,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Text("コピー", modifier = Modifier.padding(start = 8.dp))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { recoveryCloseWarning = true }) { Text("閉じる") }
+                },
+            )
+        }
+    }
+}
+
+/**
+ * Copies a one-time secret as a sensitive clip so the system preview does not
+ * expose it, while password managers can still paste it into their vault.
+ */
+private fun copySecret(context: android.content.Context, label: String, value: String) {
+    val clipboard = context.getSystemService(ClipboardManager::class.java)
+    val clip = ClipData.newPlainText(label, value)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        clip.description.extras =
+            PersistableBundle().apply {
+                putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+            }
+    }
+    clipboard.setPrimaryClip(clip)
 }
 
 @Composable
