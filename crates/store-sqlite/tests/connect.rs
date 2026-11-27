@@ -8,7 +8,9 @@ use harmion_node::{
     oauth,
     storage::Identity,
 };
-use harmion_protocol::connect::{ConnectionOffer, ConnectionStatus, decode_offer};
+use harmion_protocol::connect::{
+    CONNECTION_TTL_SECONDS, ConnectionOffer, ConnectionStatus, decode_offer,
+};
 use harmion_protocol::interpreter::{
     CONTRACT_VERSION, DefaultQuery, ProviderRegistration, ProviderStatus,
 };
@@ -240,7 +242,7 @@ fn connection_denial_and_expiry_are_terminal() {
         Err(Error::ConnectionDenied)
     ));
     let expired = connect::start(&mut t.store, &mut t.host, offer("Expired", false)).unwrap();
-    t.host.now += 6 * 60 * 1_000_000;
+    t.host.now += (CONNECTION_TTL_SECONDS + 1) * 1_000_000;
     assert_eq!(
         connect::status(&mut t.store, &mut t.host, expired.id, expired.secret)
             .unwrap()
