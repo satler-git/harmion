@@ -1,5 +1,6 @@
 package org.harmion.android.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,6 +15,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -97,6 +99,64 @@ fun AppsScreen(controller: NodeRuntimeController) {
 
     val pending = connections.filter { it.optString("status") == "pending" }
     val approved = connections.filter { it.optString("status") == "approved" }
+    val revokedAppIds =
+        apps.filter { it.optBoolean("revoked") }
+            .mapNotNull { it.optString("app_id").takeIf(String::isNotEmpty) }
+            .toSet()
+    val visibleApps =
+        apps.filterNot { app ->
+            if (app.optBoolean("revoked")) return@filterNot true
+            val grants = app.optJSONObject("grants")
+            app.isNull("name") &&
+                grants?.optBoolean("manage_nodes") == true &&
+                grants.optBoolean("manage_apps")
+        }
+    // A revoked credential invalidates its existing connection; keep it out of the
+    // active list instead of showing an approved connection that can no longer work.
+    val visibleApproved =
+        approved.filterNot { connection ->
+            val appId = connection.optString("app_id").ifEmpty { connection.optString("client_id") }
+            appId in revokedAppIds
+        }
+
+    fun updateGrants(app: JSONObject, grants: JSONObject, revoked: Boolean, expiresAt: String?) {
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val admin = controller.adminClient()
+                    try {
+                        val body =
+                            JSONObject()
+                                .put("app_id", app.getString("app_id"))
+                                .put("grants", grants)
+                                .put("revoked", revoked)
+                                .apply { expiresAt?.let { put("expires_at", it) } }
+                        application.ownerAdmin.call(
+                            admin,
+                            activity,
+                            "change-grants",
+                            body.toString().toByteArray(Charsets.UTF_8),
+                        )
+                    } finally {
+                        admin.close()
+                    }
+                }
+            }.onSuccess {
+                if (revoked) {
+                    org.harmion.android.service.CallerAccess.revokeApp(
+                        context,
+                        app.optString("app_id"),
+                    )
+                    Toast.makeText(context, "認可を失効しました", Toast.LENGTH_SHORT).show()
+                }
+                managing = null
+                reload()
+            }.onFailure {
+                errorTitle = "操作できませんでした"
+                error = errorLabel(it)
+            }
+        }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -154,13 +214,6 @@ fun AppsScreen(controller: NodeRuntimeController) {
             }
         }
 
-        val visibleApps =
-            apps.filterNot { app ->
-                val grants = app.optJSONObject("grants")
-                app.isNull("name") &&
-                    grants?.optBoolean("manage_nodes") == true &&
-                    grants.optBoolean("manage_apps")
-            }
         if (visibleApps.isNotEmpty()) {
             item { SectionHeader("認可済みアプリ") }
             items(visibleApps, key = { it.optString("app_id") }) { app ->
@@ -168,9 +221,9 @@ fun AppsScreen(controller: NodeRuntimeController) {
             }
         }
 
-        if (approved.isNotEmpty()) {
+        if (visibleApproved.isNotEmpty()) {
             item { SectionHeader("承認済み") }
-            items(approved, key = { it.optString("connection_id") }) { connection ->
+            items(visibleApproved, key = { it.optString("connection_id") }) { connection ->
                 HarmionCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -206,7 +259,7 @@ fun AppsScreen(controller: NodeRuntimeController) {
             }
         }
 
-        if (!loading && connections.isEmpty() && error == null) {
+        if (!loading && visibleApps.isEmpty() && visibleApproved.isEmpty() && pending.isEmpty() && error == null) {
             item {
                 EmptyState(
                     icon = Icons.Rounded.Apps,
@@ -247,42 +300,16 @@ fun AppsScreen(controller: NodeRuntimeController) {
         AppManageSheet(
             app = app,
             onDismiss = { managing = null },
-            onSave = { grants, revoked, expiresAt ->
-                scope.launch {
-                    runCatching {
-                        withContext(Dispatchers.IO) {
-                            val admin = controller.adminClient()
-                            try {
-                                val body =
-                                    JSONObject()
-                                        .put("app_id", app.getString("app_id"))
-                                        .put("grants", grants)
-                                        .put("revoked", revoked)
-                                        .apply { expiresAt?.let { put("expires_at", it) } }
-                                application.ownerAdmin.call(
-                                    admin,
-                                    activity,
-                                    "change-grants",
-                                    body.toString().toByteArray(Charsets.UTF_8),
-                                )
-                            } finally {
-                                admin.close()
-                            }
-                        }
-                    }.onSuccess {
-                        if (revoked) {
-                            org.harmion.android.service.CallerAccess.revokeApp(
-                                context,
-                                app.optString("app_id"),
-                            )
-                        }
-                        managing = null
-                        reload()
-                    }.onFailure {
-                        errorTitle = "操作できませんでした"
-                        error = errorLabel(it)
-                    }
-                }
+            onSave = { grants, expiresAt -> updateGrants(app, grants, revoked = false, expiresAt) },
+            onRevoke = {
+                // Revocation is a separate action: discard unsaved permission edits
+                // and revoke the credential that is currently registered.
+                updateGrants(
+                    app,
+                    app.optJSONObject("grants") ?: JSONObject(),
+                    revoked = true,
+                    expiresAt = null,
+                )
             },
         )
     }
@@ -403,7 +430,8 @@ private fun AppCredentialCard(app: JSONObject, onManage: () -> Unit) {
 private fun AppManageSheet(
     app: JSONObject,
     onDismiss: () -> Unit,
-    onSave: (JSONObject, Boolean, String?) -> Unit,
+    onSave: (JSONObject, String?) -> Unit,
+    onRevoke: () -> Unit,
 ) {
     val grants =
         remember(app) {
@@ -413,7 +441,6 @@ private fun AppManageSheet(
     var provide by remember(app) { mutableStateOf(grants.optBoolean("provide")) }
     var manageApps by remember(app) { mutableStateOf(grants.optBoolean("manage_apps")) }
     var manageNodes by remember(app) { mutableStateOf(grants.optBoolean("manage_nodes")) }
-    var revoked by remember(app) { mutableStateOf(app.optBoolean("revoked")) }
     var extension by remember(app) { mutableStateOf(0) }
 
     androidx.compose.material3.ModalBottomSheet(
@@ -433,7 +460,6 @@ private fun AppManageSheet(
             SheetSwitch("Interpreterを提供する", provide) { provide = it }
             SheetSwitch("他のアプリの認可を管理", manageApps) { manageApps = it }
             SheetSwitch("ノード管理", manageNodes) { manageNodes = it }
-            SheetSwitch("この認可を失効する", revoked) { revoked = it }
             Text("認可期限", style = MaterialTheme.typography.labelLarge)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(0 to "変更なし", 30 to "30日", 90 to "90日", 365 to "1年").forEach { (days, label) ->
@@ -461,11 +487,19 @@ private fun AppManageSheet(
                             } else {
                                 null
                             }
-                        onSave(grants, revoked, expiresAt)
+                        onSave(grants, expiresAt)
                     },
                     modifier = Modifier.weight(1f),
                 ) { Text("保存") }
             }
+            Button(
+                onClick = onRevoke,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                ),
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            ) { Text("認可を失効") }
             androidx.compose.foundation.layout.Spacer(Modifier.size(24.dp))
         }
     }
