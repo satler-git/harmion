@@ -98,12 +98,35 @@ HARMION_KEYSTORE_PASSWORD=... HARMION_KEY_ALIAS=harmion HARMION_KEY_PASSWORD=...
   「アプリ署名証明書」のSHA-256を使う。upload keyは1Passwordで保管する。
 
 ## 6. インストールと更新
+
+### 6.1 production署名のdebug build（データを消さずに実機確認）
+既存のproduction署名アプリを更新してUIを確認するときは、debugビルドを
+production keystoreで署名する。署名が一致するため `adb install -r` でデータを
+保持したまま更新できる。
+
+```bash
+nix develop .#android
+./android/scripts/install-dev-app.sh --app app --skip-rust --device 192.168.0.8:40345
+```
+
+- `--app app,mote` / `--all` で対象を選択（既定は `app` のみ）。
+- `--no-install` は署名APKの生成だけ、`--no-build` は既存debug APKの署名だけ、
+  `--skip-rust` は既存の `jniLibs` を再利用する。
+- `--no-launch` はインストール後にアプリを起動しない。
+- 出力は既定で `target/prod-signing/<artifact>-debug-prod.apk`。
+- keystoreは `0700` の一時ディレクトリに取得し、終了時に削除する。パスワードや
+  keystoreはログに出力しない。1Passwordのdesktop app連携が必要。
+- NixOSではsystemの `/run/wrappers/bin/op` を優先する。別のCLIを使う場合は
+  `OP_BIN` で明示する。
+
 ```bash
 adb install -r target/release/harmion-release.apk
 ```
-- debug APKとrelease APKは同じ `dev.satler.harmion`。署名が異なるため共存できず、
-  `INSTALL_FAILED_UPDATE_INCOMPATIBLE` になる。releaseを試す前にdebugをアンインストールする
-  （アプリデータも消える。ノードを保持したい場合は別端末/ユーザーで試す）。
+- debug APKとrelease APKは同じ `dev.satler.harmion`。通常のdebug署名は
+  productionと異なるため共存できず、`INSTALL_FAILED_UPDATE_INCOMPATIBLE` になる。
+  6.1のproduction署名debug buildだけはproductionと同じ署名なので更新できる。
+  `release`を試す前に通常のdebugをアンインストールする場合はアプリデータも消える。
+  ノードを保持したい場合は6.1を使うか、別端末/ユーザーで試す。
 - 更新は同じapplicationId・同じ署名鍵・より大きい `versionCode` が必須。
 - 署名鍵を失うと更新不可。1PasswordのDocumentとオフラインバックアップを維持する。
 

@@ -180,7 +180,7 @@ private fun MainScaffold(
     val context = androidx.compose.ui.platform.LocalContext.current
     val syncCount by syncRequests.collectAsStateWithLifecycle()
     LaunchedEffect(syncCount) {
-        if (syncCount > 0) runCatching { controller.syncNow() }
+        if (syncCount > 0) runCatching { controller.syncNow(force = true) }
     }
     LaunchedEffect(snapshot) {
         val running = snapshot?.running == true

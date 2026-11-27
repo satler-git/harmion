@@ -82,6 +82,24 @@ class SyncPolicyStore(context: Context) {
     }
 }
 
+/**
+ * Stable codes shared by [PolicyEvaluator], the runtime status view and the UI.
+ * The runtime only transports these strings; every user-facing sentence lives
+ * in the UI layer so both stay in sync.
+ */
+object SyncBlockCode {
+    const val AUTO_SYNC_DISABLED = "auto_sync_disabled"
+    const val OFFLINE = "offline"
+    const val ROAMING = "roaming"
+    const val WIFI_ONLY = "wifi_only"
+    const val METERED = "metered"
+    const val CHARGING_ONLY = "charging_only"
+    const val LOW_BATTERY = "low_battery"
+    const val STORAGE = "storage"
+    const val NETWORK = "network"
+    const val POLICY = "policy"
+}
+
 data class PolicyDecision(
     val permitted: Boolean,
     val code: String? = null,
@@ -108,33 +126,45 @@ class PolicyEvaluator(
     fun evaluate(): PolicyDecision {
         val settings = store.load()
         if (!settings.autoSync) {
-            return PolicyDecision(false, "auto_sync_disabled", "自動同期が無効です")
+            return PolicyDecision(
+                false,
+                SyncBlockCode.AUTO_SYNC_DISABLED,
+                "自動同期が無効です",
+            )
         }
         val connectivity = application.getSystemService(ConnectivityManager::class.java)
         val network =
             connectivity.activeNetwork
-                ?: return PolicyDecision(false, "offline", "ネットワークがありません")
+                ?: return PolicyDecision(false, SyncBlockCode.OFFLINE, "ネットワークがありません")
         val capabilities =
             connectivity.getNetworkCapabilities(network)
-                ?: return PolicyDecision(false, "offline", "ネットワークがありません")
+                ?: return PolicyDecision(false, SyncBlockCode.OFFLINE, "ネットワークがありません")
         if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ||
             !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
         ) {
-            return PolicyDecision(false, "offline", "ネットワークに接続していません")
+            return PolicyDecision(false, SyncBlockCode.OFFLINE, "ネットワークに接続していません")
         }
         if (!settings.allowRoaming &&
             !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING)
         ) {
-            return PolicyDecision(false, "roaming", "ローミング中のため同期しません")
+            return PolicyDecision(false, SyncBlockCode.ROAMING, "ローミング中のため同期しません")
         }
         when (settings.network) {
             NetworkRule.WIFI_ONLY ->
                 if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                    return PolicyDecision(false, "wifi_required", "Wi-Fi接続を待っています")
+                    return PolicyDecision(
+                        false,
+                        SyncBlockCode.WIFI_ONLY,
+                        "Wi-Fi接続を待っています",
+                    )
                 }
             NetworkRule.UNMETERED ->
                 if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)) {
-                    return PolicyDecision(false, "metered", "従量制回線のため同期しません")
+                    return PolicyDecision(
+                        false,
+                        SyncBlockCode.METERED,
+                        "従量制回線のため同期しません",
+                    )
                 }
             NetworkRule.ANY -> Unit
         }
@@ -144,11 +174,22 @@ class PolicyEvaluator(
         when (settings.battery) {
             BatteryRule.CHARGING_ONLY ->
                 if (!charging) {
-                    return PolicyDecision(false, "charging_required", "充電中のみ同期します")
+                    return PolicyDecision(
+                        false,
+                        SyncBlockCode.CHARGING_ONLY,
+                        "充電中のみ同期します",
+                    )
                 }
             BatteryRule.PAUSE_LOW ->
-                if (!charging && capacity in 0..LOW_BATTERY_PERCENT) {
-                    return PolicyDecision(false, "low_battery", "バッテリー残量が低下しています")
+                // Sync remains allowed at exactly 15%; only values below the
+                // threshold pause. A negative capacity means the platform did
+                // not report a level, so it must not be treated as empty.
+                if (!charging && capacity in 0 until LOW_BATTERY_PERCENT) {
+                    return PolicyDecision(
+                        false,
+                        SyncBlockCode.LOW_BATTERY,
+                        "バッテリー残量が15%未満です",
+                    )
                 }
             BatteryRule.UNRESTRICTED -> Unit
         }
@@ -159,6 +200,7 @@ class PolicyEvaluator(
     fun requiresCharging(): Boolean = store.load().battery == BatteryRule.CHARGING_ONLY
 
     companion object {
+        /** Lowest charge that still permits sync; pause strictly below it. */
         const val LOW_BATTERY_PERCENT = 15
     }
 }

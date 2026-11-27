@@ -104,7 +104,7 @@ Android固有設定（同期ポリシー等）はSharedPreferences側に置き�
 |---|---|---|
 | 自動同期 | on/off | on |
 | ネットワーク | Wi-Fiのみ / 非従量制 / すべて | 非従量制 |
-| バッテリー | 制限なし / 残量低下(15%)で停止 / 充電中のみ | 残量低下で停止 |
+| バッテリー | 制限なし / 残量15%以上で同期 / 充電中のみ | 残量15%以上で同期 |
 | ローミング | 許可 / 禁止 | 禁止 |
 | 定期同期 | 15 / 30 / 60分 | 30分 |
 | ローカル更新時 | on/off | on |
@@ -113,6 +113,11 @@ Android固有設定（同期ポリシー等）はSharedPreferences側に置き�
 - 判定は `PolicyEvaluator` が `ConnectivityManager`（`NET_CAPABILITY_VALIDATED`、
   `NOT_METERED`、`TRANSPORT_WIFI`、`NOT_ROAMING`）と `BatteryManager` で行う。
   Wi-Fi接続と非従量制は区別し、実際に通信可能な経路かを検証する。
+  バッテリー制限は残量15%以上で同期する（充電中は停止しない）。停止理由のコードは `auto_sync_disabled` / `offline` /
+  `roaming` / `wifi_only` / `metered` / `charging_only` / `low_battery` に統一し、
+  文言はUI側（`Format.syncBlockedLabel`）だけで組み立てる。残量・充電状態の変化は
+  `ACTION_BATTERY_CHANGED` で再評価し、前面のノードが閾値をまたいでも
+  次の定期同期まで古い判定を残さない。
 - 判定結果は `setSyncPolicy`（FFI）でランタイムの `PolicyGate` に反映する。
   スケジューラは各ラウンド開始前にゲートを確認し、拒否されたら新規ラウンドを開始せず、
   実行中のラウンドは中止する（ページ転送はトランザクションで、永続カーソルから再開できる）。

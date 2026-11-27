@@ -191,11 +191,23 @@ class NodeRuntimeController(
             RuntimeSnapshot.fromJson(reply.json).also { _snapshot.value = it }
         }
 
-    /** Manual sync after an explicit user confirmation. */
-    suspend fun syncNow(): JSONObject =
+    /**
+     * Manual sync. [force] is only set after the user explicitly confirmed
+     * ignoring the scheduling policy for this one round; the policy gate is
+     * temporarily opened and restored afterwards. Background paths never use it.
+     */
+    suspend fun syncNow(force: Boolean = false): JSONObject =
         withContext(Dispatchers.IO) {
             val current = ensureHandle() ?: throw NativeFailure("not_running", "node is not running")
-            native(HarmionNative.syncNow(current)).require()
+            if (!force) {
+                return@withContext native(HarmionNative.syncNow(current)).require()
+            }
+            applyPolicy(PolicyDecision.Allowed)
+            try {
+                native(HarmionNative.syncNow(current)).require()
+            } finally {
+                applyPolicy(policy.evaluate())
+            }
         }
 
     /** Background sync that still obeys the host policy. */

@@ -9,10 +9,12 @@ import android.os.PersistableBundle
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,9 +32,11 @@ import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
@@ -74,6 +78,7 @@ import org.harmion.android.core.NetworkRule
 import org.harmion.android.core.NodeRuntimeController
 import org.harmion.android.core.PolicyEvaluator
 import org.harmion.android.core.RuntimeSettings
+import org.harmion.android.core.SyncBlockCode
 import org.harmion.android.core.SyncScheduler
 import org.harmion.android.core.SyncSettings
 import org.harmion.sdk.Hex
@@ -86,7 +91,6 @@ fun SettingsScreen(controller: NodeRuntimeController, policy: PolicyEvaluator) {
     val application = context.applicationContext as HarmionApplication
     val scope = rememberCoroutineScope()
     var settings by remember { mutableStateOf(controller.settings()) }
-    var saved by remember { mutableStateOf<String?>(null) }
     var identifiers by remember { mutableStateOf<JSONObject?>(null) }
 
     fun copy(value: String) {
@@ -99,10 +103,19 @@ fun SettingsScreen(controller: NodeRuntimeController, policy: PolicyEvaluator) {
         settings = updated
         controller.saveSettings(updated)
         SyncScheduler.configure(context, updated)
-        saved = "保存しました"
     }
 
     var keepAlive by remember { mutableStateOf(RuntimeSettings.keepAlive(context)) }
+    // Battery and connectivity can change while this screen stays open. Re-sample
+    // the authoritative policy instead of freezing the result at first composition.
+    var evaluation by remember { mutableStateOf(policy.evaluate()) }
+
+    LaunchedEffect(settings) {
+        while (true) {
+            evaluation = policy.evaluate()
+            kotlinx.coroutines.delay(30_000)
+        }
+    }
 
     LaunchedEffect(Unit) {
         identifiers = runCatching { controller.identifiers() }.getOrNull()
@@ -147,7 +160,7 @@ fun SettingsScreen(controller: NodeRuntimeController, policy: PolicyEvaluator) {
                     options =
                         listOf(
                             BatteryRule.UNRESTRICTED to "制限なし",
-                            BatteryRule.PAUSE_LOW to "15%未満",
+                            BatteryRule.PAUSE_LOW to "15%以上",
                             BatteryRule.CHARGING_ONLY to "充電中",
                         ),
                     selected = settings.battery,
@@ -189,22 +202,13 @@ fun SettingsScreen(controller: NodeRuntimeController, policy: PolicyEvaluator) {
                     checked = settings.onNetworkReturn,
                     onCheckedChange = { persist(settings.copy(onNetworkReturn = it)) },
                 )
-                saved?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                val evaluation = remember(settings) { policy.evaluate() }
-                Text(
-                    if (evaluation.permitted) {
-                        "同期可能"
-                    } else {
-                        evaluation.message ?: "停止中"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color =
-                        if (evaluation.permitted) {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        } else {
-                            MaterialTheme.colorScheme.error
-                        },
-                )
+                if (!evaluation.permitted && evaluation.code != SyncBlockCode.AUTO_SYNC_DISABLED) {
+                    Text(
+                        evaluation.message ?: "停止中",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         }
 
@@ -277,6 +281,7 @@ private fun OwnerSection(controller: NodeRuntimeController) {
     var ownerEnrolled by remember { mutableStateOf(ownerKeys.enrolled) }
     var ownerFingerprint by remember { mutableStateOf(ownerKeys.fingerprint) }
     var ownerEnforced by remember { mutableStateOf<Boolean?>(null) }
+    var ownerStatusLoaded by remember { mutableStateOf(false) }
     var ownerRecoveryConfigured by remember { mutableStateOf<Boolean?>(null) }
     var ownerBusy by remember { mutableStateOf(false) }
     var ownerError by remember { mutableStateOf<String?>(null) }
@@ -306,6 +311,7 @@ private fun OwnerSection(controller: NodeRuntimeController) {
             }.getOrNull()
         ownerEnforced = status?.optBoolean("enforce")
         ownerRecoveryConfigured = status?.optBoolean("recovery_configured")
+        ownerStatusLoaded = true
     }
 
     HarmionCard {
@@ -349,55 +355,137 @@ private fun OwnerSection(controller: NodeRuntimeController) {
                     null -> "確認できません"
                 },
             )
-            TextButton(
-                enabled = !reissueBusy,
-                onClick = {
-                    reissueOpen = true
-                    reissueError = null
-                },
+            // Destructive/primary owner actions sit on the trailing edge so they
+            // do not read as inline body text and stay reachable with one thumb.
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Text("生体認証で再発行")
-            }
-            TextButton(onClick = { recoverOpen = true; recoverInput = ""; recoverError = null }) {
-                Text("リカバリコードで再登録")
+                TextButton(
+                    enabled = !reissueBusy,
+                    onClick = {
+                        reissueOpen = true
+                        reissueError = null
+                    },
+                ) {
+                    Text("生体認証で再発行")
+                }
+                TextButton(
+                    enabled = !recoverBusy,
+                    onClick = {
+                        recoverOpen = true
+                        recoverInput = ""
+                        recoverError = null
+                    },
+                ) {
+                    Text("リカバリコードで再登録")
+                }
             }
         } else {
             ownerError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            TextButton(onClick = { recoverOpen = true; recoverInput = ""; recoverError = null }) {
-                Text("リカバリコードで復元")
-            }
-            Button(
-                enabled = activity != null && !ownerBusy,
-                onClick = {
-                    if (activity == null || ownerBusy) return@Button
-                    ownerBusy = true
-                    ownerError = null
-                    scope.launch {
-                        runCatching {
-                            val seed = Hex.encode(ByteArray(32).also { SecureRandom().nextBytes(it) })
-                            val key = controller.ownerPublicKey(seed)
-                            val publicKey = key.getString("public_key")
-                            val fingerprint = key.getString("fingerprint")
-                            ownerKeys.create(activity, seed)
-                            ownerKeys.storePublicKey(publicKey, fingerprint)
-                            val enrollment = controller.enrollOwner(publicKey, "primary")
-                            ownerKeys.markEnrolled()
-                            ownerEnrolled = true
-                            ownerFingerprint = fingerprint
-                            recoveryCopied = false
-                            recoveryCloseWarning = false
-                            recoveryCode = enrollment.getString("recovery_code")
-                        }.onFailure {
-                            ownerKeys.clear()
-                            ownerError = errorLabel(it)
-                        }
-                        ownerBusy = false
+            when {
+                !ownerStatusLoaded -> {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Text(
+                            "所有者の状態を確認しています…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(Icons.Rounded.Fingerprint, contentDescription = null, modifier = Modifier.size(18.dp))
-                Text(if (ownerBusy) "登録中…" else "所有者キーを登録", modifier = Modifier.padding(start = 8.dp))
+                }
+                ownerEnforced == true -> {
+                    // The node already has an owner but this installation has no
+                    // key (for example after clearing app data). Enrollment would
+                    // be rejected, so recovery is the only valid path.
+                    Surface(
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.tertiaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Icon(
+                                Icons.Rounded.WarningAmber,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    "この端末に所有者キーがありません",
+                                    style = MaterialTheme.typography.titleSmall,
+                                )
+                                Text(
+                                    "ノードには所有者が登録されています。リカバリコードで復元してください。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
+                    }
+                    Button(
+                        onClick = {
+                            recoverOpen = true
+                            recoverInput = ""
+                            recoverError = null
+                        },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    ) {
+                        Icon(Icons.Rounded.Key, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Text("リカバリコードで復元", modifier = Modifier.padding(start = 8.dp))
+                    }
+                }
+                else -> {
+                    TextButton(
+                        onClick = {
+                            recoverOpen = true
+                            recoverInput = ""
+                            recoverError = null
+                        },
+                        modifier = Modifier.align(Alignment.End),
+                    ) {
+                        Text("リカバリコードで復元")
+                    }
+                    Button(
+                        enabled = activity != null && !ownerBusy,
+                        onClick = {
+                            if (activity == null || ownerBusy) return@Button
+                            ownerBusy = true
+                            ownerError = null
+                            scope.launch {
+                                runCatching {
+                                    val seed = Hex.encode(ByteArray(32).also { SecureRandom().nextBytes(it) })
+                                    val key = controller.ownerPublicKey(seed)
+                                    val publicKey = key.getString("public_key")
+                                    val fingerprint = key.getString("fingerprint")
+                                    ownerKeys.create(activity, seed)
+                                    ownerKeys.storePublicKey(publicKey, fingerprint)
+                                    val enrollment = controller.enrollOwner(publicKey, "primary")
+                                    ownerKeys.markEnrolled()
+                                    ownerEnrolled = true
+                                    ownerFingerprint = fingerprint
+                                    recoveryCopied = false
+                                    recoveryCloseWarning = false
+                                    recoveryCode = enrollment.getString("recovery_code")
+                                }.onFailure {
+                                    ownerKeys.clear()
+                                    ownerError = errorLabel(it)
+                                }
+                                ownerBusy = false
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.Rounded.Fingerprint, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Text(if (ownerBusy) "登録中…" else "所有者キーを登録", modifier = Modifier.padding(start = 8.dp))
+                    }
+                }
             }
         }
     }
@@ -434,6 +522,7 @@ private fun OwnerSection(controller: NodeRuntimeController) {
                         recoverBusy = true
                         recoverError = null
                         scope.launch {
+                            var serverRotated = false
                             runCatching {
                                 val seed = Hex.encode(ByteArray(32).also { SecureRandom().nextBytes(it) })
                                 val key = controller.ownerPublicKey(seed)
@@ -448,16 +537,29 @@ private fun OwnerSection(controller: NodeRuntimeController) {
                                             admin.close()
                                         }
                                     }
+                                // The node has already rotated its recovery hash.
+                                // Show the one-time code before the biometric step:
+                                // cancelling or failing local key storage must not
+                                // discard the only copy of the new code.
+                                serverRotated = true
+                                recoverOpen = false
+                                recoveryCopied = false
+                                recoveryCloseWarning = false
+                                recoveryCode = recovered.getString("recovery_code")
                                 ownerKeys.create(activity, seed)
                                 ownerKeys.storePublicKey(publicKey, fingerprint)
                                 ownerKeys.markEnrolled()
                                 ownerEnrolled = true
                                 ownerFingerprint = fingerprint
-                                recoverOpen = false
-                                recoveryCopied = false
-                                recoveryCloseWarning = false
-                                recoveryCode = recovered.getString("recovery_code")
-                            }.onFailure { recoverError = errorLabel(it) }
+                            }.onFailure {
+                                if (serverRotated) {
+                                    ownerError =
+                                        "復元は完了しましたが、この端末に所有者キーを保存できませんでした。" +
+                                            "表示中のリカバリコードを保管し、あとで再登録してください。"
+                                } else {
+                                    recoverError = errorLabel(it)
+                                }
+                            }
                             recoverBusy = false
                         }
                     },

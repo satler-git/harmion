@@ -1,9 +1,20 @@
 package org.harmion.android.ui
 
-import java.text.DateFormat
 import java.text.NumberFormat
-import java.util.Date
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+import org.harmion.android.core.SyncBlockCode
 import org.json.JSONObject
+
+// Harmion always renders clock times as 24-hour values. Explicit patterns keep
+// the screens stable even when the system locale prefers AM/PM, and the locale
+// only affects the surrounding labels.
+private val dateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm", Locale.JAPAN)
+private val dateFormatter = DateTimeFormatter.ofPattern("yyyy/MM/dd", Locale.JAPAN)
+private val clockFormatter = DateTimeFormatter.ofPattern("HH:mm", Locale.JAPAN)
 
 internal fun shortId(value: String?): String {
     if (value.isNullOrEmpty()) return "—"
@@ -22,23 +33,41 @@ internal fun formatBytes(bytes: Long): String {
     return "${NumberFormat.getNumberInstance().apply { maximumFractionDigits = 1 }.format(value)} ${units[index]}"
 }
 
-/** "3分前" style relative time plus a full local date for accessibility. */
+/** "3分前" style relative time, with a 24-hour clock for recent values. */
 internal fun formatMicros(micros: Long): String {
-    val date = Date(micros / 1000)
-    val elapsed = System.currentTimeMillis() - date.time
-    val relative =
-        when {
-            elapsed < 60_000 -> "たった今"
-            elapsed < 3_600_000 -> "${elapsed / 60_000}分前"
-            elapsed < 86_400_000 -> "${elapsed / 3_600_000}時間前"
-            elapsed < 7 * 86_400_000 -> "${elapsed / 86_400_000}日前"
-            else -> DateFormat.getDateInstance(DateFormat.MEDIUM).format(date)
-        }
-    return relative
+    val date = Instant.ofEpochMilli(micros / 1000).atZone(ZoneId.systemDefault())
+    val elapsed = System.currentTimeMillis() - date.toInstant().toEpochMilli()
+    return when {
+        elapsed < 0 -> dateTimeFormatter.format(date)
+        elapsed < 60_000 -> "たった今"
+        elapsed < 3_600_000 -> "${elapsed / 60_000}分前"
+        elapsed < 86_400_000 -> "${elapsed / 3_600_000}時間前"
+        elapsed < 7 * 86_400_000 -> "${elapsed / 86_400_000}日前"
+        else -> dateFormatter.format(date)
+    }
+}
+
+/** Relative time plus an explicit 24-hour clock for at-a-glance accuracy. */
+internal fun formatMicrosWithClock(micros: Long): String {
+    val date = Instant.ofEpochMilli(micros / 1000).atZone(ZoneId.systemDefault())
+    val elapsed = System.currentTimeMillis() - date.toInstant().toEpochMilli()
+    return when {
+        elapsed < 0 -> dateTimeFormatter.format(date)
+        elapsed < 60_000 -> "たった今（${clockMicros(micros)}）"
+        elapsed < 86_400_000 -> "${formatMicros(micros)}（${clockMicros(micros)}）"
+        else -> dateTimeFormatter.format(date)
+    }
 }
 
 internal fun absoluteMicros(micros: Long): String =
-    DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(micros / 1000))
+    dateTimeFormatter.format(
+        Instant.ofEpochMilli(micros / 1000).atZone(ZoneId.systemDefault()),
+    )
+
+internal fun clockMicros(micros: Long): String =
+    clockFormatter.format(
+        Instant.ofEpochMilli(micros / 1000).atZone(ZoneId.systemDefault()),
+    )
 
 internal fun membershipLabel(value: String?): String =
     when (value) {
@@ -55,19 +84,40 @@ internal fun memberStateLabel(value: String): String =
         "retired" -> "退役済み"
         "pending" -> "保留中"
         "unconfirmed" -> "承認待ち"
-        else -> value
+        "conflict" -> "競合"
+        else -> value.ifBlank { "不明" }
     }
 
-internal fun syncBlockedLabel(code: String): String =
+internal fun syncBlockedLabel(code: String?): String =
     when (code) {
-        "wifi_only" -> "Wi-Fi待ち"
-        "unmetered" -> "非従量制回線待ち"
-        "roaming" -> "ローミング中は停止"
-        "battery_low" -> "バッテリー残量低下"
-        "charging_only" -> "充電待ち"
-        "network" -> "ネットワーク待ち"
-        "storage" -> "空き容量不足"
+        SyncBlockCode.AUTO_SYNC_DISABLED -> "自動同期が無効"
+        SyncBlockCode.OFFLINE -> "ネットワーク待ち"
+        SyncBlockCode.ROAMING -> "ローミング中は停止"
+        SyncBlockCode.WIFI_ONLY -> "Wi-Fi待ち"
+        SyncBlockCode.METERED -> "従量制回線のため停止"
+        SyncBlockCode.CHARGING_ONLY -> "充電待ち"
+        SyncBlockCode.LOW_BATTERY -> "バッテリー残量低下"
+        SyncBlockCode.STORAGE -> "空き容量不足"
+        SyncBlockCode.NETWORK -> "ネットワーク待ち"
+        SyncBlockCode.POLICY -> "ポリシーにより停止"
         else -> "停止中"
+    }
+
+/** Stable per-peer sync failure codes emitted by the runtime. */
+internal fun syncFailureLabel(code: String?): String =
+    when (code) {
+        "timeout" -> "応答がありません"
+        "capacity" -> "相手が混雑しています"
+        "transport_error" -> "接続できません"
+        "invalid_response" -> "応答が不正です"
+        "record_rejected" -> "更新が拒否されました"
+        "peer_retired" -> "退役済みのピアです"
+        "membership_conflict" -> "メンバーシップ競合"
+        "unauthenticated" -> "認証に失敗しました"
+        "identity_mismatch" -> "ノードIDが一致しません"
+        "storage_error" -> "保存領域のエラー"
+        "sync_error" -> "同期エラー"
+        else -> "同期エラー"
     }
 
 /**
@@ -85,6 +135,9 @@ internal fun errorLabel(error: Throwable?): String {
         raw.startsWith("Http(5") -> "ノードで一時的なエラーが発生しました。時間をおいて再試行してください。"
         raw.contains("timeout", ignoreCase = true) -> "ノードの応答がありません。再試行してください。"
         raw.contains("not_running") -> "ノードが停止しています。少し待ってから再試行してください。"
+        raw.contains("sync blocked by policy:") ->
+            "同期を停止中: ${syncBlockedLabel(raw.substringAfter("sync blocked by policy:").trim())}"
+        raw.contains("sync_blocked") -> "同期ポリシーにより停止しています。"
         raw.contains("OwnerRecoveryInvalid") || raw.contains("owner_recovery_invalid") ->
             "リカバリコードが違います。"
         raw.contains("OwnerAssertionRequired") || raw.contains("owner_assertion_required") ->

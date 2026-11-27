@@ -3,8 +3,14 @@ package org.harmion.android
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
+import android.os.BatteryManager
+import androidx.core.content.ContextCompat
 import org.harmion.android.core.NodeRuntimeController
 import org.harmion.android.core.PolicyEvaluator
 import org.harmion.android.core.SyncPolicyStore
@@ -34,6 +40,9 @@ class HarmionApplication : Application() {
         private set
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var batteryReceiver: BroadcastReceiver? = null
+    private var lastBatteryLevel = Int.MIN_VALUE
+    private var lastBatteryCharging: Boolean? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -49,6 +58,7 @@ class HarmionApplication : Application() {
         }
         SyncScheduler.configure(this, policy.settings())
         registerNetworkCallback()
+        registerBatteryCallback()
     }
 
     private fun createNotificationChannels() {
@@ -115,9 +125,63 @@ class HarmionApplication : Application() {
                 override fun onLost(network: Network) {
                     runtime.applyPolicy(policy.evaluate())
                 }
+
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    networkCapabilities: android.net.NetworkCapabilities,
+                ) {
+                    // Metered and roaming status can change on the same network.
+                    runtime.applyPolicy(policy.evaluate())
+                }
             }
         runCatching { connectivity.registerDefaultNetworkCallback(callback) }
             .onSuccess { networkCallback = callback }
+    }
+
+    /**
+     * The scheduler only asks the policy gate before each round, so the gate
+     * must be refreshed when the battery crosses the configured threshold.
+     * ACTION_BATTERY_LOW follows the system threshold, which is not necessarily
+     * 15%; BATTERY_CHANGED gives us the actual percentage. Re-evaluate only when
+     * the level or charging state changed to avoid a JNI call per broadcast.
+     */
+    private fun registerBatteryCallback() {
+        val filter =
+            IntentFilter().apply {
+                addAction(Intent.ACTION_BATTERY_CHANGED)
+                addAction(Intent.ACTION_POWER_CONNECTED)
+                addAction(Intent.ACTION_POWER_DISCONNECTED)
+            }
+        val receiver =
+            object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    val manager =
+                        (context ?: this@HarmionApplication)
+                            .getSystemService(BatteryManager::class.java)
+                    val level =
+                        manager?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+                            ?: intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                            ?: -1
+                    val charging =
+                        manager?.isCharging
+                            ?: (intent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0)
+                    if (level == lastBatteryLevel && charging == lastBatteryCharging) {
+                        return
+                    }
+                    lastBatteryLevel = level
+                    lastBatteryCharging = charging
+                    runtime.applyPolicy(policy.evaluate())
+                }
+            }
+        runCatching {
+                ContextCompat.registerReceiver(
+                    this,
+                    receiver,
+                    filter,
+                    ContextCompat.RECEIVER_NOT_EXPORTED,
+                )
+            }
+            .onSuccess { batteryReceiver = receiver }
     }
 
     companion object {

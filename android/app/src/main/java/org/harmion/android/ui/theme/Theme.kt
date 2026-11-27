@@ -187,6 +187,25 @@ private val HarmionShapes =
         extraLarge = androidx.compose.foundation.shape.RoundedCornerShape(32.dp),
     )
 
+/**
+ * Material 3 has no semantic "success" role. These tones are deliberately green
+ * in both themes, because a completed sync must be recognizable at a glance
+ * even when the user picked a non-green dynamic palette.
+ */
+object HarmionSuccess {
+    val container: Color
+        @Composable get() = if (isSystemInDarkTheme()) Color(0xFF14532D) else Color(0xFF166534)
+
+    val onContainer: Color
+        @Composable get() = if (isSystemInDarkTheme()) Color(0xFFBBF7D0) else Color(0xFFFFFFFF)
+
+    val accent: Color
+        @Composable get() = if (isSystemInDarkTheme()) Color(0xFF86EFAC) else Color(0xFF15803D)
+
+    val accentContainer: Color
+        @Composable get() = if (isSystemInDarkTheme()) Color(0xFF1F3D2E) else Color(0xFFDCFCE7)
+}
+
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun HarmionTheme(

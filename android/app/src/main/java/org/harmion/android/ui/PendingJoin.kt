@@ -181,7 +181,7 @@ fun PendingJoinCard(controller: NodeRuntimeController) {
                     syncing = true
                     message = null
                     scope.launch {
-                        runCatching { controller.syncNow() }
+                        runCatching { controller.syncNow(force = true) }
                             .onSuccess { message = "同期しました" }
                             .onFailure { message = it.message ?: "同期できませんでした" }
                         syncing = false
