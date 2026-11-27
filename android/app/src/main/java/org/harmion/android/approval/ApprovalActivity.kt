@@ -24,7 +24,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ErrorOutline
-import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -378,7 +377,7 @@ private fun ApprovalScreen(
                 request == null && !loaded -> LoadingPanel()
                 request == null -> ErrorPanel("要求を読み込めませんでした。", onClose)
                 else -> {
-                    IdentityCard(appLabel = appLabel, grant = grant)
+                    IdentityCard(grant = grant)
                     PermissionsCard(request = request)
                     RequestDetailsCard(request = request)
                     if (canAllow) {
@@ -467,36 +466,16 @@ private fun ApprovalHeader(
 
 @Composable
 private fun IdentityCard(
-    appLabel: String?,
     grant: ApprovalRegistry.Grant?,
 ) {
     HarmionCard {
-        SectionHeader("要求元の確認")
-        Surface(
-            shape = MaterialTheme.shapes.medium,
-            color = MaterialTheme.colorScheme.secondaryContainer,
-            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Row(
-                modifier = Modifier.padding(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Rounded.Shield, contentDescription = null, modifier = Modifier.size(20.dp))
-                Text(
-                    "この画面のタイトルとアイコンはAndroidが確認したアプリです。下のパッケージと署名を優先してください。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
+        SectionHeader("要求元")
         DetailField("パッケージ", grant?.packageName.orEmpty())
         DetailField(
             "署名証明書 (SHA-256)",
             grant?.certificateSha256.orEmpty(),
             monospace = true,
         )
-        appLabel?.let { DetailField("ランチャーの表示名", it) }
     }
 }
 
@@ -513,11 +492,8 @@ private fun RequestDetailsCard(request: JSONObject) {
         request.optString("web_origin").takeIf { it.isNotEmpty() && it != "null" }
     if (name.isEmpty() && redirect == null && webOrigin == null) return
     HarmionCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
-        SectionHeader(
-            "要求元が指定した情報",
-            "未検証の表示です。上のパッケージと署名を確認してください",
-        )
-        if (name.isNotEmpty()) DetailField("表示名（未検証）", name)
+        SectionHeader("未検証の表示情報")
+        if (name.isNotEmpty()) DetailField("表示名", name)
         redirect?.let { DetailField("リダイレクト先", it) }
         webOrigin?.let { DetailField("Web origin", it) }
     }
@@ -564,7 +540,7 @@ private fun PermissionsCard(request: JSONObject) {
                         modifier = Modifier.size(20.dp),
                     )
                     Text(
-                        "権限情報を取得できませんでした。この要求は許可しないでください。",
+                        "権限情報を取得できません。",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -599,7 +575,7 @@ private fun PermissionsCard(request: JSONObject) {
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text("強い権限を要求しています", style = MaterialTheme.typography.titleSmall)
                         Text(
-                            "アプリの認可やノード管理を操作できます。信頼できるアプリだけに許可してください。",
+                            "アプリ認可とノード管理を操作できます。",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
