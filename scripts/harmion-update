@@ -203,13 +203,21 @@ if ((dry_run == 0)); then
         pointer "$previous" "$state/previous"
     fi
     pointer "$profile" "$state/current"
-    for name in harmiond harmion harmion-admin harmion-update; do
+    for name in harmiond harmion mote harmion-admin harmion-update; do
+        target="$state/current/bin/$name"
+        if [[ ! -e "$target" ]]; then
+            if [[ -L "$bin/$name" ]]; then
+                rm -f "$bin/$name"
+                log "removed stale symlink $bin/$name"
+            fi
+            continue
+        fi
         if [[ -e "$bin/$name" && ! -L "$bin/$name" ]]; then
             mkdir -p "$state/pre-install"
             log "moving existing $bin/$name to $state/pre-install/"
             mv "$bin/$name" "$state/pre-install/$name"
         fi
-        pointer "$state/current/bin/$name" "$bin/$name"
+        pointer "$target" "$bin/$name"
     done
 fi
 

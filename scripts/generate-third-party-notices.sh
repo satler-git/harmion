@@ -81,6 +81,7 @@ generate_artifact harmion apps/cli/Cargo.toml
 generate_artifact harmiond apps/daemon/Cargo.toml
 generate_artifact harmion-admin apps/admin/Cargo.toml
 generate_artifact wiki-gui apps/wiki-gui/Cargo.toml
+generate_artifact mote apps/mote/Cargo.toml
 
 # The Android APKs contain two JNI libraries: the node (crates/android) and the
 # app SDK (crates/client-ffi). Both are native dependencies of the app, so the

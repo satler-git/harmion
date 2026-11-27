@@ -9,6 +9,7 @@
 | `harmion` CLI | `apps/cli/Cargo.toml` | バイナリに埋め込み、`harmion licenses` で表示。Nix では `share/licenses/harmion/` にも配置 |
 | `harmiond` | `apps/daemon/Cargo.toml` | Nix の `share/licenses/harmiond/` |
 | `harmion-admin` | `apps/admin/Cargo.toml` | Nix の `share/licenses/harmion-admin/` |
+| `mote` CLI | `apps/mote/Cargo.toml` | Nix の `share/licenses/mote/` |
 | `wiki-gui`（デスクトップ） | `apps/wiki-gui/Cargo.toml` | バイナリに埋め込み、`wiki-gui --licenses` で表示 |
 | Harmion node APK | Gradle 依存 + Android ネイティブ Rust | このアプリについて → ライセンス |
 | Mote APK | Gradle 依存 + Android ネイティブ Rust | 設定 → Mote について → ライセンス |
@@ -41,6 +42,7 @@ licenses/harmion/THIRD-PARTY-NOTICES.txt
 licenses/harmiond/THIRD-PARTY-NOTICES.txt
 licenses/harmion-admin/THIRD-PARTY-NOTICES.txt
 licenses/wiki-gui/THIRD-PARTY-NOTICES.txt
+licenses/mote/THIRD-PARTY-NOTICES.txt
 licenses/android-native/THIRD-PARTY-NOTICES.txt
 android/licenses/libraries/harmion-native.json
 android/licenses/licenses/harmion-native.json

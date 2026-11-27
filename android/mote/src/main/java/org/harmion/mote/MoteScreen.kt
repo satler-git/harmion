@@ -43,6 +43,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -152,6 +153,13 @@ import kotlinx.coroutines.delay
 
 private const val CollapsedShortLines = 7
 private const val MaxTextWidthFraction = .97f
+
+// A fixed finger distance keeps short and long captures equally easy to dismiss.
+private val SwipeThreshold = 48.dp
+
+// The swipe surface must outrun the threshold even when the bubble is only one character
+// wide; the extra width is transparent and never part of the bubble.
+private val MinSwipeSurface = 56.dp
 
 private fun gapPadding(micros: Long?): Dp = when {
     micros == null || micros < 15L * 60 * 1_000_000 -> 0.dp
@@ -1387,6 +1395,7 @@ private fun CaptureRow(
     onMenu: (Capture) -> Unit,
 ) {
     var foldable by remember(capture.id, capture.body) { mutableStateOf(false) }
+    var bubbleWidthPx by remember(capture.id) { mutableIntStateOf(0) }
     val colors = MaterialTheme.colorScheme
     val highlightAmount by animateFloatAsState(
         if (highlighted) 1f else 0f,
@@ -1394,13 +1403,17 @@ private fun CaptureRow(
         label = "reply highlight",
     )
     val haptic = LocalHapticFeedback.current
+    val density = LocalDensity.current
     val layoutDirection = LocalLayoutDirection.current
     // Reply is a left swipe and archiving is a right swipe. SwipeToDismissBoxValue is
     // physical, so resolve it per layout direction.
     val archiveDirection = if (layoutDirection == LayoutDirection.Ltr) SwipeToDismissBoxValue.StartToEnd else SwipeToDismissBoxValue.EndToStart
     val replyDirection = if (layoutDirection == LayoutDirection.Ltr) SwipeToDismissBoxValue.EndToStart else SwipeToDismissBoxValue.StartToEnd
-    val swipe = remember(capture.id) {
-        SwipeToDismissBoxState(SwipeToDismissBoxValue.Settled, positionalThreshold = { width -> width * .32f })
+    // A finger distance, not a fraction of the bubble width: a one-character capture must
+    // not need a shorter swipe than a seven-line one.
+    val swipeThreshold = with(density) { SwipeThreshold.toPx() }
+    val swipe = remember(capture.id, swipeThreshold) {
+        SwipeToDismissBoxState(SwipeToDismissBoxValue.Settled, positionalThreshold = { swipeThreshold })
     }
     LaunchedEffect(swipe, swipe.settledValue) {
         when (swipe.settledValue) {
@@ -1460,26 +1473,36 @@ private fun CaptureRow(
                 enableDismissFromEndToStart = canReply && !selecting,
                 gesturesEnabled = !selecting,
                 backgroundContent = {
-                    if (showSwipeBackground) {
-                        Box(
-                            Modifier.fillMaxSize().background(swipeColor).padding(horizontal = 15.dp).clearAndSetSemantics {},
-                            contentAlignment = if (showReply) Alignment.CenterEnd else Alignment.CenterStart,
-                        ) {
-                            val tint = if (showReply) colors.onPrimaryContainer else colors.onSecondaryContainer
-                            MoteIcon(
-                                if (showReply) MoteGlyph.Reply else if (capture.archived) MoteGlyph.Restore else MoteGlyph.Archive,
-                                if (showReply) "返信" else archiveLabel(capture),
-                                Modifier.size(18.dp),
-                                tint,
-                            )
+                    if (showSwipeBackground && bubbleWidthPx > 0) {
+                        val pillWidth = with(density) { bubbleWidthPx.toDp() }
+                        // Keep the 15.dp inset whenever the pill is wide enough; narrow
+                        // captures get as much room as the pill has so the icon is not cut.
+                        val iconInset = minOf(15.dp, ((pillWidth - 18.dp) / 2).coerceAtLeast(0.dp))
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterEnd) {
+                            Box(
+                                Modifier.width(pillWidth).fillMaxHeight()
+                                    .clip(shape).background(swipeColor)
+                                    .padding(horizontal = iconInset)
+                                    .clearAndSetSemantics {},
+                                contentAlignment = if (showReply) Alignment.CenterEnd else Alignment.CenterStart,
+                            ) {
+                                val tint = if (showReply) colors.onPrimaryContainer else colors.onSecondaryContainer
+                                MoteIcon(
+                                    if (showReply) MoteGlyph.Reply else if (capture.archived) MoteGlyph.Restore else MoteGlyph.Archive,
+                                    if (showReply) "返信" else archiveLabel(capture),
+                                    Modifier.size(18.dp),
+                                    tint,
+                                )
+                            }
                         }
                     }
                 },
             ) {
-                Box(contentAlignment = Alignment.CenterEnd) {
+                Box(Modifier.widthIn(min = MinSwipeSurface), contentAlignment = Alignment.CenterEnd) {
                     Surface(
                         modifier = Modifier
                             .then(if (capture.isLong) Modifier.fillMaxWidth() else Modifier.widthIn(max = bubbleMaxWidth))
+                            .onSizeChanged { bubbleWidthPx = it.width }
                             .clip(shape)
                             .combinedClickable(
                                 enabled = !(selecting && capture.isLong),

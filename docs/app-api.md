@@ -236,7 +236,7 @@ OAuth専用originでは同じ操作を`/connect/start`・`/connect/status`・`/c
 
 callbackには `http://127.0.0.1:PORT/PATH` や `http://[::1]:PORT/PATH` など、IPリテラルのloopback HTTPを使う。登録時と認可時でIP、パス、クエリを照合し、アプリはOSが選んだポートを認可時に指定できる。callbackのHTTP例外はRFC 8252に従う。認可、トークン交換、App APIはHTTPSで行う。
 
-scopeは空白区切りで `read:all`、`write:all`、`read:kind:BASE64URL`、`write:kind:BASE64URL`、`call`、`provide:BASE64URL`、`provide:all` を指定する。`BASE64URL` はkind名またはProvider名のUTF-8をパディングなしで符号化する。kind集合には同じ操作のkind scopeを複数指定する。同じ操作のallとkindは排他的。grantは登録単位で、異なるscopeへの再承認は既存の資格情報を失効させる。管理者はApp APIの `change-grants` で縮小・失効できる。拡大には改めて所有者の承認を要する。
+scopeは空白区切りで `read:all`、`write:all`、`read:kind:BASE64URL`、`write:kind:BASE64URL`、`call`、`provide:BASE64URL`、`provide:all` を指定する。`BASE64URL` はkind名またはProvider名のUTF-8をパディングなしで符号化する。kind集合には同じ操作のkind scopeを複数指定する。同じ操作のallとkindは排他的。grantは登録単位で、異なるscopeへの再承認は既存の資格情報を失効させる。管理者はApp APIの `change-grants` で縮小・失効できる。一般アプリは本文なしの `revoke-self` で自分のgrantとOAuth系列を失効できる。管理者credentialは `revoke-self` を使えない。拡大には改めて所有者の承認を要する。
 
 ### トークン
 

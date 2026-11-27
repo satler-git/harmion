@@ -1,6 +1,6 @@
 # Architectureとパッケージ構成
 
-更新日: 2026-11-18
+更新日: 2026-11-27
 
 native管理クライアントの入口は証明書を固定したloopback HTTPS。SDKはTLS検証とleaf完全一致を確認してからBearerを送る。`crates/local`はdaemonとSDKが共有するUnix所有者限定ファイル操作を持つ。ブラウザOAuthは所有者が専用CAを信頼する別のloopback HTTPSで提供する。Provider WebSocketはJSON-RPC 2.0でattach・invoke・cancelを実装し、ブラウザProviderはOAuth originの単回ticketで接続する。
 
@@ -76,9 +76,11 @@ workspaceの主要なビルド・依存境界を示す。
 | crates/net-native / harmion-net-native | nativeのHTTP/WS、iroh、bootstrap用OS接続 | node、protocol、domain、local-web |
 | crates/local-web / harmion-local-web | ブラウザ用loopback TLS証明書発行 | なし |
 | crates/client / harmion-client | Rustのアプリ用SDK・Provider SDK・管理クライアント | protocol |
+| crates/mote-core / mote-core | Moteのcapture投影、属性、並び順、フィルタ、保存field | protocol |
 | apps/daemon / harmiond | nativeノードの構成・起動・設定 | node、store-sqlite、net-native |
 | apps/admin / harmion-admin | 所有者セッション、標準競合解決UI、管理操作 | client、local-web |
 | apps/cli / harmion | 管理・診断・export等のCLI | client |
+| apps/mote / mote | Mote CaptureのLinux CLI | client、mote-core |
 | crates/worker / harmion-worker | 署名HTTPS Peer v2のDO host境界、SQL上のchallenge store、HTTP非依存のPeer入口、peer-onlyのnode Store（record/cursor/membership/pin）、host専用provisioning、読み取り専用のWorker管理API、wasm-bindgenのDO bridge。App/Query/OAuth面はfail closed。**実Cloudflare配置・Access・secret配布・TLS終端は未実装** | domain、node、protocol |
 
 nodeからstore-sqliteやnet-nativeへ依存しない。node側が必要なportを定義し、外側が実装して渡す。clientからnode・DB・irohへ依存しない。CLIもDBを直接開かず、管理権限を持つApp APIクライアントとして操作する。ノード未起動時の初回作成はharmiondの初期化経路に限定する。

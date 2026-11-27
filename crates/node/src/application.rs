@@ -180,6 +180,31 @@ pub fn change_grants(
     })
 }
 
+/// Let a non-administrator app revoke its own grant and OAuth family. The
+/// owner-management credential must not use this to lock itself out.
+pub fn revoke_self(
+    store: &mut impl Store,
+    now: i64,
+    credential: &Credential,
+) -> Result<AppId, Error> {
+    store.transaction(|tx| {
+        let principal = authenticate(tx, credential, now)?;
+        if principal.app.grants.is_administrator() {
+            return Err(Error::Forbidden);
+        }
+        let mut app = tx.app_by_id(principal.app.id)?.ok_or(Error::NotFound)?;
+        if app.revoked {
+            return Ok(app.id);
+        }
+        tx.revoke_oauth_app(app.id)?;
+        app.revoked = true;
+        app.grants = Grants::default();
+        tx.update_app(&app)?;
+        crate::interpreter::registry::reconcile_grants(tx, app.id, &app.grants)?;
+        Ok(app.id)
+    })
+}
+
 pub fn get(
     store: &mut impl Store,
     host: &mut impl Host,

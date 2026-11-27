@@ -679,6 +679,17 @@ async fn dispatch<S: Store + Send + 'static>(
             .handle(store, credential, &operation, &body)
             .await;
     }
+    if operation == "revoke-self" {
+        use harmion_node::access::Grants;
+        let app = store
+            .run(move |s| application::revoke_self(s, SystemHost.now_micros(), &credential))
+            .await?;
+        store
+            .notify_app_changed(app, &Grants::default(), true)
+            .await?;
+        store.changes.send_replace(());
+        return Ok(json!({"revoked":true}));
+    }
     if operation == "change-grants" {
         use harmion_node::access::Grants;
         let request: ChangeGrantsRequest = serde_json::from_slice(&body).map_err(|_| invalid())?;
@@ -1012,7 +1023,7 @@ async fn dispatch<S: Store + Send + 'static>(
                     },
                     "permissions" => json!(GrantSpec::from(permissions)),
                     _ => {
-                        let mut methods = vec!["get","query","apps","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","provision-manifest","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants","interpreter-list","interpreter-describe","interpreter-register","interpreter-approve","interpreter-call","interpreter-call-stream","interpreter-cancel"];
+                        let mut methods = vec!["get","query","apps","subscribe","resume","unsubscribe","export","conflicts","inspect","merge-input","save","identity","permissions","capabilities","members","approve","provision-manifest","join","join-recovery","retire","confirm-retirement","dismiss-retirement","trust-recovery-peer","sync","issue-app","change-grants","revoke-self","interpreter-list","interpreter-describe","interpreter-register","interpreter-approve","interpreter-call","interpreter-call-stream","interpreter-cancel"];
                         methods.extend(["metrics", "sync-status", "owner-status", "owner-challenge", "owner-enroll", "owner-revoke", "owner-recover", "owner-rotate-recovery", "owner-enforce"]);
                         if oauth.is_some() { methods.extend(["oauth-register","oauth-consent","oauth-preview"]); }
                         json!({"version":1,"oauth":oauth.is_some(),"query":true,"subscriptions":true,

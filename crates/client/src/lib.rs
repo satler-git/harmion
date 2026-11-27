@@ -518,6 +518,12 @@ impl Client {
         self.call("connect-approve", &bytes).await
     }
 
+    /// Revoke the calling app's grant and OAuth family. This is the only
+    /// management-like operation available to a non-administrator app.
+    pub async fn revoke_self(&self) -> Result<serde_json::Value, Error> {
+        self.call("revoke-self", &[]).await
+    }
+
     pub async fn interpreter_list(&self) -> Result<serde_json::Value, Error> {
         self.call("interpreter-list", &[]).await
     }

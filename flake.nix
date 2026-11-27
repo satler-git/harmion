@@ -269,6 +269,15 @@
             '';
           };
 
+          mote = mkHarmion {
+            pname = "mote";
+            package = "mote";
+            bins = [ "mote" ];
+            extraInstall = ''
+              install -Dm644 ${./licenses/mote/THIRD-PARTY-NOTICES.txt} $out/share/licenses/mote/THIRD-PARTY-NOTICES.txt
+            '';
+          };
+
           harmion-admin = mkHarmion {
             pname = "harmion-admin";
             package = "harmion-admin";
@@ -292,6 +301,7 @@
             harmion-admin
             harmion-update
             harmiond
+            mote
             ;
 
           default = pkgs.buildEnv {
@@ -299,6 +309,7 @@
             paths = [
               harmiond
               harmion
+              mote
               harmion-admin
               harmion-update
             ];

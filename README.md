@@ -10,7 +10,7 @@ Harmion は、アプリから独立した個人データ基盤です。データ
 |---|---|---|
 | Harmion node | Android 10+。ノード本体・管理UI・接続承認 | Obtainium / GitHub Releases |
 | Mote | Android 10+。Capture アプリ | Obtainium / GitHub Releases |
-| native | Linux。`harmiond`、`harmion` CLI、`harmion-admin` | flake / `harmion-update` |
+| native | Linux。`harmiond`、`harmion` CLI、`harmion-admin`、`mote` CLI | flake / `harmion-update` |
 | Worker | Cloudflare Workers + Durable Objects。任意の中継 | [`deploy/cloudflare`](deploy/cloudflare/README.md) |
 
 ## Android（Obtainium）
@@ -63,7 +63,7 @@ flake から直接ビルドする場合:
 
 ```sh
 nix build .#default
-nix build .#harmiond .#harmion .#harmion-admin
+nix build .#harmiond .#harmion .#harmion-admin .#mote
 ```
 
 日常運用は[Linuxユーザーサービスと日常運用](docs/linux-service.md)、複数ノードの起動は[native 複数ノード同期](docs/native-quickstart.md)を参照してください。
@@ -81,6 +81,7 @@ Worker は常設の中継・同期先を使う場合だけ必要です。通常�
 - [Androidノードの要件定義・実装指針](docs/android-node.md)
 - [Androidノードの設計・実装状態](docs/android-design.md)
 - [Mote（Android Captureアプリ）の設計・起動手順](docs/mote-design.md)
+- [Mote CLI](docs/mote-cli.md)
 - [Linuxユーザーサービスと日常運用](docs/linux-service.md)
 - [native 複数ノード同期の実行](docs/native-quickstart.md)
 - [Android のリリースと署名](docs/android-release.md)
