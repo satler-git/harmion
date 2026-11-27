@@ -21,7 +21,7 @@ object ApprovalRegistry {
         val expiresAtMillis: Long,
     )
 
-    private const val TTL_MILLIS = 5 * 60 * 1000L
+    private const val TTL_MILLIS = 15 * 60 * 1000L
     private const val MAX_PENDING = 16
     private const val MAX_PENDING_PER_APP = 4
 

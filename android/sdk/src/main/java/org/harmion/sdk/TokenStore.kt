@@ -22,6 +22,16 @@ internal data class StoredCredentials(
     val scope: String,
 )
 
+/** In-flight PKCE approval that can be resumed after process death. */
+internal data class PendingApproval(
+    val connectionId: String,
+    val requestSecret: String,
+    val verifier: String,
+    val nodeId: String,
+    val clusterId: String,
+    val createdAtMillis: Long,
+)
+
 /**
  * App-private token storage.
  *
@@ -71,6 +81,41 @@ internal class TokenStore(context: Context) {
         preferences.edit().remove(KEY_TOKENS).apply()
     }
 
+    fun loadPendingApproval(): PendingApproval? {
+        val encrypted = preferences.getString(KEY_PENDING, null) ?: return null
+        return try {
+            val json = JSONObject(decrypt(encrypted))
+            PendingApproval(
+                connectionId = json.getString("connection_id"),
+                requestSecret = json.getString("request_secret"),
+                verifier = json.getString("verifier"),
+                nodeId = json.getString("node_id"),
+                clusterId = json.getString("cluster_id"),
+                createdAtMillis = json.getLong("created_at"),
+            )
+        } catch (error: Exception) {
+            clearPendingApproval()
+            null
+        }
+    }
+
+    fun savePendingApproval(pending: PendingApproval) {
+        val json =
+            JSONObject()
+                .put("connection_id", pending.connectionId)
+                .put("request_secret", pending.requestSecret)
+                .put("verifier", pending.verifier)
+                .put("node_id", pending.nodeId)
+                .put("cluster_id", pending.clusterId)
+                .put("created_at", pending.createdAtMillis)
+                .toString()
+        preferences.edit().putString(KEY_PENDING, encrypt(json)).apply()
+    }
+
+    fun clearPendingApproval() {
+        preferences.edit().remove(KEY_PENDING).apply()
+    }
+
     private fun key(): SecretKey {
         val store = KeyStore.getInstance(KEYSTORE).apply { load(null) }
         (store.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
@@ -110,5 +155,6 @@ internal class TokenStore(context: Context) {
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val IV_BYTES = 12
         const val KEY_TOKENS = "credentials"
+        const val KEY_PENDING = "pending_approval"
     }
 }

@@ -95,89 +95,229 @@ class HarmionSession internal constructor(
             ) { "appName must be 1-128 UTF-8 bytes without control characters" }
             ensureRunning()
             val connection = awaitConnection()
-            val verifier = Requests.pkceVerifier()
-            val challenge = Requests.pkceChallenge(verifier)
-            val state = Requests.randomIdHex(16)
-            val offer = request.toOfferJson(appName, challenge, state)
             val anonymous =
                 nativeReply(HarmionNative.anonymous(connection.discoveryJson())) { it.getLong("handle") }
             try {
-                val started = nativeReply(HarmionNative.connectStart(anonymous, offer.toString())) {
-                    it.getJSONObject("response")
-                }
-                val connectionId = started.getString("connection_id")
-                val requestSecret = started.getString("request_secret")
-                val token = node.beginApproval(connectionId, requestSecret)
-                withContext(Dispatchers.Main) { node.launchApproval(connectionId, token) }
-
-                val deadline = System.currentTimeMillis() + APPROVAL_TIMEOUT_MILLIS
-                var completed: JSONObject? = null
-                while (System.currentTimeMillis() < deadline) {
-                    val status = nativeReply(
-                        HarmionNative.connectStatus(
-                            anonymous,
-                            JSONObject()
-                                .put("connection_id", connectionId)
-                                .put("request_secret", requestSecret)
-                                .toString(),
-                        ),
-                    ) { it.getJSONObject("response") }
-                    when (status.optString("status")) {
-                        "approved" -> {
-                            completed = nativeReply(
-                                HarmionNative.connectComplete(
-                                    anonymous,
-                                    JSONObject()
-                                        .put("connection_id", connectionId)
-                                        .put("request_secret", requestSecret)
-                                        .put("code_verifier", verifier)
-                                        .toString(),
-                                ),
-                            ) { it.getJSONObject("response") }
-                            break
-                        }
-                        "denied" ->
-                            throw HarmionException("denied", "the owner denied this request")
-                        "expired" ->
-                            throw HarmionException("expired", "the approval request expired")
-                        "completed" ->
-                            throw HarmionException("completed", "this request was already completed")
-                        else -> delay(APPROVAL_POLL_MILLIS)
+                val resumable =
+                    store.loadPendingApproval()?.takeIf { pending ->
+                        pending.nodeId == connection.nodeId &&
+                            pending.clusterId == connection.clusterId &&
+                            System.currentTimeMillis() - pending.createdAtMillis <= PENDING_APPROVAL_TTL_MILLIS
                     }
-                }
-                val reply = completed ?: throw HarmionException("timeout", "approval timed out")
-                val stored =
-                    StoredCredentials(
-                        nodeId = connection.nodeId,
-                        clusterId = connection.clusterId,
-                        clientId = reply.getString("client_id"),
-                        accessToken = reply.getString("access_token"),
-                        refreshToken = reply.getString("refresh_token"),
-                        expiresAtMillis =
-                            System.currentTimeMillis() + reply.optLong("expires_in", 600L) * 1000L,
-                        scope = reply.optString("scope"),
-                    )
-                if (!stored.identity().matches(awaitConnection())) {
-                    throw HarmionException("not_authorized", "the node changed during approval")
-                }
-                if (!node.registerCaller(connectionId, requestSecret)) {
-                    throw HarmionException(
-                        "not_authorized",
-                        "the node did not register this app as an approved caller",
-                    )
-                }
-                installCredentials(stored)
-                Authorization(
-                    clientId = stored.clientId,
-                    accessToken = stored.accessToken,
-                    refreshToken = stored.refreshToken,
-                    expiresInSeconds = reply.optLong("expires_in", 600L),
-                    scope = stored.scope,
-                )
+                val completed =
+                    if (resumable != null) {
+                        // The approval may have finished while the app was gone or while a
+                        // previous authorize coroutine was cancelled. Reuse the same connection
+                        // request so the owner's approval is not stranded on an orphaned one.
+                        resumeApproval(anonymous, resumable)
+                            ?: startApproval(anonymous, connection, request, appName)
+                    } else {
+                        startApproval(anonymous, connection, request, appName)
+                    }
+                finishApproval(connection, completed)
             } finally {
                 HarmionNative.close(anonymous)
             }
         }
+
+    private suspend fun startApproval(
+        anonymous: Long,
+        connection: NodeConnection,
+        request: AuthorizationRequest,
+        appName: String,
+    ): CompletedApproval {
+        val verifier = Requests.pkceVerifier()
+        val challenge = Requests.pkceChallenge(verifier)
+        val state = Requests.randomIdHex(16)
+        val offer = request.toOfferJson(appName, challenge, state)
+        val started =
+            nativeReply(HarmionNative.connectStart(anonymous, offer.toString())) {
+                it.getJSONObject("response")
+            }
+        val pending =
+            PendingApproval(
+                connectionId = started.getString("connection_id"),
+                requestSecret = started.getString("request_secret"),
+                verifier = verifier,
+                nodeId = connection.nodeId,
+                clusterId = connection.clusterId,
+                createdAtMillis = System.currentTimeMillis(),
+            )
+        // Persist before opening the owner UI. A process death between these steps used to
+        // leave an approval that the app could never complete.
+        store.savePendingApproval(pending)
+        openApprovalUi(pending)
+        return CompletedApproval(
+            connectionId = pending.connectionId,
+            requestSecret = pending.requestSecret,
+            reply = pollApproval(anonymous, pending),
+        )
+    }
+
+    private suspend fun resumeApproval(
+        anonymous: Long,
+        pending: PendingApproval,
+    ): CompletedApproval? {
+        try {
+            // Give an approval that landed just before restart a chance to finish silently.
+            repeat(2) {
+                when (approvalStatus(anonymous, pending)) {
+                    "approved" ->
+                        return CompletedApproval(
+                            connectionId = pending.connectionId,
+                            requestSecret = pending.requestSecret,
+                            reply = completeApproval(anonymous, pending),
+                        )
+                    "denied", "expired", "completed" -> {
+                        store.clearPendingApproval()
+                        return null
+                    }
+                    else -> delay(700L)
+                }
+            }
+            // The previous approval sheet is usually gone after process death. Ask for a new
+            // token for the same connection request so the owner's approval still applies.
+            try {
+                openApprovalUi(pending)
+            } catch (error: HarmionException) {
+                if (error.code != "unknown_connection") throw error
+                // The owner may have approved between the final poll and beginApproval.
+                if (approvalStatus(anonymous, pending) == "approved") {
+                    return CompletedApproval(
+                        connectionId = pending.connectionId,
+                        requestSecret = pending.requestSecret,
+                        reply = completeApproval(anonymous, pending),
+                    )
+                }
+                store.clearPendingApproval()
+                return null
+            }
+            return CompletedApproval(
+                connectionId = pending.connectionId,
+                requestSecret = pending.requestSecret,
+                reply = pollApproval(anonymous, pending),
+            )
+        } catch (error: HarmionException) {
+            if (error.code == "unknown_connection") {
+                store.clearPendingApproval()
+                return null
+            }
+            throw error
+        }
+    }
+
+    private suspend fun openApprovalUi(pending: PendingApproval) {
+        val token = node.beginApproval(pending.connectionId, pending.requestSecret)
+        withContext(Dispatchers.Main) { node.launchApproval(pending.connectionId, token) }
+    }
+
+    private suspend fun pollApproval(
+        anonymous: Long,
+        pending: PendingApproval,
+    ): JSONObject {
+        val deadline = System.currentTimeMillis() + APPROVAL_TIMEOUT_MILLIS
+        while (System.currentTimeMillis() < deadline) {
+            when (approvalStatus(anonymous, pending)) {
+                "approved" -> return completeApproval(anonymous, pending)
+                "denied" -> {
+                    store.clearPendingApproval()
+                    throw HarmionException("denied", "the owner denied this request")
+                }
+                "expired" -> {
+                    store.clearPendingApproval()
+                    throw HarmionException("approval_expired", "the approval request expired")
+                }
+                "completed" -> {
+                    store.clearPendingApproval()
+                    throw HarmionException("completed", "this request was already completed")
+                }
+                else -> delay(APPROVAL_POLL_MILLIS)
+            }
+        }
+        // The decision can land just as the polling window closes. Check once more before
+        // reporting a timeout; the node's connection request has a longer TTL on purpose.
+        when (runCatching { approvalStatus(anonymous, pending) }.getOrNull()) {
+            "approved" -> return completeApproval(anonymous, pending)
+            "denied" -> {
+                store.clearPendingApproval()
+                throw HarmionException("denied", "the owner denied this request")
+            }
+            "expired" -> {
+                store.clearPendingApproval()
+                throw HarmionException("approval_expired", "the approval request expired")
+            }
+            "completed" -> {
+                store.clearPendingApproval()
+                throw HarmionException("completed", "this request was already completed")
+            }
+        }
+        throw HarmionException("approval_timeout", "approval timed out")
+    }
+
+    private suspend fun approvalStatus(anonymous: Long, pending: PendingApproval): String =
+        nativeReply(
+            HarmionNative.connectStatus(
+                anonymous,
+                JSONObject()
+                    .put("connection_id", pending.connectionId)
+                    .put("request_secret", pending.requestSecret)
+                    .toString(),
+            ),
+        ) { it.getJSONObject("response") }.optString("status")
+
+    private suspend fun completeApproval(anonymous: Long, pending: PendingApproval): JSONObject =
+        nativeReply(
+            HarmionNative.connectComplete(
+                anonymous,
+                JSONObject()
+                    .put("connection_id", pending.connectionId)
+                    .put("request_secret", pending.requestSecret)
+                    .put("code_verifier", pending.verifier)
+                    .toString(),
+            ),
+        ) { it.getJSONObject("response") }
+
+    private suspend fun finishApproval(
+        connection: NodeConnection,
+        approval: CompletedApproval,
+    ): Authorization {
+        val reply = approval.reply
+        val stored =
+            StoredCredentials(
+                nodeId = connection.nodeId,
+                clusterId = connection.clusterId,
+                clientId = reply.getString("client_id"),
+                accessToken = reply.getString("access_token"),
+                refreshToken = reply.getString("refresh_token"),
+                expiresAtMillis =
+                    System.currentTimeMillis() + reply.optLong("expires_in", 600L) * 1000L,
+                scope = reply.optString("scope"),
+            )
+        if (!stored.identity().matches(awaitConnection())) {
+            throw HarmionException("not_authorized", "the node changed during approval")
+        }
+        if (!node.registerCaller(approval.connectionId, approval.requestSecret)) {
+            throw HarmionException(
+                "not_authorized",
+                "the node did not register this app as an approved caller",
+            )
+        }
+        installCredentials(stored)
+        store.clearPendingApproval()
+        return Authorization(
+            clientId = stored.clientId,
+            accessToken = stored.accessToken,
+            refreshToken = stored.refreshToken,
+            expiresInSeconds = reply.optLong("expires_in", 600L),
+            scope = stored.scope,
+        )
+    }
+
+    private data class CompletedApproval(
+        val connectionId: String,
+        val requestSecret: String,
+        val reply: JSONObject,
+    )
 
     suspend fun save(requestJson: String): SaveResult = saveAuthed(requestJson, null)
 
@@ -552,7 +692,8 @@ class HarmionSession internal constructor(
 
     private companion object {
         const val CLOSED_HANDLE = -1L
-        const val APPROVAL_TIMEOUT_MILLIS = 5 * 60 * 1000L
+        const val APPROVAL_TIMEOUT_MILLIS = 12 * 60 * 1000L
+        const val PENDING_APPROVAL_TTL_MILLIS = 15 * 60 * 1000L
         const val APPROVAL_POLL_MILLIS = 1000L
         const val EXPIRY_SKEW_MILLIS = 60 * 1000L
         const val RESET_DELAY_MILLIS = 1000L

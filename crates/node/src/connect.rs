@@ -9,6 +9,7 @@ use crate::storage::{Store, Transaction};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use harmion_protocol::AppId;
 use harmion_protocol::connect::{
+    CONNECTION_TTL_SECONDS,
     ConnectionId, ConnectionOffer, ConnectionStatus, ConnectionStatusView, MAX_PENDING_CONNECTIONS,
     validate_offer,
 };
@@ -162,7 +163,7 @@ pub fn start(
             provider_replace: offer.provider_replace,
             status: ConnectionStatus::Pending,
             created_at: now,
-            expires_at: now.saturating_add(5 * 60 * 1_000_000),
+            expires_at: now.saturating_add(CONNECTION_TTL_SECONDS * 1_000_000),
             approved_at: None,
             completed_at: None,
             app: None,

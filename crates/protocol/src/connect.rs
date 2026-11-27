@@ -9,7 +9,7 @@ pub const CONNECTION_VERSION: u32 = 1;
 pub const MAX_OFFER_BYTES: usize = 192 * 1024;
 pub const MAX_CONNECTION_STATE: usize = 512;
 pub const MAX_CONNECTION_NAME: usize = 128;
-pub const CONNECTION_TTL_SECONDS: i64 = 5 * 60;
+pub const CONNECTION_TTL_SECONDS: i64 = 15 * 60;
 pub const MAX_PENDING_CONNECTIONS: usize = 32;
 /// One connection offer may register at most this many Provider manifests.
 pub const MAX_CONNECTION_PROVIDERS: usize = 8;
