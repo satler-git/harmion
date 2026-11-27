@@ -502,24 +502,6 @@ internal fun MoteScreen(
             }
         }
 
-        val message = state.message?.takeUnless { it in quietSuccessMessages }
-        if (message != null) {
-            var dismissed by remember(message) { mutableStateOf(false) }
-            if (!dismissed) {
-                MessageBanner(
-                    message,
-                    Modifier.align(Alignment.TopCenter).padding(top = topPadding + 4.dp, start = 16.dp, end = 16.dp),
-                    onDismiss = { dismissed = true },
-                )
-            }
-        } else if (state.longCaptureStorageFailed) {
-            MessageBanner(
-                "端末の長文記録を読み込めません。長文入力は停止しています。",
-                Modifier.align(Alignment.TopCenter).padding(top = topPadding + 4.dp, start = 16.dp, end = 16.dp),
-                onDismiss = null,
-            )
-        }
-
         if (selected == null) {
             AnimatedVisibility(
                 visible = headerVisible,
@@ -617,38 +599,63 @@ internal fun MoteScreen(
             )
         }
 
-        SnackbarHost(
-            hostState = snackbar,
-            modifier = Modifier.align(Alignment.BottomCenter)
-                .padding(horizontal = 20.dp)
-                .padding(bottom = dockPadding + 4.dp),
-        ) { data ->
-            val dismissState = rememberSwipeToDismissBoxState(
-                confirmValueChange = { value ->
-                    if (value != SwipeToDismissBoxValue.Settled) {
-                        data.dismiss()
-                        true
-                    } else false
-                },
-            )
-            SwipeToDismissBox(
-                state = dismissState,
-                modifier = Modifier.fillMaxWidth(),
-                enableDismissFromStartToEnd = true,
-                enableDismissFromEndToStart = true,
-                gesturesEnabled = true,
-                backgroundContent = {},
-            ) {
-            Snackbar(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 0.dp, vertical = 5.dp),
-                shape = MaterialTheme.shapes.medium,
-                containerColor = colors.surfaceContainerHigh,
-                contentColor = colors.onSurface,
-                action = { TextButton(onClick = data::performAction, enabled = canMutate) { Text("元に戻す") } },
-                dismissAction = {
-                    IconButton(onClick = data::dismiss) { MoteIcon(MoteGlyph.Close, "閉じる", Modifier.size(18.dp)) }
-                },
-            ) { Text(data.visuals.message) }
+        // Notices sit below the header at the top of the screen, stacked with the
+        // error banner so a transient confirmation never hides behind the dock.
+        Column(
+            Modifier.align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .padding(top = topPadding + 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            val message = state.message?.takeUnless { it in quietSuccessMessages }
+            if (message != null) {
+                var dismissed by remember(message) { mutableStateOf(false) }
+                if (!dismissed) {
+                    MessageBanner(
+                        message,
+                        Modifier.padding(horizontal = 16.dp),
+                        onDismiss = { dismissed = true },
+                    )
+                }
+            } else if (state.longCaptureStorageFailed) {
+                MessageBanner(
+                    "端末の長文記録を読み込めません。長文入力は停止しています。",
+                    Modifier.padding(horizontal = 16.dp),
+                    onDismiss = null,
+                )
+            }
+            SnackbarHost(
+                hostState = snackbar,
+                modifier = Modifier.padding(horizontal = 20.dp),
+            ) { data ->
+                val dismissState = rememberSwipeToDismissBoxState(
+                    confirmValueChange = { value ->
+                        if (value != SwipeToDismissBoxValue.Settled) {
+                            data.dismiss()
+                            true
+                        } else false
+                    },
+                )
+                SwipeToDismissBox(
+                    state = dismissState,
+                    modifier = Modifier.fillMaxWidth(),
+                    enableDismissFromStartToEnd = true,
+                    enableDismissFromEndToStart = true,
+                    gesturesEnabled = true,
+                    backgroundContent = {},
+                ) {
+                    Snackbar(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 0.dp, vertical = 5.dp),
+                        shape = MaterialTheme.shapes.medium,
+                        containerColor = colors.surfaceContainerHigh,
+                        contentColor = colors.onSurface,
+                        action = { TextButton(onClick = data::performAction, enabled = canMutate) { Text("元に戻す") } },
+                        dismissAction = {
+                            IconButton(onClick = data::dismiss) { MoteIcon(MoteGlyph.Close, "閉じる", Modifier.size(18.dp)) }
+                        },
+                    ) { Text(data.visuals.message) }
+                }
             }
         }
     }
@@ -1386,18 +1393,20 @@ private fun CaptureRow(
     )
     val haptic = LocalHapticFeedback.current
     val layoutDirection = LocalLayoutDirection.current
-    val startToEnd = if (layoutDirection == LayoutDirection.Ltr) SwipeToDismissBoxValue.StartToEnd else SwipeToDismissBoxValue.EndToStart
-    val endToStart = if (layoutDirection == LayoutDirection.Ltr) SwipeToDismissBoxValue.EndToStart else SwipeToDismissBoxValue.StartToEnd
+    // Reply is a left swipe and archiving is a right swipe. SwipeToDismissBoxValue is
+    // physical, so resolve it per layout direction.
+    val archiveDirection = if (layoutDirection == LayoutDirection.Ltr) SwipeToDismissBoxValue.StartToEnd else SwipeToDismissBoxValue.EndToStart
+    val replyDirection = if (layoutDirection == LayoutDirection.Ltr) SwipeToDismissBoxValue.EndToStart else SwipeToDismissBoxValue.StartToEnd
     val swipe = remember(capture.id) {
         SwipeToDismissBoxState(SwipeToDismissBoxValue.Settled, positionalThreshold = { width -> width * .32f })
     }
     LaunchedEffect(swipe, swipe.settledValue) {
         when (swipe.settledValue) {
-            startToEnd -> {
+            replyDirection -> {
                 if (canReply) onReply(capture)
                 swipe.reset()
             }
-            endToStart -> {
+            archiveDirection -> {
                 if (enabled) {
                     if (archiveHaptics) haptic.performHapticFeedback(HapticFeedbackType.Confirm)
                     onArchive(capture)
@@ -1407,10 +1416,10 @@ private fun CaptureRow(
             else -> Unit
         }
     }
-    val replyArmed = swipe.targetValue == startToEnd
-    val archiveArmed = swipe.targetValue == endToStart
+    val replyArmed = swipe.targetValue == replyDirection
+    val archiveArmed = swipe.targetValue == archiveDirection
     val rawOffset = runCatching { swipe.requireOffset() }.getOrDefault(0f)
-    val draggingToReply = if (layoutDirection == LayoutDirection.Ltr) rawOffset > 0f else rawOffset < 0f
+    val draggingToReply = if (layoutDirection == LayoutDirection.Ltr) rawOffset < 0f else rawOffset > 0f
     val dragging = kotlin.math.abs(rawOffset) > 0.5f
     val showReply = dragging && (replyArmed || (!archiveArmed && swipe.progress > .01f && draggingToReply))
     val showArchive = dragging && (archiveArmed || (!replyArmed && swipe.progress > .01f && !draggingToReply))
@@ -1445,14 +1454,14 @@ private fun CaptureRow(
                     SwipeToDismissBox(
                 state = swipe,
                 modifier = Modifier.clip(shape),
-                enableDismissFromStartToEnd = canReply && !selecting,
-                enableDismissFromEndToStart = enabled && !selecting,
+                enableDismissFromStartToEnd = enabled && !selecting,
+                enableDismissFromEndToStart = canReply && !selecting,
                 gesturesEnabled = !selecting,
                 backgroundContent = {
                     if (showSwipeBackground) {
                         Box(
                             Modifier.fillMaxSize().background(swipeColor).padding(horizontal = 15.dp).clearAndSetSemantics {},
-                            contentAlignment = if (showReply) Alignment.CenterStart else Alignment.CenterEnd,
+                            contentAlignment = if (showReply) Alignment.CenterEnd else Alignment.CenterStart,
                         ) {
                             val tint = if (showReply) colors.onPrimaryContainer else colors.onSecondaryContainer
                             MoteIcon(
