@@ -6,8 +6,11 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
+import java.security.DigestOutputStream
+import java.security.MessageDigest
 
 class CaptureJournalTest {
     @Test
@@ -15,6 +18,21 @@ class CaptureJournalTest {
         val body = "  Draft 😺\r\n改行\u0000 "
         assertEquals(CaptureDraft(), decode(encode(CaptureDraft())))
         assertEquals(CaptureDraft(body), decode(encode(CaptureDraft(body))))
+    }
+
+    @Test
+    fun roundTripsReplyTargetWithPendingRequest() {
+        val identity = AuthorizationIdentity(clusterId = "cluster", nodeId = "node", clientId = "client")
+        val request = """{ "request_id":"request", "content_id":"content" }"""
+        val state = CaptureDraft("reply draft", PendingCapture(identity, request), replyTo = "b".repeat(64))
+        assertEquals(state, decode(encode(state)))
+    }
+
+    @Test
+    fun roundTripsReplyTarget() {
+        val body = "返信の本文"
+        val replyTo = "a".repeat(64)
+        assertEquals(CaptureDraft(body, replyTo = replyTo), decode(encode(CaptureDraft(body, replyTo = replyTo))))
     }
 
     @Test
@@ -39,7 +57,7 @@ class CaptureJournalTest {
 
     @Test
     fun rejectsUnsupportedVersionAndOversizedLength() {
-        val wrongVersion = encode(CaptureDraft()).also { it[3] = 2 }
+        val wrongVersion = encode(CaptureDraft()).also { it[3] = 3 }
         val oversizedBody = encode(CaptureDraft()).also { ByteBuffer.wrap(it).putInt(4, Int.MAX_VALUE) }
         assertThrows(IOException::class.java) { decode(wrongVersion) }
         assertThrows(IOException::class.java) { decode(oversizedBody) }
@@ -66,4 +84,25 @@ class CaptureJournalTest {
         ByteArrayOutputStream().also { CaptureJournalCodec.write(state, it) }.toByteArray()
 
     private fun decode(bytes: ByteArray): CaptureDraft = CaptureJournalCodec.read(bytes.inputStream())
+
+    @Test
+    fun readsVersionOneJournalWithoutReplyTarget() {
+        val body = "v1 の下書き"
+        assertEquals(CaptureDraft(body), decode(encodeVersionOne(body)))
+    }
+
+    private fun encodeVersionOne(body: String): ByteArray {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val bytes = ByteArrayOutputStream()
+        val checksummed = DigestOutputStream(bytes, digest)
+        val output = DataOutputStream(checksummed)
+        output.writeInt(0x4d4f5401)
+        val encoded = body.toByteArray(Charsets.UTF_8)
+        output.writeInt(encoded.size)
+        output.write(encoded)
+        output.writeByte(0)
+        checksummed.on(false)
+        output.write(digest.digest())
+        return bytes.toByteArray()
+    }
 }

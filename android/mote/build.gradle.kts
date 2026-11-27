@@ -1,3 +1,5 @@
+import java.time.OffsetDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Properties
 
 plugins {
@@ -8,6 +10,21 @@ plugins {
 val versionProps = Properties().apply {
     project.file("version.properties").inputStream().use { load(it) }
 }
+
+val officialRelease = System.getenv("HARMION_OFFICIAL_RELEASE") == "true"
+
+fun git(vararg args: String): String =
+    runCatching {
+        providers.exec {
+            commandLine("git", *args)
+            workingDir = rootProject.projectDir.parentFile
+        }.standardOutput.asText.get().trim()
+    }.getOrDefault("")
+
+val gitRevision = git("rev-parse", "--short=12", "HEAD").ifEmpty { "unknown" }
+val gitBranch = git("rev-parse", "--abbrev-ref", "HEAD").ifEmpty { "unknown" }
+val gitDirty = git("status", "--porcelain").isNotEmpty()
+val buildTime = OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
 
 android {
     namespace = "org.harmion.mote"
@@ -21,6 +38,11 @@ android {
         targetSdk = 36
         versionCode = versionProps.getProperty("versionCode").toInt()
         versionName = versionProps.getProperty("versionName")
+        buildConfigField("String", "GIT_REVISION", "\"" + gitRevision + "\"")
+        buildConfigField("String", "GIT_BRANCH", "\"" + gitBranch + "\"")
+        buildConfigField("boolean", "GIT_DIRTY", gitDirty.toString())
+        buildConfigField("String", "BUILD_TIME", "\"" + buildTime + "\"")
+        buildConfigField("boolean", "OFFICIAL_RELEASE", officialRelease.toString())
     }
 
     signingConfigs {
@@ -36,7 +58,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            versionNameSuffix = "-dev"
+        }
         release {
+            if (!officialRelease) {
+                versionNameSuffix = "-dev"
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
@@ -49,7 +77,10 @@ android {
         }
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -66,4 +97,5 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.kotlinx.coroutines.android)
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20180813")
 }

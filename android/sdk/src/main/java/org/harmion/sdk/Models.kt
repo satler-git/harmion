@@ -82,6 +82,10 @@ data class NodeStatus(
     val syncBlockedMessage: String?,
     val lastSuccessAtMicros: Long?,
     val lastError: String?,
+    /** Peers in the current or pending sync round. */
+    val syncInFlight: List<String> = emptyList(),
+    val syncRetrying: Int = 0,
+    val lastSyncTrigger: String? = null,
 ) {
     companion object {
         internal fun fromJson(json: JSONObject): NodeStatus {
@@ -104,6 +108,13 @@ data class NodeStatus(
                     } else {
                         null
                     },
+                syncInFlight = sync.optJSONArray("inflight")?.let { array ->
+                    (0 until array.length()).mapNotNull { index ->
+                        array.optString(index).takeIf { it.isNotEmpty() }
+                    }
+                } ?: emptyList(),
+                syncRetrying = sync.optJSONObject("retrying")?.length() ?: 0,
+                lastSyncTrigger = sync.optString("last_trigger").ifEmpty { null },
             )
         }
     }

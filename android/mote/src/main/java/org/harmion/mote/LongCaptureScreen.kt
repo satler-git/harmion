@@ -76,12 +76,14 @@ internal fun LongCaptureScreen(
     onFinish: () -> Unit,
     onCheck: () -> Unit,
     onForget: () -> Unit,
+    onDeleteDraft: () -> Unit,
     connection: MoteConnection,
     onConnect: () -> Unit,
     onAuthorize: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     var confirmForget by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val slices = remember(state.body) { threadSlices(state.body) }
     val clipboard = LocalClipboard.current
@@ -115,7 +117,7 @@ internal fun LongCaptureScreen(
         }
     }
 
-    BackHandler(enabled = !confirmForget && !menuOpen, onBack = onLeave)
+    BackHandler(enabled = !confirmForget && !confirmDelete && !menuOpen, onBack = onLeave)
     Scaffold(
         modifier = Modifier.imePadding(),
         containerColor = colors.background,
@@ -129,7 +131,8 @@ internal fun LongCaptureScreen(
                 ) {
                     Row(
                         modifier = Modifier.widthIn(max = ThreadMaxWidth).fillMaxWidth()
-                            .padding(start = 8.dp, end = 16.dp, top = 8.dp, bottom = 10.dp),
+                            .heightIn(min = 54.dp)
+                            .padding(start = 8.dp, end = 20.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -158,6 +161,15 @@ internal fun LongCaptureScreen(
                                         },
                                     )
                                 }
+                                DropdownMenuItem(
+                                    text = { Text("下書きを削除…") },
+                                    leadingIcon = { MoteIcon(MoteGlyph.Delete, contentDescription = null) },
+                                    enabled = !state.busy,
+                                    onClick = {
+                                        menuOpen = false
+                                        confirmDelete = true
+                                    },
+                                )
                                 DropdownMenuItem(
                                     text = { Text("端末の記録を破棄…") },
                                     leadingIcon = { MoteIcon(MoteGlyph.Delete, contentDescription = null) },
@@ -193,8 +205,8 @@ internal fun LongCaptureScreen(
                 ) {
                     Column(
                         modifier = Modifier.widthIn(max = ThreadMaxWidth).fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                            .padding(horizontal = 20.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         LongCaptureSupport(
                             state = state,
@@ -243,19 +255,28 @@ internal fun LongCaptureScreen(
         }
     }
 
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            text = { Text("削除しますか？") },
+            confirmButton = {
+                TextButton(
+                    enabled = !state.busy,
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.error),
+                    onClick = {
+                        confirmDelete = false
+                        onDeleteDraft()
+                    },
+                ) { Text("削除") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("キャンセル") } },
+        )
+    }
+
     if (confirmForget) {
         AlertDialog(
             onDismissRequest = { confirmForget = false },
-            title = { Text("この端末の長文セッションを破棄しますか？") },
-            text = {
-                Text(
-                    "この端末にあるセッション情報と下書きだけを破棄します。" +
-                        "Harmion 側の本文やセッションの状態は変更しません。" +
-                        "結果が未確定の操作は、すでに Harmion に保存されている可能性があります。" +
-                        "未保存の文章が必要なら、キャンセルして先にコピーしてください。",
-                    modifier = Modifier.verticalScroll(rememberScrollState()),
-                )
-            },
+            text = { Text("端末の記録を破棄しますか？") },
             confirmButton = {
                 TextButton(
                     enabled = !state.busy,

@@ -63,6 +63,13 @@ class HarmionSession internal constructor(
 
     fun status(): NodeStatus = node.status()
 
+    /**
+     * Asks the node for an early sync pass. The node still applies its own
+     * scheduling policy; this is not an owner-confirmed manual sync.
+     */
+    suspend fun requestSync() =
+        withContext(Dispatchers.IO) { node.requestSync() }
+
     fun nodeSummary(): JSONObject = node.nodeSummary()
 
     /** Advisory check for stored authorization; guarded operations check again before I/O. */

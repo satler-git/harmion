@@ -13,6 +13,8 @@ data class Capture(
     val sessionOpen: Boolean = false,
     /** Finished long captures retain the session attribute with a false value. */
     val isLong: Boolean = sessionOpen,
+    /** Capture ID this one replies to, if any. The target may have been deleted. */
+    val replyTo: String? = null,
 ) {
     // Avoid including private capture text or the node-local edit token in diagnostic logs.
     override fun toString(): String = "Capture(id=$id)"

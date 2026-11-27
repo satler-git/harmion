@@ -1,38 +1,56 @@
 package org.harmion.mote
 
+import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.SystemClock
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -41,6 +59,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -52,6 +71,9 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -60,7 +82,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -70,6 +93,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxState
 import androidx.compose.material3.SwipeToDismissBoxValue
@@ -78,37 +102,79 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.toMutableStateList
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.delay
+
+private const val CollapsedShortLines = 7
+private const val MaxTextWidthFraction = .97f
+
+private fun gapPadding(micros: Long?): Dp = when {
+    micros == null || micros < 15L * 60 * 1_000_000 -> 0.dp
+    micros < 2L * 60 * 60 * 1_000_000 -> 8.dp
+    else -> 18.dp
+}
+
+private val BubbleLineBreak =
+    if (Build.VERSION.SDK_INT >= 35) {
+        LineBreak(
+            strategy = LineBreak.Strategy.HighQuality,
+            strictness = LineBreak.Strictness.Strict,
+            wordBreak = LineBreak.WordBreak.Phrase,
+        )
+    } else {
+        LineBreak(
+            strategy = LineBreak.Strategy.HighQuality,
+            strictness = LineBreak.Strictness.Strict,
+            wordBreak = LineBreak.WordBreak.Default,
+        )
+    }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -121,6 +187,7 @@ internal fun MoteScreen(
     onArchive: (Capture, Boolean) -> Unit,
     onPin: (Capture, Boolean) -> Unit,
     onDelete: (Capture) -> Unit,
+    onDeleteLongDraft: () -> Unit,
     archiveNotice: ArchiveNotice?,
     onUndoArchive: (ArchiveNotice) -> Unit,
     onDismissArchive: (ArchiveNotice) -> Unit,
@@ -132,6 +199,12 @@ internal fun MoteScreen(
     onFinishLong: () -> Unit,
     onCheckLong: () -> Unit,
     onForgetLong: () -> Unit,
+    onReply: (Capture) -> Unit,
+    onCancelReply: () -> Unit,
+    onPushToLong: (List<String>) -> Unit,
+    onBeginEdit: (Capture) -> Unit,
+    onCancelEdit: () -> Unit,
+    onSync: () -> Unit,
     preferences: MotePreferences,
     onOpenSettings: () -> Unit,
 ) {
@@ -139,20 +212,198 @@ internal fun MoteScreen(
     val canMutate = ready && !state.busy
     val context = LocalContext.current
     val colors = MaterialTheme.colorScheme
+    val density = LocalDensity.current
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val haptic = LocalHapticFeedback.current
+    val backdrop = rememberMoteBackdrop()
+    val homeList = rememberLazyListState()
+    var expandAnchor by remember { mutableStateOf<ExpandAnchor?>(null) }
+    val replyFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    var requestReplyFocus by remember { mutableStateOf(false) }
     var includeArchived by rememberSaveable { mutableStateOf(false) }
     var pinnedOnly by rememberSaveable { mutableStateOf(false) }
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     var deleteSnapshot by remember { mutableStateOf<Capture?>(null) }
     var confirmRelease by remember { mutableStateOf(false) }
-    var completedVisible by remember { mutableStateOf(false) }
-    val allCaptures = if (ready) state.captures else emptyList()
-    val selected = selectedId?.let { id -> allCaptures.firstOrNull { it.id == id } }
-    val deleteTarget = deleteSnapshot?.takeIf { target -> allCaptures.any { it.id == target.id && !it.sessionOpen } }
+    var confirmDeleteDraft by remember { mutableStateOf(false) }
+    var confirmPush by remember { mutableStateOf(false) }
+    var selecting by rememberSaveable { mutableStateOf(false) }
+    val selectedIds = rememberSaveable(
+        saver = listSaver(save = { it.toList() }, restore = { it.toMutableStateList() }),
+    ) { mutableStateListOf<String>() }
+    val expandedIds = rememberSaveable(
+        saver = listSaver(save = { it.toList() }, restore = { it.toMutableStateList() }),
+    ) { mutableStateListOf<String>() }
+    var highlightId by remember { mutableStateOf<String?>(null) }
+    var menuTargetId by rememberSaveable { mutableStateOf<String?>(null) }
+    var jumpTargetId by remember { mutableStateOf<String?>(null) }
+    var headerHeight by remember { mutableIntStateOf(0) }
+    var dockHeight by remember { mutableIntStateOf(0) }
+    var homeDockHeight by remember { mutableIntStateOf(0) }
+    val allCaptures = state.captures
+    val byId = remember(allCaptures) { allCaptures.associateBy(Capture::id) }
+    val selected = selectedId?.let(byId::get)
+    val menuCapture = menuTargetId?.let(byId::get)
+    val deleteTarget = deleteSnapshot?.takeIf { target -> allCaptures.any { it.id == target.id } }
+    val replyTarget = state.replyTo?.let(byId::get)
+    val pushableIds = selectedIds.filter { id ->
+        byId[id]?.let { !it.isLong && it.body.isNotBlank() } == true
+    }
+    val imeVisible = WindowInsets.isImeVisible
+    var pendingLongOpen by remember { mutableStateOf(false) }
+    val localLongId = state.longCapture?.captureId
+    val filtered = remember(allCaptures, includeArchived, pinnedOnly, state.archivePreviews, localLongId) {
+        val projected = allCaptures.mapNotNull { item ->
+            if (item.sessionOpen && item.id == localLongId) null
+            else state.archivePreviews[item.id]?.let { item.copy(archived = it.archived) } ?: item
+        }
+        CaptureFilter(includeArchived, pinnedOnly).applyTo(projected)
+    }
+    val headerVisible = selected == null
+    val topPadding = with(density) { (if (headerHeight == 0) 76.dp else headerHeight.toDp()) + 4.dp }
+    val dockPadding = with(density) { (if (dockHeight == 0) 164.dp else dockHeight.toDp()) + 6.dp }
+
+    fun dismissInput() {
+        focusManager.clearFocus()
+        keyboard?.hide()
+    }
+
+    fun toggleExpand(id: String) {
+        dismissInput()
+        // Anchor the folded row by its top edge, not by whichever row happens to be first.
+        val info = homeList.layoutInfo.visibleItemsInfo.firstOrNull { it.key == id }
+        expandAnchor = ExpandAnchor(
+            id = id,
+            top = info?.offset ?: 0,
+            firstIndex = homeList.firstVisibleItemIndex,
+            firstOffset = homeList.firstVisibleItemScrollOffset,
+        )
+        if (id in expandedIds) expandedIds.remove(id) else expandedIds.add(id)
+    }
+
+    LaunchedEffect(expandedIds.toList()) {
+        val anchor = expandAnchor ?: return@LaunchedEffect
+        expandAnchor = null
+        withFrameNanos { }
+        withFrameNanos { }
+        val info = homeList.layoutInfo.visibleItemsInfo.firstOrNull { it.key == anchor.id }
+        if (info != null) {
+            homeList.scrollBy((info.offset - anchor.top).toFloat())
+        } else {
+            homeList.scrollToItem(anchor.firstIndex, anchor.firstOffset)
+        }
+    }
+
+    fun leaveSelection() {
+        selecting = false
+        selectedIds.clear()
+    }
+
+    fun enterSelection(capture: Capture) {
+        dismissInput()
+        selecting = true
+        selectedIds.clear()
+        selectedIds.add(capture.id)
+    }
+
+    fun jumpToReplyTarget(target: Capture) {
+        if (target.archived && !includeArchived) includeArchived = true
+        if (pinnedOnly && !target.pinned) pinnedOnly = false
+        selectedId = null
+        highlightId = null
+        jumpTargetId = target.id
+    }
+
+    fun beginReply(capture: Capture) {
+        if (state.busy || state.pending || !state.draftAvailable) return
+        onReply(capture)
+        requestReplyFocus = true
+    }
 
     SideEffect {
         if (selected == null) selectedId = null
         if (deleteTarget == null) deleteSnapshot = null
         if (!state.pending) confirmRelease = false
+    }
+
+    LaunchedEffect(state.captures) {
+        val ids = state.captures.mapTo(HashSet()) { it.id }
+        selectedIds.retainAll { it in ids }
+        if (selecting && selectedIds.isEmpty()) selecting = false
+    }
+    LaunchedEffect(jumpTargetId, filtered) {
+        val id = jumpTargetId ?: return@LaunchedEffect
+        val index = timelineItemIndex(filtered, id, ZoneId.systemDefault())
+        if (index == null) {
+            jumpTargetId = null
+            return@LaunchedEffect
+        }
+        homeList.animateScrollToItem(index)
+        homeList.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.let { info ->
+            val viewport = homeList.layoutInfo.viewportSize.height
+            homeList.animateScrollBy((info.offset + info.size / 2 - viewport / 2).toFloat())
+        }
+        highlightId = id
+        jumpTargetId = null
+    }
+
+    LaunchedEffect(pendingLongOpen, imeVisible) {
+        if (pendingLongOpen && !imeVisible) {
+            pendingLongOpen = false
+            onOpenLong()
+        }
+    }
+    LaunchedEffect(pendingLongOpen) {
+        if (!pendingLongOpen) return@LaunchedEffect
+        delay(350L)
+        if (pendingLongOpen) {
+            pendingLongOpen = false
+            onOpenLong()
+        }
+    }
+
+    LaunchedEffect(highlightId) {
+        val id = highlightId ?: return@LaunchedEffect
+        delay(2000L)
+        if (highlightId == id) highlightId = null
+    }
+
+    LaunchedEffect(state.replyTo, state.editingId, requestReplyFocus) {
+        if (requestReplyFocus && (state.replyTo != null || state.editingId != null)) {
+            requestReplyFocus = false
+            replyFocus.requestFocus()
+            keyboard?.show()
+        }
+    }
+    val long = state.longCapture
+    if (state.longCaptureVisible && long != null) {
+        LongCaptureScreen(
+            state = long, onLeave = onLeaveLong, onDraft = onLongDraft, onAppend = onAppendLong,
+            onFinish = onFinishLong, onCheck = onCheckLong, onForget = onForgetLong,
+            onDeleteDraft = onDeleteLongDraft,
+            connection = state.connection, onConnect = onConnect, onAuthorize = onAuthorize,
+        )
+        return
+    }
+
+    if (!ready && !state.snapshotLoaded && !state.cacheLoaded) {
+        Column(
+            Modifier.fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)),
+        ) {
+            val startupMessage = state.message?.takeUnless { it in quietSuccessMessages }
+                ?: if (state.longCaptureStorageFailed) "端末の長文記録を読み込めません。長文入力は停止しています。" else null
+            if (startupMessage != null) {
+                MessageBanner(
+                    startupMessage,
+                    Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    onDismiss = null,
+                )
+            }
+            ConnectionStatus(state.connection, onConnect, onAuthorize, Modifier.weight(1f))
+        }
+        return
     }
 
     val notice = archiveNotice?.takeIf { ready }
@@ -165,208 +416,545 @@ internal fun MoteScreen(
                 message = if (notice.archived) "アーカイブしました" else "Inbox に戻しました",
                 actionLabel = "元に戻す",
                 withDismissAction = true,
-                duration = SnackbarDuration.Long,
+                duration = SnackbarDuration.Short,
             )
             if (result == SnackbarResult.ActionPerformed) undo(notice) else dismiss(notice)
         }
     }
-    LaunchedEffect(state.longCompletion) {
-        val remaining = 1900L - (SystemClock.elapsedRealtime() - state.longCompletion)
-        completedVisible = state.longCompletion != 0L && remaining > 0
-        if (completedVisible) {
-            delay(remaining)
-            completedVisible = false
-        }
-    }
 
-    val long = state.longCapture
-    if (state.longCaptureVisible && long != null) {
-        LongCaptureScreen(
-            state = long, onLeave = onLeaveLong, onDraft = onLongDraft, onAppend = onAppendLong,
-            onFinish = onFinishLong, onCheck = onCheckLong, onForget = onForgetLong,
-            connection = state.connection, onConnect = onConnect, onAuthorize = onAuthorize,
-        )
-        return
-    }
-
-    Scaffold(
-        modifier = Modifier.imePadding(),
-        containerColor = colors.background,
-        topBar = {
-            MoteTopBar(
-                capture = selected,
-                onBack = { selectedId = null },
-                onOpenSettings = onOpenSettings,
-                onCopy = { selected?.let { copyCapture(context, it.body) } },
-                onShare = { selected?.let { shareCapture(context, it.body) } },
-                onDelete = { deleteSnapshot = selected },
-                canDelete = canMutate && selected?.sessionOpen == false && selected.id !in state.archivePreviews,
-            )
-        },
-        bottomBar = {
-            if (selected == null) {
-                CaptureDock(state, includeArchived, pinnedOnly, { includeArchived = it }, { pinnedOnly = it },
-                    onDraft, onSubmit, { confirmRelease = true }, onOpenLong, completedVisible && notice == null,
-                    preferences.completionMotion)
-            } else {
-                DetailActions(
-                    selected, canMutate && selected.id !in state.archivePreviews,
-                    onArchive = { onArchive(selected, !selected.archived) },
-                    onPin = { onPin(selected, !selected.pinned) },
-                )
-            }
-        },
-        snackbarHost = {
-            SnackbarHost(snackbar) { data ->
-                Snackbar(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 5.dp),
-                    shape = MaterialTheme.shapes.medium,
-                    containerColor = colors.surfaceContainerHigh,
-                    contentColor = colors.onSurface,
-                    action = { TextButton(onClick = data::performAction, enabled = canMutate) { Text("元に戻す") } },
-                    dismissAction = {
-                        IconButton(onClick = data::dismiss) { MoteIcon(MoteGlyph.Close, "閉じる", Modifier.size(18.dp)) }
-                    },
-                ) { Text(data.visuals.message) }
-            }
-        },
-    ) { insets ->
-        Box(Modifier.fillMaxSize().padding(insets).consumeWindowInsets(insets)) {
-            Column(Modifier.fillMaxSize()) {
-                if (state.longCaptureStorageFailed) InlineNotice("端末の長文記録を読み込めません。長文入力は停止しています。")
-                state.message?.takeUnless { it in quietSuccessMessages }?.let { InlineNotice(it) }
-                when {
-                    !ready -> ConnectionStatus(state.connection, onConnect, onAuthorize, Modifier.weight(1f))
-                    selected != null -> {
-                        BackHandler(enabled = deleteTarget == null) { selectedId = null }
-                        key(selected.id) { CaptureDetail(selected, Modifier.weight(1f)) }
+    Box(Modifier.fillMaxSize().background(colors.background).imePadding()) {
+        Box(
+            Modifier.fillMaxSize()
+                .then(if (backdrop.blurSupported) Modifier.moteBackdropSource(backdrop) else Modifier)
+                .background(colors.background)
+                .dismissInputOnTap { dismissInput() },
+        ) {
+            when {
+                selected != null -> {
+                    BackHandler(enabled = deleteTarget == null) { selectedId = null }
+                    key(selected.id) {
+                        CaptureDetail(
+                            selected, byId, backdrop, topPadding, dockPadding,
+                            onOpenReplyTarget = { target -> jumpToReplyTarget(target) },
+                        )
                     }
-                    else -> {
-                        val localLongId = state.longCapture?.captureId
-                        val filtered = remember(allCaptures, includeArchived, pinnedOnly, state.archivePreviews, localLongId) {
-                            val projected = allCaptures.mapNotNull { item ->
-                                if (item.sessionOpen && item.id == localLongId) null
-                                else state.archivePreviews[item.id]?.let { item.copy(archived = it.archived) } ?: item
-                            }
-                            CaptureFilter(includeArchived, pinnedOnly).applyTo(projected)
-                        }
-                        if (filtered.isEmpty()) {
-                            BoxWithSafeHorizontal(Modifier.weight(1f)) {
+                }
+                else -> {
+                    if (filtered.isEmpty() && (state.snapshotLoaded || state.cacheLoaded)) {
+                        BoxWithSafeHorizontal(Modifier.fillMaxSize()) {
+                            Column(
+                                Modifier.align(Alignment.Center).padding(horizontal = 24.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
                                 Text(
-                                    if (pinnedOnly) "ピン留めはありません" else if (includeArchived) "メモはありません" else "Inbox は空です",
-                                    modifier = Modifier.align(Alignment.Center).padding(horizontal = 20.dp),
+                                    when {
+                                        !ready -> "再接続しています"
+                                        pinnedOnly -> "ピン留めはありません"
+                                        includeArchived -> "メモはありません"
+                                        else -> "Inbox は空です"
+                                    },
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = colors.onSurfaceVariant,
                                     textAlign = TextAlign.Center,
                                 )
+                                if (!ready) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                             }
-                        } else {
-                            key(includeArchived, pinnedOnly) {
-                                CaptureTimeline(
-                                    filtered, Modifier.weight(1f),
-                                    enabled = canMutate, updating = state.archivePreviews.keys,
-                                    archiveHaptics = preferences.archiveHaptics,
-                                    onSelect = { selectedId = it.id },
-                                    onArchive = { onArchive(it, !it.archived) },
-                                    onPin = { onPin(it, !it.pinned) },
-                                    onCopy = { copyCapture(context, it.body) },
-                                    onShare = { shareCapture(context, it.body) },
-                                    onDelete = { deleteSnapshot = it },
-                                )
-                            }
+                        }
+                    } else {
+                        key(includeArchived, pinnedOnly) {
+                            CaptureTimeline(
+                                captures = filtered,
+                                listState = homeList,
+                                backdrop = backdrop,
+                                topPadding = topPadding,
+                                bottomPadding = dockPadding,
+                                enabled = canMutate,
+                                updating = state.archivePreviews.keys,
+                                archiveHaptics = preferences.archiveHaptics,
+                                selecting = selecting,
+                                selectedIds = selectedIds,
+                                expandedIds = expandedIds,
+                                replyTo = state.replyTo,
+                                byId = byId,
+                                highlightId = highlightId,
+                                canReply = !state.busy && !state.pending && state.draftAvailable,
+                                onSelect = { dismissInput(); selectedId = it.id },
+                                onReply = { beginReply(it) },
+                                onArchive = { dismissInput(); onArchive(it, !it.archived) },
+                                onPin = { onPin(it, !it.pinned) },
+                                onCopy = { copyCapture(context, it.body) },
+                                onShare = { shareCapture(context, it.body) },
+                                onDelete = { deleteSnapshot = it },
+                                onEdit = { requestReplyFocus = true; onBeginEdit(it) },
+                                onEnterSelection = { enterSelection(it) },
+                                onToggleSelection = {
+                                    if (it.id in selectedIds) selectedIds.remove(it.id) else selectedIds.add(it.id)
+                                    if (selectedIds.isEmpty()) selecting = false
+                                },
+                                onToggleExpand = { toggleExpand(it.id) },
+                                onOpenReplyTarget = { dismissInput(); jumpToReplyTarget(it) },
+                                onMenu = { dismissInput(); menuTargetId = it.id },
+                            )
                         }
                     }
                 }
             }
         }
+
+        val message = state.message?.takeUnless { it in quietSuccessMessages }
+        if (message != null) {
+            var dismissed by remember(message) { mutableStateOf(false) }
+            if (!dismissed) {
+                MessageBanner(
+                    message,
+                    Modifier.align(Alignment.TopCenter).padding(top = topPadding + 4.dp, start = 16.dp, end = 16.dp),
+                    onDismiss = { dismissed = true },
+                )
+            }
+        } else if (state.longCaptureStorageFailed) {
+            MessageBanner(
+                "端末の長文記録を読み込めません。長文入力は停止しています。",
+                Modifier.align(Alignment.TopCenter).padding(top = topPadding + 4.dp, start = 16.dp, end = 16.dp),
+                onDismiss = null,
+            )
+        }
+
+        if (selected == null) {
+            AnimatedVisibility(
+                visible = headerVisible,
+                modifier = Modifier.align(Alignment.TopCenter),
+                enter = fadeIn() + slideInVertically { -it / 2 },
+                exit = fadeOut() + slideOutVertically { -it / 2 },
+            ) {
+                Box(Modifier.dismissInputOnTap { dismissInput() }) {
+                    HomeHeader(
+                        state = state,
+                        onConnect = onConnect,
+                        onAuthorize = onAuthorize,
+                        onSync = onSync,
+                        onOpenSettings = { dismissInput(); onOpenSettings() },
+                        backdrop = backdrop,
+                        modifier = Modifier.onSizeChanged { headerHeight = it.height },
+                    )
+                }
+            }
+            if (!headerVisible) {
+                CachedReconnectChip(
+                    state, onConnect, onAuthorize,
+                    Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top)),
+                )
+            }
+        } else {
+            Box(Modifier.align(Alignment.TopCenter).dismissInputOnTap { dismissInput() }) {
+                DetailHeader(
+                    capture = selected,
+                    canDelete = canMutate && selected.id !in state.archivePreviews,
+                    onBack = { selectedId = null },
+                    onDelete = { deleteSnapshot = selected },
+                    backdrop = backdrop,
+                    modifier = Modifier.onSizeChanged { headerHeight = it.height },
+                )
+            }
+        }
+
+        if (selected == null) {
+            if (selecting) {
+                val selectionHeight = with(LocalDensity.current) { homeDockHeight.toDp() }
+                    .takeIf { it > 0.dp } ?: 164.dp
+                Box(Modifier.align(Alignment.BottomCenter).height(selectionHeight)) {
+                    SelectionDock(
+                        count = pushableIds.size,
+                        canPush = canMutate && pushableIds.isNotEmpty(),
+                        onCancel = { leaveSelection() },
+                        onPush = { confirmPush = true },
+                        modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                    )
+                }
+            } else {
+                HomeDock(
+                    state = state,
+                    ready = ready,
+                    canMutate = canMutate,
+                    includeArchived = includeArchived,
+                    pinnedOnly = pinnedOnly,
+                    replyTarget = replyTarget,
+                    replyMissing = state.replyTo != null && replyTarget == null,
+                    dockHeight = { height ->
+                        if (!imeVisible) homeDockHeight = height
+                        dockHeight = height
+                    },
+                    focusRequester = replyFocus,
+                    onDraft = onDraft,
+                    onSubmit = onSubmit,
+                    editing = state.editingId != null,
+                    onCancelEdit = onCancelEdit,
+                    onIncludeArchived = {
+                        includeArchived = it
+                        leaveSelection()
+                    },
+                    onPinnedOnly = {
+                        pinnedOnly = it
+                        leaveSelection()
+                    },
+                    onRelease = { confirmRelease = true },
+                    onOpenLong = { dismissInput(); pendingLongOpen = true },
+                    onCancelReply = onCancelReply,
+                    onDeleteLongDraft = { confirmDeleteDraft = true },
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
+            }
+        } else {
+            DetailActions(
+                capture = selected,
+                canMutate = canMutate,
+                inFlight = selected.id in state.archivePreviews,
+                onCopy = { copyCapture(context, selected.body) },
+                onShare = { shareCapture(context, selected.body) },
+                onArchive = { onArchive(selected, !selected.archived) },
+                onPin = { onPin(selected, !selected.pinned) },
+                modifier = Modifier.align(Alignment.BottomCenter).onSizeChanged { dockHeight = it.height },
+            )
+        }
+
+        SnackbarHost(
+            hostState = snackbar,
+            modifier = Modifier.align(Alignment.BottomCenter)
+                .padding(horizontal = 20.dp)
+                .padding(bottom = dockPadding + 4.dp),
+        ) { data ->
+            val dismissState = rememberSwipeToDismissBoxState(
+                confirmValueChange = { value ->
+                    if (value != SwipeToDismissBoxValue.Settled) {
+                        data.dismiss()
+                        true
+                    } else false
+                },
+            )
+            SwipeToDismissBox(
+                state = dismissState,
+                modifier = Modifier.fillMaxWidth(),
+                enableDismissFromStartToEnd = true,
+                enableDismissFromEndToStart = true,
+                gesturesEnabled = true,
+                backgroundContent = {},
+            ) {
+            Snackbar(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 0.dp, vertical = 5.dp),
+                shape = MaterialTheme.shapes.medium,
+                containerColor = colors.surfaceContainerHigh,
+                contentColor = colors.onSurface,
+                action = { TextButton(onClick = data::performAction, enabled = canMutate) { Text("元に戻す") } },
+                dismissAction = {
+                    IconButton(onClick = data::dismiss) { MoteIcon(MoteGlyph.Close, "閉じる", Modifier.size(18.dp)) }
+                },
+            ) { Text(data.visuals.message) }
+            }
+        }
+    }
+
+    menuCapture?.let { target ->
+        CaptureActionSheet(
+            capture = target,
+            enabled = canMutate,
+            canReply = !state.busy && !state.pending && state.draftAvailable,
+            onDismiss = { menuTargetId = null },
+            onReply = { beginReply(target) },
+            onEdit = { requestReplyFocus = true; onBeginEdit(target) },
+            onDetail = { selectedId = target.id },
+            onSelect = { enterSelection(target) },
+            onPin = { onPin(target, !target.pinned) },
+            onCopy = { copyCapture(context, target.body) },
+            onShare = { shareCapture(context, target.body) },
+            onArchive = { onArchive(target, !target.archived) },
+            onDelete = { deleteSnapshot = target },
+        )
     }
 
     if (deleteTarget != null) {
-        DeleteCaptureDialog(deleteTarget, canMutate && deleteTarget.id !in state.archivePreviews, { deleteSnapshot = null }) {
+        DeleteCaptureDialog(
+            deleteTarget,
+            canMutate && deleteTarget.id !in state.archivePreviews,
+            onCancel = { deleteSnapshot = null },
+        ) {
             deleteSnapshot = null
             onDelete(deleteTarget)
         }
     }
+    if (confirmDeleteDraft) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteDraft = false },
+            icon = { MoteIcon(MoteGlyph.Delete, null, tint = colors.error) },
+            text = { Text("削除しますか？") },
+            confirmButton = {
+                TextButton(
+                    enabled = !state.busy,
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.error),
+                    onClick = {
+                        confirmDeleteDraft = false
+                        onDeleteLongDraft()
+                    },
+                ) { Text("削除") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDeleteDraft = false }) { Text("キャンセル") } },
+        )
+    }
+    if (confirmPush) {
+        AlertDialog(
+            onDismissRequest = { confirmPush = false },
+            text = { Text("長文に移動しますか？") },
+            confirmButton = {
+                TextButton(
+                    enabled = canMutate && pushableIds.isNotEmpty(),
+                    onClick = {
+                        val ids = pushableIds.toList()
+                        confirmPush = false
+                        leaveSelection()
+                        onPushToLong(ids)
+                    },
+                ) { Text("移動") }
+            },
+            dismissButton = { TextButton(onClick = { confirmPush = false }) { Text("キャンセル") } },
+        )
+    }
     if (confirmRelease && state.pending && state.draftAvailable) {
         AlertDialog(
             onDismissRequest = { confirmRelease = false },
-            title = { Text("下書きの編集を再開？") },
-            text = { Text("前回の送信は保存済みの可能性があります。編集して送信すると、別のメモとして保存されます。") },
+            text = { Text("下書きの編集を再開しますか？") },
             confirmButton = {
                 TextButton(enabled = !state.busy, onClick = { confirmRelease = false; onReleasePending() }) { Text("編集を再開") }
             },
             dismissButton = { TextButton(onClick = { confirmRelease = false }) { Text("キャンセル") } },
         )
     }
+    BackHandler(enabled = selecting && selected == null) { leaveSelection() }
 }
 
-private val quietSuccessMessages = setOf("Harmion に保存しました。", "削除しました。", "長文メモを閉じました。")
+private val quietSuccessMessages = setOf(
+    "Harmion に保存しました。",
+    "削除しました。",
+    "長文メモを閉じました。",
+    "下書きを削除しました。",
+    "同期を要求しました。",
+)
 
 @Composable
-private fun MoteTopBar(
-    capture: Capture?, onBack: () -> Unit, onOpenSettings: () -> Unit,
-    onCopy: () -> Unit, onShare: () -> Unit, onDelete: () -> Unit, canDelete: Boolean,
+private fun HomeHeader(
+    state: MoteUiState,
+    onConnect: () -> Unit,
+    onAuthorize: () -> Unit,
+    onSync: () -> Unit,
+    onOpenSettings: () -> Unit,
+    backdrop: MoteBackdrop,
+    modifier: Modifier = Modifier,
 ) {
-    var menu by remember(capture?.id) { mutableStateOf(false) }
     val colors = MaterialTheme.colorScheme
-    Column(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))) {
+    val ready = state.connection == MoteConnection.Ready
+    val syncing = state.syncRequestBusy || state.sync.inFlight
+    BlurredBar(
+        backdrop,
+        modifier.fillMaxWidth(),
+        tint = colors.background.copy(alpha = if (backdrop.blurSupported) .60f else .96f),
+    ) {
         Row(
-            Modifier.fillMaxWidth().heightIn(min = 62.dp).padding(start = if (capture == null) 20.dp else 6.dp, end = 9.dp),
+            Modifier.fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                .heightIn(min = 54.dp)
+                .padding(start = 10.dp, end = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (capture == null) {
-                Box(
-                    Modifier.size(38.dp).background(colors.primaryContainer, RoundedCornerShape(13.dp)),
-                    contentAlignment = Alignment.Center,
-                ) { MoteMark(Modifier.size(24.dp)) }
-                Spacer(Modifier.width(12.dp))
-            } else {
-                IconButton(onClick = onBack) { MoteIcon(MoteGlyph.Back, "戻る") }
-                Spacer(Modifier.width(5.dp))
-            }
-            Text(
-                when {
-                    capture == null -> "Mote"
-                    capture.isLong -> "長文"
-                    else -> "メモ"
-                },
-                Modifier.weight(1f).semantics { heading() },
-                style = if (capture == null) MaterialTheme.typography.headlineLarge else MaterialTheme.typography.titleLarge,
+            HeaderStatus(state, ready, onConnect, onAuthorize, onOpenSettings)
+            Spacer(Modifier.width(2.dp))
+            Text("Mote", style = MaterialTheme.typography.titleMedium, color = colors.onSurface)
+            Spacer(Modifier.weight(1f))
+            SyncButton(
+                ready = ready,
+                syncing = syncing,
+                enabled = ready,
+                onClick = onSync,
             )
-            if (capture == null) {
-                IconButton(onClick = onOpenSettings) { MoteIcon(MoteGlyph.Settings, "設定", tint = colors.onSurfaceVariant) }
-            } else {
-                Box {
-                    IconButton(onClick = { menu = true }) { MoteIcon(MoteGlyph.More, "その他の操作", tint = colors.onSurfaceVariant) }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        MenuAction(MoteGlyph.Copy, "コピー", enabled = capture.body.isNotEmpty()) { menu = false; onCopy() }
-                        MenuAction(MoteGlyph.Share, "共有", enabled = capture.body.isNotEmpty()) { menu = false; onShare() }
-                        MenuAction(MoteGlyph.Delete, "削除…", enabled = canDelete, destructive = true) { menu = false; onDelete() }
-                    }
-                }
+            IconButton(onClick = onOpenSettings) {
+                MoteIcon(MoteGlyph.Settings, "設定", tint = colors.onSurfaceVariant)
             }
         }
-        if (capture != null) HorizontalDivider(color = colors.outlineVariant, modifier = Modifier.padding(horizontal = 20.dp))
     }
 }
 
 @Composable
-private fun InlineNotice(text: String) {
+private fun HeaderStatus(
+    state: MoteUiState,
+    ready: Boolean,
+    onConnect: () -> Unit,
+    onAuthorize: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
     val colors = MaterialTheme.colorScheme
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp).semantics { liveRegion = LiveRegionMode.Polite },
-        horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically,
+    when {
+        state.connection == MoteConnection.NeedsApproval -> {
+            IconButton(onClick = onAuthorize) { MoteIcon(MoteGlyph.Link, "承認をリクエスト", tint = colors.tertiary) }
+        }
+        state.connection == MoteConnection.Loading || state.connection == MoteConnection.Approving -> {
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = colors.tertiary)
+            }
+        }
+        !ready -> {
+            IconButton(onClick = onConnect) { MoteIcon(MoteGlyph.Link, "再接続", tint = colors.tertiary) }
+        }
+        state.sync.lastError != null || state.sync.blockedCode != null || !state.sync.enabled || !state.sync.permitted -> {
+            IconButton(onClick = onOpenSettings) {
+                MoteIcon(MoteGlyph.Alert, "同期の状態", tint = colors.tertiary)
+            }
+        }
+        else -> Spacer(Modifier.size(48.dp))
+    }
+}
+
+@Composable
+private fun SyncButton(
+    ready: Boolean,
+    syncing: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val angle = remember { Animatable(0f) }
+    LaunchedEffect(syncing) {
+        if (syncing) {
+            angle.snapTo(0f)
+            while (true) {
+                angle.animateTo(angle.value + 360f, tween(durationMillis = 900, easing = LinearEasing))
+            }
+        } else {
+            angle.snapTo(0f)
+        }
+    }
+    IconButton(
+        onClick = { if (!syncing) onClick() },
+        enabled = enabled,
     ) {
-        MoteIcon(MoteGlyph.Alert, null, Modifier.size(16.dp), colors.secondary)
-        Text(text, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        MoteIcon(
+            MoteGlyph.Sync,
+            if (syncing) "同期中" else "今すぐ同期",
+            Modifier.size(21.dp).rotate(angle.value),
+            tint = if (syncing) colors.primary else if (ready) colors.onSurfaceVariant else colors.onSurfaceVariant.copy(alpha = .38f),
+        )
+    }
+}
+
+@Composable
+private fun CachedReconnectChip(
+    state: MoteUiState,
+    onConnect: () -> Unit,
+    onAuthorize: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (state.connection == MoteConnection.Ready) return
+    val colors = MaterialTheme.colorScheme
+    val busy = state.connection == MoteConnection.Loading || state.connection == MoteConnection.Approving
+    val action = when (state.connection) {
+        MoteConnection.NeedsApproval -> onAuthorize
+        else -> onConnect
+    }
+    Surface(
+        modifier = modifier.padding(top = 7.dp).clip(CircleShape)
+            .then(if (busy) Modifier else Modifier.clickable(onClick = action)),
+        shape = CircleShape,
+        color = colors.surfaceContainerHigh.copy(alpha = .92f),
+        contentColor = colors.onSurface,
+    ) {
+        Box(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+            when (state.connection) {
+                MoteConnection.Loading, MoteConnection.Approving ->
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = colors.tertiary)
+                MoteConnection.NeedsApproval ->
+                    MoteIcon(MoteGlyph.Link, "承認をリクエスト", Modifier.size(17.dp), colors.tertiary)
+                MoteConnection.Unavailable, MoteConnection.Failed ->
+                    MoteIcon(MoteGlyph.Link, "再接続", Modifier.size(17.dp), colors.tertiary)
+                MoteConnection.Ready -> Unit
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailHeader(
+    capture: Capture,
+    canDelete: Boolean,
+    onBack: () -> Unit,
+    onDelete: () -> Unit,
+    backdrop: MoteBackdrop,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    BlurredBar(
+        backdrop,
+        modifier.fillMaxWidth(),
+        tint = colors.background.copy(alpha = if (backdrop.blurSupported) .60f else .96f),
+    ) {
+        Row(
+            Modifier.fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                .heightIn(min = 54.dp)
+                .padding(start = 4.dp, end = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) { MoteIcon(MoteGlyph.Back, "戻る", tint = colors.onSurface) }
+            Text(
+                if (capture.isLong) "長文" else "メモ",
+                Modifier.weight(1f).semantics { heading() },
+                style = MaterialTheme.typography.titleLarge,
+                color = colors.onSurface,
+            )
+            IconButton(onClick = onDelete, enabled = canDelete) {
+                MoteIcon(
+                    MoteGlyph.Delete,
+                    "削除",
+                    tint = if (canDelete) colors.error else colors.onSurfaceVariant.copy(alpha = .38f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessageBanner(
+    text: String,
+    modifier: Modifier = Modifier,
+    onDismiss: (() -> Unit)?,
+) {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        color = colors.surfaceContainerHigh.copy(alpha = .96f),
+        contentColor = colors.onSurface,
+        shadowElevation = 3.dp,
+    ) {
+        Row(
+            Modifier.padding(start = 12.dp, end = 4.dp, top = 7.dp, bottom = 7.dp)
+                .semantics { liveRegion = LiveRegionMode.Polite },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            MoteIcon(MoteGlyph.Alert, null, Modifier.size(16.dp), colors.secondary)
+            Text(text, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            if (onDismiss != null) {
+                IconButton(onClick = onDismiss) { MoteIcon(MoteGlyph.Close, "閉じる", Modifier.size(16.dp)) }
+            }
+        }
     }
 }
 
 @Composable
 private fun ConnectionStatus(connection: MoteConnection, onConnect: () -> Unit, onAuthorize: () -> Unit, modifier: Modifier) {
     when (connection) {
-        MoteConnection.Loading -> CenteredState("Harmion に接続中", "この端末で下書きを続けられます。", modifier, loading = true)
-        MoteConnection.Approving -> CenteredState("承認を待っています", "Harmion でアクセスを許可してください。", modifier, loading = true)
+        MoteConnection.Loading -> CenteredState("Harmion に接続中", "この端末で下書きを続けられます。", modifier, loading = true) {
+            TextButton(onClick = onConnect) { Text("再接続") }
+        }
+        MoteConnection.Approving -> CenteredState("承認を待っています", "Harmion でアクセスを許可してください。", modifier, loading = true) {
+            TextButton(onClick = onAuthorize) { Text("承認をやり直す") }
+        }
         MoteConnection.NeedsApproval -> CenteredState("Harmion とつなぐ", "Mote のメモだけにアクセスします。", modifier, mark = true) {
             Button(onClick = onAuthorize) { Text("承認をリクエスト") }
         }
@@ -401,180 +989,350 @@ private fun CenteredState(
 }
 
 @Composable
-private fun BoxWithSafeHorizontal(modifier: Modifier, content: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit) {
+private fun BoxWithSafeHorizontal(modifier: Modifier, content: @Composable BoxScope.() -> Unit) {
     Box(modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)), content = content)
 }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun CaptureDock(
-    state: MoteUiState, includeArchived: Boolean, pinnedOnly: Boolean,
-    onIncludeArchived: (Boolean) -> Unit, onPinnedOnly: (Boolean) -> Unit,
-    onDraft: (String) -> Unit, onSubmit: () -> Unit, onRelease: () -> Unit, onOpenLong: () -> Unit,
-    completedVisible: Boolean, animateCompletion: Boolean,
+private fun HomeDock(
+    state: MoteUiState,
+    ready: Boolean,
+    canMutate: Boolean,
+    includeArchived: Boolean,
+    pinnedOnly: Boolean,
+    replyTarget: Capture?,
+    replyMissing: Boolean,
+    dockHeight: (Int) -> Unit,
+    focusRequester: androidx.compose.ui.focus.FocusRequester,
+    onDraft: (String) -> Unit,
+    onSubmit: () -> Unit,
+    editing: Boolean,
+    onCancelEdit: () -> Unit,
+    onIncludeArchived: (Boolean) -> Unit,
+    onPinnedOnly: (Boolean) -> Unit,
+    onRelease: () -> Unit,
+    onOpenLong: () -> Unit,
+    onCancelReply: () -> Unit,
+    onDeleteLongDraft: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
-    val ready = state.connection == MoteConnection.Ready
-    val canSubmit = ready && state.draftAvailable && !state.busy && state.draft.isNotBlank()
+    val imeVisible = WindowInsets.isImeVisible
+    val editingBody = if (editing) state.captures.firstOrNull { it.id == state.editingId }?.body else null
+    val canSubmit = ready && state.draftAvailable && !state.busy && state.draft.isNotBlank() &&
+        (!editing || state.draft != editingBody)
     val canOpenLong = state.longCaptureAvailable && !state.busy
-    MoteDock {
-        val long = state.longCapture
-        if (long != null) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
-                color = colors.surfaceContainerHigh,
+    val long = state.longCapture
+    Box(modifier.fillMaxWidth().onSizeChanged { dockHeight(it.height) }) {
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+            Column(
+                Modifier.widthIn(max = 680.dp).fillMaxWidth()
+                    .then(if (imeVisible) Modifier else Modifier.windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom)))
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
+                    .padding(horizontal = 20.dp, vertical = 7.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
-                Row(
-                    Modifier.padding(start = 13.dp, end = 5.dp, top = 3.dp, bottom = 3.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                if (!imeVisible) {
+                    if (long != null) {
+                        LongDraftCard(
+                            long, canOpenLong,
+                            onClick = onOpenLong,
+                            onLongClick = onDeleteLongDraft,
+                        )
+                    }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Spacer(Modifier.weight(1f))
+                        FilterRow(
+                            ready = ready || state.cacheLoaded,
+                            includeArchived = includeArchived,
+                            pinnedOnly = pinnedOnly,
+                            onIncludeArchived = onIncludeArchived,
+                            onPinnedOnly = onPinnedOnly,
+                        )
+                    }
+                }
+                if (state.replyTo != null) {
+                    ReplyComposerStrip(
+                        target = replyTarget,
+                        missing = replyMissing,
+                        onCancel = onCancelReply,
+                    )
+                }
+                if (state.pending && !state.busy) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("送信結果を確認できません", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = colors.tertiary)
+                        TextButton(onClick = onRelease, enabled = !state.busy) { Text("下書きを編集") }
+                    }
+                }
+                MoteComposer(
+                    state.draft,
+                    onDraft,
+                    when {
+                        editing -> "メモを編集…"
+                        else -> "メモを書く…"
+                    },
+                    enabled = state.draftAvailable,
+                    readOnly = state.pending || state.busy,
+                    focusRequester = focusRequester,
+                    translucent = false,
+                    actionCount = if (editing || long == null) 2 else 1,
                 ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("長文の下書き", style = MaterialTheme.typography.labelLarge)
-                        val preview = long.draft.ifBlank { long.body }.trimStart()
-                        if (preview.isNotEmpty()) {
-                            Text(
-                                preview, color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            )
+                    AnimatedContent(
+                        targetState = editing,
+                        transitionSpec = { fadeIn(tween(160)) togetherWith fadeOut(tween(120)) },
+                        label = "composer edit action",
+                    ) { isEditing ->
+                        if (isEditing) {
+                            IconButton(onClick = onCancelEdit, enabled = !state.busy && !state.pending) {
+                                MoteIcon(MoteGlyph.Close, "編集をやめる", Modifier.size(20.dp), colors.onSurfaceVariant)
+                            }
+                        } else if (long == null) {
+                            IconButton(onClick = onOpenLong, enabled = canOpenLong) {
+                                MoteIcon(
+                                    MoteGlyph.Expand,
+                                    "長文を書く",
+                                    Modifier.size(20.dp),
+                                    colors.onSurfaceVariant.copy(alpha = if (canOpenLong) 1f else .45f),
+                                )
+                            }
                         }
                     }
-                    TextButton(onClick = onOpenLong, enabled = canOpenLong) { Text("再開") }
+                    MoteSendButton(canSubmit, if (editing) "保存" else if (state.pending) "再送" else "送信", onSubmit)
                 }
             }
         }
-        AnimatedVisibility(
-            visible = completedVisible,
-            enter = if (animateCompletion) fadeIn(MaterialTheme.motionScheme.fastEffectsSpec()) else EnterTransition.None,
-            exit = if (animateCompletion) fadeOut(MaterialTheme.motionScheme.fastEffectsSpec()) else ExitTransition.None,
-        ) { LongCompletionNotice(state.longCompletion, animateCompletion) }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            Spacer(Modifier.weight(1f))
-            SingleChoiceSegmentedButtonRow {
-                listOf("Inbox", "All").forEachIndexed { index, label ->
-                    SegmentedButton(
-                        selected = includeArchived == (index == 1), onClick = { onIncludeArchived(index == 1) },
-                        enabled = ready, shape = SegmentedButtonDefaults.itemShape(index, 2),
-                        colors = SegmentedButtonDefaults.colors(
-                            activeContainerColor = colors.primaryContainer, activeContentColor = colors.onPrimaryContainer,
-                            activeBorderColor = colors.outlineVariant, inactiveContainerColor = colors.surfaceContainerLow,
-                            inactiveContentColor = colors.onSurfaceVariant, inactiveBorderColor = colors.outlineVariant,
-                        ),
-                        icon = {},
-                    ) { Text(label, maxLines = 1) }
+    }
+}
+
+@Composable
+private fun LongDraftCard(
+    state: LongCaptureUi,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
+            .combinedClickable(
+                enabled = enabled,
+                onClickLabel = "長文を再開",
+                onLongClickLabel = "下書きの操作",
+                onClick = onClick,
+                onLongClick = onLongClick,
+            ),
+        shape = RoundedCornerShape(18.dp),
+        color = colors.surfaceContainerHigh,
+    ) {
+        Row(
+            Modifier.padding(start = 13.dp, end = 13.dp, top = 8.dp, bottom = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            MoteIcon(MoteGlyph.Edit, null, Modifier.size(17.dp), colors.primary)
+            Column(Modifier.weight(1f)) {
+                Text("長文の下書き", style = MaterialTheme.typography.labelLarge)
+                val preview = state.draft.ifBlank { state.body }.trimStart()
+                if (preview.isNotEmpty()) {
+                    Text(
+                        preview, color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
-            FilledTonalIconToggleButton(
-                checked = pinnedOnly, onCheckedChange = onPinnedOnly, enabled = ready,
-                shapes = IconButtonDefaults.toggleableShapes(),
-                colors = IconButtonDefaults.filledTonalIconToggleButtonColors(
-                    containerColor = colors.surfaceContainer, contentColor = colors.onSurfaceVariant,
-                    checkedContainerColor = colors.primaryContainer, checkedContentColor = colors.primary,
+            Text("再開", style = MaterialTheme.typography.labelLarge, color = colors.primary)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun FilterRow(
+    ready: Boolean,
+    includeArchived: Boolean,
+    pinnedOnly: Boolean,
+    onIncludeArchived: (Boolean) -> Unit,
+    onPinnedOnly: (Boolean) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    SingleChoiceSegmentedButtonRow {
+        listOf("Inbox", "All").forEachIndexed { index, label ->
+            SegmentedButton(
+                selected = includeArchived == (index == 1), onClick = { onIncludeArchived(index == 1) },
+                enabled = ready, shape = SegmentedButtonDefaults.itemShape(index, 2),
+                colors = SegmentedButtonDefaults.colors(
+                    activeContainerColor = colors.primaryContainer, activeContentColor = colors.onPrimaryContainer,
+                    activeBorderColor = colors.outlineVariant, inactiveContainerColor = colors.surfaceContainerLow,
+                    inactiveContentColor = colors.onSurfaceVariant, inactiveBorderColor = colors.outlineVariant,
                 ),
-            ) { MoteIcon(MoteGlyph.Pin, "ピン留めのみ", Modifier.size(19.dp)) }
+                icon = {},
+            ) { Text(label, maxLines = 1) }
         }
-        if (state.pending && !state.busy) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("送信結果を確認できません", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = colors.tertiary)
-                TextButton(onClick = onRelease, enabled = !state.busy) { Text("下書きを編集") }
+    }
+    FilledTonalIconToggleButton(
+        checked = pinnedOnly, onCheckedChange = onPinnedOnly, enabled = ready,
+        colors = IconButtonDefaults.filledTonalIconToggleButtonColors(
+            containerColor = colors.surfaceContainer, contentColor = colors.onSurfaceVariant,
+            checkedContainerColor = colors.primaryContainer, checkedContentColor = colors.primary,
+        ),
+    ) { MoteIcon(MoteGlyph.Pin, "ピン留めのみ", Modifier.size(19.dp)) }
+}
+
+@Composable
+private fun ReplyComposerStrip(target: Capture?, missing: Boolean, onCancel: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(15.dp),
+        color = colors.surfaceContainerHigh,
+    ) {
+        Row(
+            Modifier.padding(start = 11.dp, end = 3.dp, top = 3.dp, bottom = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Box(Modifier.width(2.dp).height(24.dp).background(colors.primary.copy(alpha = .6f), CircleShape))
+            MoteIcon(MoteGlyph.Reply, null, Modifier.size(14.dp), colors.primary)
+            Text(
+                if (missing || target == null) "元のメモは見つかりません" else previewOf(target.body),
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant,
+            )
+            IconButton(onClick = onCancel, modifier = Modifier.size(34.dp)) {
+                MoteIcon(MoteGlyph.Close, "返信をやめる", Modifier.size(16.dp), colors.onSurfaceVariant)
             }
-        }
-        MoteComposer(state.draft, onDraft, "メモを書く…", enabled = state.draftAvailable, readOnly = state.pending || state.busy) {
-            if (state.longCapture == null) {
-                IconButton(onClick = onOpenLong, enabled = canOpenLong) {
-                    MoteIcon(MoteGlyph.Expand, "長文を書く", Modifier.size(20.dp), colors.onSurfaceVariant.copy(alpha = if (canOpenLong) 1f else .45f))
-                }
-            }
-            MoteSendButton(canSubmit, if (state.pending) "再送" else "送信", onSubmit)
         }
     }
 }
 
-@Composable
-private fun MoteDock(content: @Composable () -> Unit) {
-    val colors = MaterialTheme.colorScheme
-    Surface(color = colors.background) {
-        Box(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom)),
-            contentAlignment = Alignment.Center) {
-            Column(Modifier.widthIn(max = 680.dp).fillMaxWidth().padding(horizontal = 20.dp, vertical = 7.dp),
-                verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                content()
-            }
-        }
-    }
-}
-
-@Composable
-private fun LongCompletionNotice(sequence: Long, animate: Boolean) {
-    val colors = MaterialTheme.colorScheme
-    val progress = remember { Animatable(1f) }
-    LaunchedEffect(sequence, animate) {
-        if (animate) {
-            progress.snapTo(0f)
-            progress.animateTo(1f, tween(durationMillis = 360, easing = LinearOutSlowInEasing))
-        }
-    }
-    Box(Modifier.fillMaxWidth().drawWithContent {
-        drawContent()
-        val frame = progress.value
-        val alpha = (1f - frame) * (frame * 5f).coerceAtMost(1f)
-        if (animate && alpha > 0f) {
-            for (index in 0..2) {
-                drawCircle(
-                    color = colors.primary, alpha = alpha,
-                    radius = (1.5f + index / 3f).dp.toPx(),
-                    center = Offset(size.width - (22 + index * 10).dp.toPx() - 14.dp.toPx() * frame,
-                        15.dp.toPx() - (12 + index * 4).dp.toPx() * frame),
-                )
-            }
-        }
-    }.padding(top = 9.dp)) {
-        Surface(Modifier.fillMaxWidth(), shape = CircleShape, color = colors.primaryContainer, contentColor = colors.onPrimaryContainer) {
-            Row(Modifier.padding(horizontal = 14.dp, vertical = 9.dp).semantics { liveRegion = LiveRegionMode.Polite },
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MoteIcon(MoteGlyph.Check, null, Modifier.size(17.dp), colors.primary)
-                Text("長文を保存しました", style = MaterialTheme.typography.labelMedium)
-            }
-        }
-    }
-}
+private data class ExpandAnchor(val id: String, val top: Int, val firstIndex: Int, val firstOffset: Int)
 
 @Composable
 private fun CaptureTimeline(
-    captures: List<Capture>, modifier: Modifier, enabled: Boolean, updating: Set<String>, archiveHaptics: Boolean,
-    onSelect: (Capture) -> Unit, onArchive: (Capture) -> Unit, onPin: (Capture) -> Unit,
-    onCopy: (Capture) -> Unit, onShare: (Capture) -> Unit, onDelete: (Capture) -> Unit,
+    captures: List<Capture>,
+    listState: LazyListState,
+    backdrop: MoteBackdrop,
+    topPadding: Dp,
+    bottomPadding: Dp,
+    enabled: Boolean,
+    updating: Set<String>,
+    archiveHaptics: Boolean,
+    selecting: Boolean,
+    selectedIds: List<String>,
+    expandedIds: List<String>,
+    replyTo: String?,
+    byId: Map<String, Capture>,
+    highlightId: String?,
+    canReply: Boolean,
+    onSelect: (Capture) -> Unit,
+    onReply: (Capture) -> Unit,
+    onArchive: (Capture) -> Unit,
+    onPin: (Capture) -> Unit,
+    onCopy: (Capture) -> Unit,
+    onShare: (Capture) -> Unit,
+    onDelete: (Capture) -> Unit,
+    onEdit: (Capture) -> Unit,
+    onEnterSelection: (Capture) -> Unit,
+    onToggleSelection: (Capture) -> Unit,
+    onToggleExpand: (Capture) -> Unit,
+    onOpenReplyTarget: (Capture) -> Unit,
+    onMenu: (Capture) -> Unit,
 ) {
     val zone = ZoneId.systemDefault()
     val today = LocalDate.now(zone)
     val days = remember(captures, zone) {
         captures.asReversed().groupBy { it.createdAtMicros?.atZone(zone)?.toLocalDate() }
     }
-    val listState = rememberLazyListState()
-    val latest = captures.last().id
+    val gaps = remember(captures, zone) {
+        val result = HashMap<String, Long?>()
+        var previous: Long? = null
+        var previousDay: LocalDate? = null
+        for (capture in captures) {
+            val time = capture.createdAtMicros
+            val day = time?.atZone(zone)?.toLocalDate()
+            result[capture.id] = if (time != null && previous != null && day == previousDay) time - previous else null
+            if (time != null) {
+                previous = time
+                previousDay = day
+            } else {
+                previous = null
+                previousDay = null
+            }
+        }
+        result
+    }
+    val latest = captures.lastOrNull()?.id
     val followLatest = listState.firstVisibleItemIndex == 0 &&
         listState.firstVisibleItemScrollOffset == 0 && !listState.isScrollInProgress
     LaunchedEffect(latest) {
         if (followLatest) listState.scrollToItem(0)
     }
-    val horizontal = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal).asPaddingValues()
-    Box(modifier.fillMaxWidth().padding(horizontal), contentAlignment = Alignment.Center) {
-        LazyColumn(
-            Modifier.widthIn(max = 680.dp).fillMaxSize(),
-            state = listState,
-            reverseLayout = true,
-            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 5.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.Bottom),
+    Box(
+        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        Box(
+            Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)),
+            contentAlignment = Alignment.TopCenter,
         ) {
-            days.forEach { (day, entries) ->
-                items(entries, key = Capture::id, contentType = { "capture" }) { capture ->
-                    CaptureRow(capture, enabled && capture.id !in updating, archiveHaptics, onSelect, onArchive, onPin, onCopy, onShare, onDelete)
+            LazyColumn(
+                Modifier.widthIn(max = 680.dp).fillMaxSize(),
+                state = listState,
+                reverseLayout = true,
+                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = topPadding, bottom = bottomPadding),
+                verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.Bottom),
+            ) {
+                days.forEach { (day, entries) ->
+                    items(entries, key = Capture::id, contentType = { "capture" }) { capture ->
+                        CaptureRow(
+                            capture = capture,
+                            enabled = enabled && capture.id !in updating,
+                            canReply = canReply && capture.id !in updating,
+                            archiveHaptics = archiveHaptics,
+                            gapBeforeMicros = gaps[capture.id],
+                            selecting = selecting,
+                            selected = capture.id in selectedIds,
+                            expanded = capture.id in expandedIds,
+                            isReplyTarget = replyTo == capture.id,
+                            replyTarget = capture.replyTo?.let(byId::get),
+                            highlighted = capture.id == highlightId,
+                            onSelect = onSelect,
+                            onReply = onReply,
+                            onArchive = onArchive,
+                            onPin = onPin,
+                            onCopy = onCopy,
+                            onShare = onShare,
+                            onDelete = onDelete,
+                            onEdit = onEdit,
+                            onEnterSelection = onEnterSelection,
+                            onToggleSelection = onToggleSelection,
+                            onToggleExpand = onToggleExpand,
+                            onOpenReplyTarget = onOpenReplyTarget,
+                            onMenu = onMenu,
+                        )
+                    }
+                    item(key = "day:$day", contentType = "day") { TimelineDay(day, today) }
                 }
-                item(key = "day:$day", contentType = "day") { TimelineDay(day, today) }
             }
         }
     }
+}
+
+private fun timelineItemIndex(captures: List<Capture>, targetId: String, zone: ZoneId): Int? {
+    val days = captures.asReversed().groupBy { it.createdAtMicros?.atZone(zone)?.toLocalDate() }
+    var index = 0
+    for ((_, entries) in days) {
+        for (capture in entries) {
+            if (capture.id == targetId) return index
+            index++
+        }
+        index++
+    }
+    return null
 }
 
 @Composable
@@ -594,127 +1352,282 @@ private fun TimelineDay(day: LocalDate?, today: LocalDate) {
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun CaptureRow(
-    capture: Capture, enabled: Boolean, archiveHaptics: Boolean, onSelect: (Capture) -> Unit, onArchive: (Capture) -> Unit,
-    onPin: (Capture) -> Unit, onCopy: (Capture) -> Unit, onShare: (Capture) -> Unit, onDelete: (Capture) -> Unit,
+    capture: Capture,
+    enabled: Boolean,
+    canReply: Boolean,
+    archiveHaptics: Boolean,
+    gapBeforeMicros: Long?,
+    selecting: Boolean,
+    selected: Boolean,
+    expanded: Boolean,
+    highlighted: Boolean,
+    isReplyTarget: Boolean,
+    replyTarget: Capture?,
+    onSelect: (Capture) -> Unit,
+    onReply: (Capture) -> Unit,
+    onArchive: (Capture) -> Unit,
+    onPin: (Capture) -> Unit,
+    onCopy: (Capture) -> Unit,
+    onShare: (Capture) -> Unit,
+    onDelete: (Capture) -> Unit,
+    onEdit: (Capture) -> Unit,
+    onEnterSelection: (Capture) -> Unit,
+    onToggleSelection: (Capture) -> Unit,
+    onToggleExpand: (Capture) -> Unit,
+    onOpenReplyTarget: (Capture) -> Unit,
+    onMenu: (Capture) -> Unit,
 ) {
-    var menu by remember { mutableStateOf(false) }
+    var foldable by remember(capture.id, capture.body) { mutableStateOf(false) }
     val colors = MaterialTheme.colorScheme
+    val highlightAmount by animateFloatAsState(
+        if (highlighted) 1f else 0f,
+        tween(durationMillis = 260),
+        label = "reply highlight",
+    )
     val haptic = LocalHapticFeedback.current
-    val leftSwipe = if (LocalLayoutDirection.current == LayoutDirection.Ltr) SwipeToDismissBoxValue.EndToStart else SwipeToDismissBoxValue.StartToEnd
-    val swipe = remember(capture.archived, leftSwipe) {
-        SwipeToDismissBoxState(SwipeToDismissBoxValue.Settled, positionalThreshold = { width -> (width * .35f) })
+    val layoutDirection = LocalLayoutDirection.current
+    val startToEnd = if (layoutDirection == LayoutDirection.Ltr) SwipeToDismissBoxValue.StartToEnd else SwipeToDismissBoxValue.EndToStart
+    val endToStart = if (layoutDirection == LayoutDirection.Ltr) SwipeToDismissBoxValue.EndToStart else SwipeToDismissBoxValue.StartToEnd
+    val swipe = remember(capture.id) {
+        SwipeToDismissBoxState(SwipeToDismissBoxValue.Settled, positionalThreshold = { width -> width * .32f })
     }
-    LaunchedEffect(swipe.settledValue) {
-        if (swipe.settledValue == leftSwipe) {
-            if (enabled && !menu) {
-                if (archiveHaptics) haptic.performHapticFeedback(HapticFeedbackType.Confirm)
-                onArchive(capture)
+    LaunchedEffect(swipe, swipe.settledValue) {
+        when (swipe.settledValue) {
+            startToEnd -> {
+                if (canReply) onReply(capture)
+                swipe.reset()
             }
-            swipe.reset()
+            endToStart -> {
+                if (enabled) {
+                    if (archiveHaptics) haptic.performHapticFeedback(HapticFeedbackType.Confirm)
+                    onArchive(capture)
+                }
+                swipe.reset()
+            }
+            else -> Unit
         }
     }
-    val armed = swipe.targetValue == leftSwipe
-    val swipeColor by animateColorAsState(if (armed) colors.secondary else colors.secondaryContainer,
-        MaterialTheme.motionScheme.fastEffectsSpec(), label = "archive threshold")
+    val replyArmed = swipe.targetValue == startToEnd
+    val archiveArmed = swipe.targetValue == endToStart
+    val rawOffset = runCatching { swipe.requireOffset() }.getOrDefault(0f)
+    val draggingToReply = if (layoutDirection == LayoutDirection.Ltr) rawOffset > 0f else rawOffset < 0f
+    val dragging = kotlin.math.abs(rawOffset) > 0.5f
+    val showReply = dragging && (replyArmed || (!archiveArmed && swipe.progress > .01f && draggingToReply))
+    val showArchive = dragging && (archiveArmed || (!replyArmed && swipe.progress > .01f && !draggingToReply))
+    val showSwipeBackground = showReply || showArchive
+    val swipeColor by animateColorAsState(
+        when {
+            showReply -> colors.primaryContainer
+            showArchive -> colors.secondaryContainer
+            else -> Color.Transparent
+        },
+        MaterialTheme.motionScheme.fastEffectsSpec(),
+        label = "swipe action",
+    )
     val shape = if (capture.isLong) RoundedCornerShape(18.dp) else
         RoundedCornerShape(topStart = 17.dp, topEnd = 17.dp, bottomEnd = 7.dp, bottomStart = 17.dp)
-    val preview = remember(capture.body) {
-        val body = capture.body.trimStart()
-        // The row has at most three lines. Keep the rest of a long body out of text layout.
-        if (body.length <= 640) body.ifBlank { "（本文なし）" }
-        else body.take(if (body[640].isLowSurrogate()) 639 else 640) + "…"
+    val preview = remember(capture.body, capture.isLong) {
+        capture.body.trimStart().ifBlank { "（本文なし）" }
     }
-    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-        val fraction = when {
-            capture.isLong -> 1f
-            preview.length <= 13 -> .64f
-            preview.length <= 25 -> .79f
-            else -> .93f
-        }
-        SwipeToDismissBox(
-            state = swipe, modifier = Modifier.fillMaxWidth(fraction).clip(shape),
-            enableDismissFromStartToEnd = leftSwipe == SwipeToDismissBoxValue.StartToEnd,
-            enableDismissFromEndToStart = leftSwipe == SwipeToDismissBoxValue.EndToStart,
-            gesturesEnabled = enabled && !menu,
-            backgroundContent = {
-                Box(Modifier.fillMaxSize().background(swipeColor).padding(horizontal = 14.dp).clearAndSetSemantics {},
-                    contentAlignment = if (leftSwipe == SwipeToDismissBoxValue.EndToStart) Alignment.CenterEnd else Alignment.CenterStart) {
-                    val tint = if (armed) colors.onSecondary else colors.onSecondaryContainer
-                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
-                        MoteIcon(if (capture.archived) MoteGlyph.Restore else MoteGlyph.Archive, null, Modifier.size(18.dp), tint)
-                        Text(archiveLabel(capture), style = MaterialTheme.typography.labelMedium, color = tint)
-                    }
-                }
-            },
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val gutter = 44.dp
+        val bubbleMaxWidth = (maxWidth - gutter - 6.dp) * MaxTextWidthFraction
+        Box(
+            Modifier.fillMaxWidth().padding(top = gapPadding(gapBeforeMicros)),
+            contentAlignment = Alignment.BottomEnd,
         ) {
-            Box(Modifier.fillMaxWidth()) {
-                val outline = if (capture.isLong) Modifier.border(1.dp, colors.outlineVariant, shape) else Modifier
-                Column(
-                    Modifier.fillMaxWidth().background(if (capture.isLong) colors.surfaceContainer else colors.surfaceContainerHigh)
-                        .then(outline)
-                        .combinedClickable(
-                            onClickLabel = if (capture.isLong) "長文を開く" else "メモを開く",
-                            onClick = { onSelect(capture) },
-                            onLongClickLabel = "メモの操作",
-                            onLongClick = { menu = true },
-                        ).padding(horizontal = 13.dp, vertical = if (capture.isLong) 10.dp else 7.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    if (capture.isLong) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text(if (capture.sessionOpen) "長文・下書き" else "長文",
-                                Modifier.weight(1f), color = colors.primary, style = MaterialTheme.typography.labelSmall)
-                            CaptureRowMetadata(capture)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                CaptureTimeGutter(capture, selected, Modifier.width(gutter))
+                Box(Modifier.widthIn(max = bubbleMaxWidth)) {
+                    SwipeToDismissBox(
+                state = swipe,
+                modifier = Modifier.clip(shape),
+                enableDismissFromStartToEnd = canReply && !selecting,
+                enableDismissFromEndToStart = enabled && !selecting,
+                gesturesEnabled = !selecting,
+                backgroundContent = {
+                    if (showSwipeBackground) {
+                        Box(
+                            Modifier.fillMaxSize().background(swipeColor).padding(horizontal = 15.dp).clearAndSetSemantics {},
+                            contentAlignment = if (showReply) Alignment.CenterStart else Alignment.CenterEnd,
+                        ) {
+                            val tint = if (showReply) colors.onPrimaryContainer else colors.onSecondaryContainer
+                            MoteIcon(
+                                if (showReply) MoteGlyph.Reply else if (capture.archived) MoteGlyph.Restore else MoteGlyph.Archive,
+                                if (showReply) "返信" else archiveLabel(capture),
+                                Modifier.size(18.dp),
+                                tint,
+                            )
                         }
                     }
-                    Text(preview, style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 3, overflow = TextOverflow.Ellipsis)
-                    if (!capture.isLong) {
-                        Box(Modifier.align(Alignment.End)) { CaptureRowMetadata(capture) }
+                },
+            ) {
+                Box(contentAlignment = Alignment.CenterEnd) {
+                    Surface(
+                        modifier = Modifier
+                            .then(if (capture.isLong) Modifier.fillMaxWidth() else Modifier.widthIn(max = bubbleMaxWidth))
+                            .clip(shape)
+                            .combinedClickable(
+                                enabled = !(selecting && capture.isLong),
+                                onClickLabel = when {
+                                    selecting -> "選択"
+                                    capture.isLong -> "長文を開く"
+                                    expanded -> "詳細を開く"
+                                    foldable -> "全文を表示"
+                                    else -> "メモを開く"
+                                },
+                                onClick = {
+                                    when {
+                                        selecting -> if (!capture.isLong) onToggleSelection(capture)
+                                        capture.isLong -> onSelect(capture)
+                                        expanded -> onSelect(capture)
+                                        foldable -> onToggleExpand(capture)
+                                        else -> onSelect(capture)
+                                    }
+                                },
+                                onLongClickLabel = if (selecting) "選択を切り替える" else "メモの操作",
+                                onLongClick = {
+                                    if (selecting) {
+                                        if (!capture.isLong) onToggleSelection(capture)
+                                    } else {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onMenu(capture)
+                                    }
+                                },
+                            )
+                            .then(if (isReplyTarget) Modifier.border(1.5.dp, colors.primary, shape) else Modifier),
+                        shape = shape,
+                        color = when {
+                            selecting && selected -> colors.primaryContainer
+                            capture.isLong -> colors.surfaceContainer
+                            else -> colors.surfaceContainerHigh
+                        },
+                        border = when {
+                            highlighted || highlightAmount > .01f -> BorderStroke(1.5.dp, colors.primary.copy(alpha = highlightAmount))
+                            capture.isLong -> BorderStroke(1.dp, colors.outlineVariant)
+                            else -> null
+                        },
+                    ) {
+                        Column(
+                            Modifier.padding(horizontal = 12.dp, vertical = if (capture.isLong) 10.dp else 7.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            if (capture.isLong) {
+                                Text(
+                                    if (capture.sessionOpen) "長文・下書き" else "長文",
+                                    color = colors.primary, style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
+                            if (capture.replyTo != null) {
+                                ReplyQuote(
+                                    target = replyTarget,
+                                    onOpen = if (selecting) null else replyTarget?.let { target -> { onOpenReplyTarget(target) } },
+                                )
+                            }
+                            if (capture.isLong) {
+                                Text(
+                                    preview,
+                                    style = MaterialTheme.typography.bodyMedium.copy(lineBreak = BubbleLineBreak),
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            } else {
+                                Text(
+                                    text = preview.ifBlank { "（本文なし）" },
+                                    style = MaterialTheme.typography.bodyMedium.copy(lineBreak = BubbleLineBreak),
+                                    maxLines = if (expanded) Int.MAX_VALUE else CollapsedShortLines,
+                                    overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
+                                    onTextLayout = { layout -> if (!expanded) foldable = layout.hasVisualOverflow },
+                                )
+                                if (!selecting) {
+                                    when {
+                                        expanded -> {
+                                            TextButton(
+                                                onClick = { onToggleExpand(capture) },
+                                                modifier = Modifier.align(Alignment.End).heightIn(min = 28.dp),
+                                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                            ) {
+                                                MoteIcon(MoteGlyph.Fold, null, Modifier.size(15.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("折りたたむ", style = MaterialTheme.typography.labelSmall)
+                                            }
+                                        }
+                                        foldable -> {
+                                            IconButton(
+                                                onClick = { onToggleExpand(capture) },
+                                                modifier = Modifier.align(Alignment.End).size(28.dp),
+                                            ) { MoteIcon(MoteGlyph.Unfold, "全文を表示", Modifier.size(16.dp), colors.primary) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                CaptureMenu(menu, { menu = false }, capture, enabled, onArchive, onPin, onCopy, onShare, onDelete)
             }
+        }
         }
     }
 }
+}
 
 @Composable
-private fun CaptureRowMetadata(capture: Capture) {
+private fun ReplyQuote(target: Capture?, onOpen: (() -> Unit)?) {
     val colors = MaterialTheme.colorScheme
-    Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(capture.createdAtMicros?.atZone(ZoneId.systemDefault())?.format(shortTime) ?: "日時不明",
-            color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
-        if (capture.archived) MoteIcon(MoteGlyph.Archive, "アーカイブ済み", Modifier.size(13.dp), colors.onSurfaceVariant)
-        if (capture.pinned) MoteIcon(MoteGlyph.Pin, "ピン留め済み", Modifier.size(13.dp), colors.primary)
+    Row(
+        Modifier.fillMaxWidth()
+            .heightIn(min = 44.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .then(if (onOpen != null) Modifier.clickable(onClick = onOpen) else Modifier)
+            .padding(horizontal = 2.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            Modifier.size(28.dp).clip(CircleShape).background(colors.primaryContainer.copy(alpha = .45f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            MoteIcon(
+                MoteGlyph.Reply,
+                if (target == null) "返信元が見つかりません" else "元のメッセージを表示",
+                Modifier.size(15.dp),
+                if (target == null) colors.onSurfaceVariant.copy(alpha = .6f) else colors.primary,
+            )
+        }
+        Text(
+            text = if (target == null) "元のメモは見つかりません" else previewOf(target.body),
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (target == null) colors.onSurfaceVariant.copy(alpha = .7f) else colors.onSurfaceVariant,
+        )
     }
 }
 
 @Composable
-private fun CaptureMenu(
-    visible: Boolean, close: () -> Unit, capture: Capture, enabled: Boolean,
-    onArchive: (Capture) -> Unit, onPin: (Capture) -> Unit, onCopy: (Capture) -> Unit,
-    onShare: (Capture) -> Unit, onDelete: (Capture) -> Unit,
-) {
-    DropdownMenu(visible, close) {
-        MenuAction(MoteGlyph.Pin, pinLabel(capture), enabled) { close(); onPin(capture) }
-        MenuAction(MoteGlyph.Copy, "コピー", capture.body.isNotEmpty()) { close(); onCopy(capture) }
-        MenuAction(MoteGlyph.Share, "共有", capture.body.isNotEmpty()) { close(); onShare(capture) }
-        MenuAction(if (capture.archived) MoteGlyph.Restore else MoteGlyph.Archive, archiveLabel(capture), enabled) { close(); onArchive(capture) }
-        HorizontalDivider(Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant)
-        MenuAction(MoteGlyph.Delete, "削除…", enabled && !capture.sessionOpen, destructive = true) { close(); onDelete(capture) }
-    }
-}
-
-@Composable
-private fun MenuAction(glyph: MoteGlyph, label: String, enabled: Boolean = true, destructive: Boolean = false, action: () -> Unit) {
+private fun CaptureTimeGutter(capture: Capture, selected: Boolean, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
-    val tint = if (destructive && enabled) colors.error else colors.onSurfaceVariant.copy(alpha = if (enabled) 1f else .38f)
-    DropdownMenuItem(
-        text = { if (destructive && enabled) Text(label, color = colors.error) else Text(label) },
-        onClick = action, enabled = enabled,
-        leadingIcon = { MoteIcon(glyph, null, Modifier.size(19.dp), tint) },
-    )
+    val time = capture.createdAtMicros?.atZone(ZoneId.systemDefault())?.format(shortTime) ?: "—"
+    val markers = capture.archived || capture.pinned || capture.replyTo != null || selected
+    Column(
+        modifier.padding(bottom = 7.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        if (markers) {
+            Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (capture.archived) MoteIcon(MoteGlyph.Archive, "アーカイブ済み", Modifier.size(9.dp), colors.onSurfaceVariant)
+                if (capture.pinned) MoteIcon(MoteGlyph.Pin, "ピン留め済み", Modifier.size(9.dp), colors.primary)
+                if (capture.replyTo != null) MoteIcon(MoteGlyph.Reply, "返信", Modifier.size(9.dp), colors.primary)
+                if (selected) MoteIcon(MoteGlyph.Check, "選択中", Modifier.size(9.dp), colors.primary)
+            }
+        }
+        Text(time, color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+    }
 }
 
 @Composable
@@ -731,19 +1644,44 @@ private fun CaptureMetadata(capture: Capture) {
 }
 
 @Composable
-private fun CaptureDetail(capture: Capture, modifier: Modifier) {
-    BoxWithSafeHorizontal(modifier) {
-        val body = capture.body.ifBlank { "（本文なし）" }
-        val slices = remember(body, capture.isLong) { if (capture.isLong) threadSlices(body) else emptyList() }
-        SelectionContainer(Modifier.align(Alignment.TopCenter).widthIn(max = 680.dp).fillMaxSize()) {
-            LazyColumn(contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp)) {
+private fun CaptureDetail(
+    capture: Capture,
+    byId: Map<String, Capture>,
+    backdrop: MoteBackdrop,
+    topPadding: Dp,
+    bottomPadding: Dp,
+    onOpenReplyTarget: (Capture) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val body = capture.body.ifBlank { "（本文なし）" }
+    val slices = remember(body, capture.isLong) { if (capture.isLong) threadSlices(body) else emptyList() }
+    val replyTarget = capture.replyTo?.let(byId::get)
+    Box(
+        Modifier.fillMaxSize().background(colors.background)
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        SelectionContainer(Modifier.widthIn(max = 680.dp).fillMaxSize()) {
+            LazyColumn(
+                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = topPadding, bottom = bottomPadding),
+            ) {
                 item(key = "metadata") {
                     Column(Modifier.padding(bottom = 14.dp)) { CaptureMetadata(capture) }
+                }
+                if (capture.replyTo != null) {
+                    item(key = "reply") {
+                        Box(Modifier.padding(bottom = 14.dp)) {
+                            ReplyQuote(
+                                target = replyTarget,
+                                onOpen = replyTarget?.let { target -> { onOpenReplyTarget(target) } },
+                            )
+                        }
+                    }
                 }
                 if (capture.isLong) {
                     items(slices, key = { it.start }) { slice -> LongCaptureThreadSlice(body, slice) }
                 } else {
-                    item { Text(body, style = MaterialTheme.typography.bodyLarge) }
+                    item(key = "body") { Text(body, style = MaterialTheme.typography.bodyLarge.copy(lineBreak = BubbleLineBreak), color = colors.onSurface) }
                 }
             }
         }
@@ -751,17 +1689,191 @@ private fun CaptureDetail(capture: Capture, modifier: Modifier) {
 }
 
 @Composable
-private fun DetailActions(capture: Capture, enabled: Boolean, onArchive: () -> Unit, onPin: () -> Unit) {
-    MoteDock {
-        Row(Modifier.fillMaxWidth().padding(top = 3.dp), horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onPin, enabled = enabled) {
-                MoteIcon(MoteGlyph.Pin, null, Modifier.size(17.dp)); Spacer(Modifier.width(7.dp)); Text(pinLabel(capture))
-            }
-            TextButton(onClick = onArchive, enabled = enabled) {
-                MoteIcon(if (capture.archived) MoteGlyph.Restore else MoteGlyph.Archive, null, Modifier.size(17.dp))
-                Spacer(Modifier.width(7.dp)); Text(archiveLabel(capture))
+private fun DetailActions(
+    capture: Capture,
+    canMutate: Boolean,
+    inFlight: Boolean,
+    onCopy: () -> Unit,
+    onShare: () -> Unit,
+    onArchive: () -> Unit,
+    onPin: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    val enabled = canMutate && !inFlight
+    Box(modifier.fillMaxWidth().background(colors.surfaceContainer)) {
+        Row(
+            Modifier.fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom))
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            DetailAction(MoteGlyph.Archive, if (capture.archived) "戻す" else "アーカイブ", enabled, onArchive)
+            DetailAction(MoteGlyph.Share, "共有", capture.body.isNotEmpty(), onShare)
+            DetailAction(MoteGlyph.Pin, if (capture.pinned) "解除" else "ピン", enabled, onPin)
+            DetailAction(MoteGlyph.Copy, "コピー", capture.body.isNotEmpty(), onCopy)
+        }
+    }
+}
+
+@Composable
+private fun RowScope.DetailAction(glyph: MoteGlyph, label: String, enabled: Boolean, onClick: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Column(
+        Modifier.weight(1f).clip(RoundedCornerShape(14.dp)).clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        MoteIcon(glyph, null, Modifier.size(20.dp), if (enabled) colors.onSurfaceVariant else colors.onSurfaceVariant.copy(alpha = .38f))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (enabled) colors.onSurface else colors.onSurfaceVariant.copy(alpha = .38f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+@Composable
+private fun SelectionDock(
+    count: Int,
+    canPush: Boolean,
+    onCancel: () -> Unit,
+    onPush: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    Box(
+        modifier.fillMaxWidth().background(
+            Brush.verticalGradient(listOf(Color.Transparent, colors.background)),
+        ),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        Row(
+            Modifier.fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom))
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
+                .heightIn(min = 62.dp)
+                .padding(start = 4.dp, end = 10.dp, bottom = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            IconButton(onClick = onCancel) { MoteIcon(MoteGlyph.Close, "選択をやめる") }
+            Text("${count}件", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+            TextButton(onClick = onPush, enabled = canPush) {
+                MoteIcon(MoteGlyph.Expand, null, Modifier.size(17.dp))
+                Spacer(Modifier.width(5.dp))
+                Text("長文へ")
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CaptureActionSheet(
+    capture: Capture,
+    enabled: Boolean,
+    canReply: Boolean,
+    onDismiss: () -> Unit,
+    onReply: () -> Unit,
+    onEdit: () -> Unit,
+    onDetail: () -> Unit,
+    onSelect: () -> Unit,
+    onPin: () -> Unit,
+    onCopy: () -> Unit,
+    onShare: () -> Unit,
+    onArchive: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var acting by remember { mutableStateOf(false) }
+    fun act(action: () -> Unit) {
+        if (acting) return
+        acting = true
+        onDismiss()
+        action()
+    }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        sheetMaxWidth = 560.dp,
+        scrimColor = Color.Black.copy(alpha = .45f),
+        containerColor = colors.surfaceContainer,
+        dragHandle = { androidx.compose.material3.BottomSheetDefaults.DragHandle() },
+    ) {
+        Column(
+            Modifier.fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 8.dp),
+        ) {
+            Text(
+                previewOf(capture.body),
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.onSurfaceVariant,
+            )
+            SheetAction(MoteGlyph.Reply, "返信", canReply) { act(onReply) }
+            if (!capture.isLong) {
+                SheetAction(MoteGlyph.Edit, "編集", enabled) { act(onEdit) }
+            }
+            SheetAction(MoteGlyph.Copy, "コピー", capture.body.isNotEmpty()) { act(onCopy) }
+            SheetAction(MoteGlyph.Share, "共有", capture.body.isNotEmpty()) { act(onShare) }
+            HorizontalDivider(Modifier.padding(horizontal = 20.dp, vertical = 4.dp), color = colors.outlineVariant)
+            SheetAction(MoteGlyph.Expand, "詳細") { act(onDetail) }
+            if (!capture.isLong) {
+                SheetAction(MoteGlyph.Check, "選択") { act(onSelect) }
+            }
+            HorizontalDivider(Modifier.padding(horizontal = 20.dp, vertical = 4.dp), color = colors.outlineVariant)
+            SheetAction(MoteGlyph.Pin, pinLabel(capture), enabled) { act(onPin) }
+            SheetAction(if (capture.archived) MoteGlyph.Restore else MoteGlyph.Archive, archiveLabel(capture), enabled) { act(onArchive) }
+            HorizontalDivider(Modifier.padding(horizontal = 20.dp, vertical = 4.dp), color = colors.outlineVariant)
+            SheetAction(
+                MoteGlyph.Delete,
+                if (capture.sessionOpen) "下書きを削除…" else "削除…",
+                enabled,
+                destructive = true,
+            ) { act(onDelete) }
+        }
+    }
+}
+
+@Composable
+private fun SheetAction(
+    glyph: MoteGlyph,
+    label: String,
+    enabled: Boolean = true,
+    destructive: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val tint = when {
+        destructive && enabled -> colors.error
+        else -> colors.onSurfaceVariant.copy(alpha = if (enabled) 1f else .38f)
+    }
+    val contentColor = when {
+        !enabled -> colors.onSurface.copy(alpha = .38f)
+        destructive -> colors.error
+        else -> colors.onSurface
+    }
+    Row(
+        Modifier.fillMaxWidth()
+            .heightIn(min = 46.dp)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        MoteIcon(glyph, null, Modifier.size(20.dp), tint)
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = contentColor)
     }
 }
 
@@ -771,21 +1883,29 @@ private fun DeleteCaptureDialog(capture: Capture, enabled: Boolean, onCancel: ()
     AlertDialog(
         onDismissRequest = onCancel,
         icon = { MoteIcon(MoteGlyph.Delete, null, tint = colors.error) },
-        title = { Text("このメモを削除？") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(9.dp)) {
-                Text("以下の 1 件を Harmion から削除します。アーカイブとは異なり、取り消せません。")
-                HorizontalDivider(color = colors.outlineVariant)
-                CaptureMetadata(capture)
-                Text(capture.body.ifBlank { "（本文なし）" }, maxLines = 5, overflow = TextOverflow.Ellipsis, color = colors.onSurface)
-            }
-        },
+        text = { Text("削除しますか？") },
         confirmButton = {
-            Button(onClick = onConfirm, enabled = enabled,
-                colors = ButtonDefaults.buttonColors(containerColor = colors.errorContainer, contentColor = colors.onErrorContainer)) { Text("削除") }
+            Button(
+                onClick = onConfirm,
+                enabled = enabled,
+                colors = ButtonDefaults.buttonColors(containerColor = colors.errorContainer, contentColor = colors.onErrorContainer),
+            ) { Text("削除") }
         },
         dismissButton = { TextButton(onClick = onCancel) { Text("キャンセル") } },
     )
+}
+
+@Composable
+private fun Modifier.dismissInputOnTap(onDismiss: () -> Unit): Modifier {
+    return pointerInput(Unit) {
+        detectTapGestures { onDismiss() }
+    }
+}
+
+private fun previewOf(body: String): String {
+    val singleLine = body.trim().replace('\n', ' ').replace('\r', ' ')
+    if (singleLine.length <= 72) return singleLine.ifBlank { "（本文なし）" }
+    return singleLine.take(if (singleLine[72].isLowSurrogate()) 71 else 72) + "…"
 }
 
 private fun archiveLabel(capture: Capture) = if (capture.archived) "Inbox に戻す" else "アーカイブ"

@@ -4,8 +4,11 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.harmion.sdk.HarmionException
 import org.harmion.sdk.SubscriptionEvent
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CaptureSnapshotsTest {
@@ -60,5 +63,38 @@ class CaptureSnapshotsTest {
         }
         assertEquals("capture_reset_limit", error.code)
         assertEquals(CaptureSnapshot.Loading, result.last())
+    }
+
+    @Test
+    fun readsReplyTargetAndOpenSessionFromAttributes() {
+        val replyTo = "b".repeat(64)
+        val view = JSONObject()
+            .put("edit_token", "token")
+            .put("conflicts", JSONArray())
+            .put("deletion_conflict", false)
+            .put(
+                "content",
+                JSONObject()
+                    .put("id", "id")
+                    .put("body", "返信")
+                    .put("kinds", JSONArray(listOf("capture")))
+                    .put(
+                        "attributes",
+                        JSONArray(
+                            listOf(
+                                JSONObject().put("namespace", "capture").put("key", "reply_to").put("value", replyTo),
+                                JSONObject().put("namespace", "capture").put("key", "session_open").put("value", true),
+                            ),
+                        ),
+                    ),
+            )
+        val result = mutableListOf<CaptureSnapshot>()
+        runBlocking {
+            captureSnapshots(flowOf(SubscriptionEvent.SnapshotEnd(mapOf("id" to view)))).collect(result::add)
+        }
+        val capture = (result.single() as CaptureSnapshot.Ready).items.single()
+        assertEquals(replyTo, capture.replyTo)
+        assertTrue(capture.sessionOpen)
+        assertTrue(capture.isLong)
     }
 }

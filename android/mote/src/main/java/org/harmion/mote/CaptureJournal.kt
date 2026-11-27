@@ -23,7 +23,12 @@ import java.security.DigestInputStream
 import java.security.DigestOutputStream
 import java.security.MessageDigest
 
-internal data class CaptureDraft(val body: String = "", val pending: PendingCapture? = null) {
+internal data class CaptureDraft(
+    val body: String = "",
+    val pending: PendingCapture? = null,
+    /** Target of the reply being composed; null for an ordinary capture. */
+    val replyTo: String? = null,
+) {
     override fun toString(): String = "CaptureDraft(redacted)"
 }
 
@@ -100,7 +105,8 @@ internal class DurableJournalFile(
 
 /** Private, versioned binary envelope; request JSON is sealed and replayed verbatim. */
 internal object CaptureJournalCodec {
-    private const val MAGIC_VERSION = 0x4d4f5401 // MOT + version 1
+    private const val MAGIC_VERSION = 0x4d4f5402 // MOT + version 2 (reply target)
+    private const val LEGACY_VERSION = 0x4d4f5401 // version 1 (no reply target)
     // Bound reads of corrupt lengths. The local draft can exceed the network request limit.
     private const val MAX_TEXT_BYTES = 8 * 1024 * 1024
     private const val MAX_ID_BYTES = 4096
@@ -111,6 +117,7 @@ internal object CaptureJournalCodec {
         val output = DataOutputStream(checksummed)
         output.writeInt(MAGIC_VERSION)
         output.writeText(state.body, MAX_TEXT_BYTES)
+        output.writeOptionalText(state.replyTo)
         val pending = state.pending
         output.writeByte(if (pending == null) 0 else 1)
         if (pending != null) {
@@ -127,8 +134,10 @@ internal object CaptureJournalCodec {
         val digest = MessageDigest.getInstance("SHA-256")
         val checksummed = DigestInputStream(source, digest)
         val input = DataInputStream(checksummed)
-        if (input.readInt() != MAGIC_VERSION) malformed()
+        val version = input.readInt()
+        if (version != MAGIC_VERSION && version != LEGACY_VERSION) malformed()
         val body = input.readText(MAX_TEXT_BYTES)
+        val replyTo = if (version == MAGIC_VERSION) input.readOptionalText() else null
         val pending = when (input.readUnsignedByte()) {
             0 -> null
             1 -> PendingCapture(
@@ -145,7 +154,18 @@ internal object CaptureJournalCodec {
         checksummed.on(false)
         val checksum = ByteArray(expected.size).also(input::readFully)
         if (!MessageDigest.isEqual(checksum, expected) || input.read() != -1) malformed()
-        return CaptureDraft(body, pending)
+        return CaptureDraft(body, pending, replyTo)
+    }
+
+    private fun DataOutputStream.writeOptionalText(value: String?) {
+        writeByte(if (value == null) 0 else 1)
+        if (value != null) writeText(value.nonBlank(), MAX_ID_BYTES)
+    }
+
+    private fun DataInputStream.readOptionalText(): String? = when (readUnsignedByte()) {
+        0 -> null
+        1 -> readText(MAX_ID_BYTES).nonBlank()
+        else -> malformed()
     }
 
     private fun DataOutputStream.writeText(value: String, maxBytes: Int) {

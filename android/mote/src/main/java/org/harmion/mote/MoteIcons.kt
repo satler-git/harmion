@@ -15,7 +15,8 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
 
 internal enum class MoteGlyph {
-    Back, More, Pin, Archive, Restore, Copy, Share, Delete, Expand, Send, Check, Close, Inbox, Edit, Link, Alert, Dots, Settings
+    Back, More, Pin, Archive, Restore, Copy, Share, Delete, Expand, Send, Check, Close, Inbox, Edit, Link, Alert, Dots, Settings,
+    Sync, Reply, Fold, Unfold, Info,
 }
 
 @Composable
@@ -273,5 +274,43 @@ private val MoteGlyphs = mapOf(
         dot(5.5f, 12f, 1.45f)
         dot(12f, 12f, 1.45f)
         dot(18.5f, 12f, 1.45f)
+    },
+    MoteGlyph.Sync to outline(MoteGlyph.Sync) {
+        moveTo(20f, 12f)
+        curveTo(20f, 7.6f, 16.4f, 4f, 12f, 4f)
+        curveTo(8.4f, 4f, 5.2f, 6.2f, 4f, 9.2f)
+        moveTo(4f, 4.5f)
+        lineTo(4f, 9.5f)
+        lineTo(9f, 9.5f)
+        moveTo(4f, 12f)
+        curveTo(4f, 16.4f, 7.6f, 20f, 12f, 20f)
+        curveTo(15.6f, 20f, 18.8f, 17.8f, 20f, 14.8f)
+        moveTo(20f, 19.5f)
+        lineTo(20f, 14.5f)
+        lineTo(15f, 14.5f)
+    },
+    MoteGlyph.Reply to outline(MoteGlyph.Reply) {
+        moveTo(9.5f, 7f)
+        lineTo(4.5f, 12f)
+        lineTo(9.5f, 17f)
+        moveTo(5f, 12f)
+        lineTo(13.5f, 12f)
+        curveTo(17.2f, 12f, 19.5f, 14.5f, 19.5f, 18f)
+    },
+    MoteGlyph.Fold to outline(MoteGlyph.Fold) {
+        moveTo(6f, 14.5f)
+        lineTo(12f, 8.5f)
+        lineTo(18f, 14.5f)
+    },
+    MoteGlyph.Unfold to outline(MoteGlyph.Unfold) {
+        moveTo(6f, 9.5f)
+        lineTo(12f, 15.5f)
+        lineTo(18f, 9.5f)
+    },
+    MoteGlyph.Info to outline(MoteGlyph.Info) {
+        dot(12f, 12f, 8f)
+        moveTo(12f, 10.5f)
+        lineTo(12f, 16.5f)
+        dot(12f, 7.5f, 0.8f)
     },
 )

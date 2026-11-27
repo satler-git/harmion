@@ -59,8 +59,8 @@ class MainActivity : ComponentActivity() {
                         onSend = mote::sendShared,
                         onCancel = mote::cancelShared,
                         onReleasePending = mote::releaseSharedPending,
-                        onConnect = mote::connect,
-                        onAuthorize = mote::authorize,
+                        onConnect = mote::reconnect,
+                        onAuthorize = mote::retryAuthorization,
                     )
                 } else if (sharedReturn != handledSharedReturn) {
                     // Don't briefly reveal the inbox while returning to the sharing app.
@@ -74,8 +74,9 @@ class MainActivity : ComponentActivity() {
                             it.write(this)
                             preferences = it
                         },
-                        onConnect = mote::connect,
-                        onAuthorize = mote::authorize,
+                        onConnect = mote::reconnect,
+                        onAuthorize = mote::retryAuthorization,
+                        onSync = mote::requestSync,
                         onOpenShared = mote::openShared,
                     )
                 } else {
@@ -84,8 +85,8 @@ class MainActivity : ComponentActivity() {
                             state = state,
                             onDraft = mote::setDraft,
                             onSubmit = mote::submit,
-                            onConnect = mote::connect,
-                            onAuthorize = mote::authorize,
+                            onConnect = mote::reconnect,
+                            onAuthorize = mote::retryAuthorization,
                             onArchive = mote::archive,
                             onPin = mote::pin,
                             onDelete = mote::delete,
@@ -100,6 +101,13 @@ class MainActivity : ComponentActivity() {
                             onFinishLong = mote::finishLong,
                             onCheckLong = mote::checkLong,
                             onForgetLong = mote::forgetLong,
+                            onDeleteLongDraft = mote::deleteLongDraft,
+                            onReply = mote::startReply,
+                            onCancelReply = mote::cancelReply,
+                            onPushToLong = mote::pushToLong,
+                            onBeginEdit = mote::beginEdit,
+                            onCancelEdit = mote::cancelEdit,
+                            onSync = mote::requestSync,
                             preferences = preferences,
                             onOpenSettings = { settingsVisible = true },
                         )

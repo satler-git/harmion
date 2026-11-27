@@ -67,8 +67,7 @@ internal fun SharedCaptureScreen(
     if (confirmRelease && pending) {
         AlertDialog(
             onDismissRequest = { confirmRelease = false },
-            title = { Text("下書きの編集を再開？") },
-            text = { Text("前回の送信は保存済みの可能性があります。編集して送信すると、別のメモとして保存されます。") },
+            text = { Text("下書きの編集を再開しますか？") },
             confirmButton = {
                 TextButton(enabled = !state.busy, onClick = { confirmRelease = false; onReleasePending() }) { Text("編集を再開") }
             },
@@ -158,11 +157,13 @@ internal fun SharedCaptureScreen(
                     MoteComposer(
                         value = link.note, onValueChange = { onDraft(link.withNote(it)) },
                         placeholder = "メモを追加…", enabled = state.sharedAvailable, readOnly = readOnly, maxLines = 6,
+                        actionCount = 0,
                     ) {}
                 } else {
                     MoteComposer(
                         value = state.sharedDraft, onValueChange = onDraft, placeholder = "メモを書く…",
                         enabled = state.sharedAvailable, readOnly = readOnly, maxLines = 8,
+                        actionCount = 0,
                     ) {}
                 }
                 if (needsReview || state.sharedMessage != null) SharedCaptureNotice(needsReview, state.sharedMessage)
