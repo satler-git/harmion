@@ -84,6 +84,7 @@ Worker は常設の中継・同期先を使う場合だけ必要です。通常�
 - [Linuxユーザーサービスと日常運用](docs/linux-service.md)
 - [native 複数ノード同期の実行](docs/native-quickstart.md)
 - [Android のリリースと署名](docs/android-release.md)
+- [Androidエミュレータでの検証手順](docs/android-emulator.md)
 
 ### 仕様・設計
 
