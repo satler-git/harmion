@@ -27,11 +27,7 @@
 
 <div class="page-title">
   <div>
-    <p class="eyebrow">DATA PORTABILITY</p>
     <h1>Export</h1>
-    <p class="muted">
-      本文・現在値・未解決の候補・削除記録を、管理アプリを起動した端末の新しいディレクトリへ保存します。
-    </p>
   </div>
 </div>
 

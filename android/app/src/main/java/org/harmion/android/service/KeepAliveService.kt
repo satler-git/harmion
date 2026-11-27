@@ -81,7 +81,7 @@ class KeepAliveService : Service() {
         val peers = snapshot?.peers ?: 0
         RuntimeSettings.writeWidgetState(this, state, peers)
         scope.launch { HarmionWidget().updateAll(this@KeepAliveService) }
-        val text = "$state ・ ピア $peers 台"
+        val text = "$state ・ peer $peers 台"
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, notification(text))
     }

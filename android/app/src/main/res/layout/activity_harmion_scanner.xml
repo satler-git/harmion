@@ -50,14 +50,6 @@
                 android:textColor="#FFFFFFFF"
                 android:textSize="20sp"
                 android:textStyle="bold" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:letterSpacing="0.12"
-                android:text="HARMION"
-                android:textColor="#B3FFFFFF"
-                android:textSize="11sp" />
         </LinearLayout>
 
         <ImageButton

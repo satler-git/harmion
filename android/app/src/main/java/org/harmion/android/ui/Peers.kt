@@ -242,7 +242,7 @@ fun PeersScreen(controller: NodeRuntimeController) {
             result
                 .onSuccess {
                     retireTarget = null
-                    notice = "ピアを退役しました。"
+                    notice = "peer を退役しました。"
                     actionError = null
                     reload()
                 }
@@ -335,30 +335,25 @@ fun PeersScreen(controller: NodeRuntimeController) {
                                     modifier = Modifier.fillMaxWidth().padding(12.dp),
                                 )
                             }
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                FilledTonalButton(
-                                    onClick = {
-                                        val text = invite ?: return@FilledTonalButton
-                                        val send =
-                                            Intent(Intent.ACTION_SEND)
-                                                .setType("text/plain")
-                                                .putExtra(Intent.EXTRA_TEXT, text)
-                                        context.startActivity(
-                                            Intent.createChooser(send, "招待コードを共有"),
-                                        )
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                ) {
-                                    Icon(
-                                        Icons.Rounded.Share,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp),
+                            FilledTonalButton(
+                                onClick = {
+                                    val text = invite ?: return@FilledTonalButton
+                                    val send =
+                                        Intent(Intent.ACTION_SEND)
+                                            .setType("text/plain")
+                                            .putExtra(Intent.EXTRA_TEXT, text)
+                                    context.startActivity(
+                                        Intent.createChooser(send, null),
                                     )
-                                    Text("共有", modifier = Modifier.padding(start = 8.dp))
-                                }
-                                OutlinedButton(onClick = { reload() }, modifier = Modifier.weight(1f)) {
-                                    Text("更新")
-                                }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Icon(
+                                    Icons.Rounded.Share,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                Text("共有", modifier = Modifier.padding(start = 8.dp))
                             }
                         }
                         else -> {
@@ -454,7 +449,6 @@ fun PeersScreen(controller: NodeRuntimeController) {
                             modifier = Modifier.size(20.dp),
                         )
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("同期記録を取得できませんでした", style = MaterialTheme.typography.titleSmall)
                             Text(message, style = MaterialTheme.typography.bodySmall)
                             TextButton(onClick = { reload() }) { Text("再試行") }
                         }
@@ -465,7 +459,7 @@ fun PeersScreen(controller: NodeRuntimeController) {
 
         if (pendingRetirements.isNotEmpty()) {
             item {
-                SectionHeader("確認待ちの退役", "${pendingRetirements.size} 件の判断が必要です")
+                SectionHeader("確認待ちの退役")
             }
             items(pendingRetirements, key = { it.optString("certificate_id") }) { pending ->
                 PendingRetirementCard(
@@ -492,10 +486,7 @@ fun PeersScreen(controller: NodeRuntimeController) {
         }
 
         item {
-            SectionHeader(
-                "メンバー",
-                "${members.size} 台のノード",
-            )
+            SectionHeader("メンバー")
         }
 
         if (members.isEmpty()) {
@@ -503,7 +494,6 @@ fun PeersScreen(controller: NodeRuntimeController) {
                 EmptyState(
                     icon = Icons.Rounded.PersonAdd,
                     title = "メンバーがいません",
-                    body = "招待コードを読み取ると参加できます。",
                 )
             }
         }
@@ -560,7 +550,7 @@ fun PeersScreen(controller: NodeRuntimeController) {
                     tint = MaterialTheme.colorScheme.error,
                 )
             },
-            title = { Text("このピアを退役させますか？") },
+            title = { Text("この peer を退役させますか？") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
@@ -728,13 +718,13 @@ fun PeersScreen(controller: NodeRuntimeController) {
             }
         AlertDialog(
             onDismissRequest = { if (!approvalBusy) approvalOpen = false },
-            title = { Text("参加を承認") },
+            title = { Text("参加要求を承認") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = approvalCode,
                         onValueChange = { approvalCode = it.trim() },
-                        label = { Text("参加コード") },
+                        label = { Text("参加要求コード") },
                         minLines = 3,
                         maxLines = 6,
                         modifier = Modifier.fillMaxWidth(),
@@ -808,7 +798,7 @@ private fun MemberCard(
     HarmionCard(
         modifier =
             Modifier.fillMaxWidth().clickable(
-                onClickLabel = "ピアの詳細を表示",
+                onClickLabel = "peer の詳細を表示",
                 onClick = onClick,
             ),
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -918,7 +908,7 @@ private fun PeerDetailSheet(
             ) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
-                        "ピアの詳細",
+                        "peer の詳細",
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.primary,
                     )
@@ -956,7 +946,6 @@ private fun PeerDetailSheet(
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-            InfoRow("状態", memberStateLabel(state))
             if (!self) {
                 InfoRow(
                     "最終同期",
@@ -983,7 +972,7 @@ private fun PeerDetailSheet(
                 }
             }
             pending?.let {
-                InfoRow("退役の確認", "このピア宛ての退役届があります")
+                InfoRow("退役の確認", "この peer 宛ての退役届があります")
             }
 
             if (state != "retired" && !self && identityKnown) {
@@ -999,7 +988,7 @@ private fun PeerDetailSheet(
                             ),
                     ) {
                         Icon(Icons.Rounded.Block, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Text("このピアを退役させる", modifier = Modifier.padding(start = 8.dp))
+                        Text("この peer を退役させる", modifier = Modifier.padding(start = 8.dp))
                     }
                 } else {
                     TextButton(

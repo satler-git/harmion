@@ -65,7 +65,7 @@ private fun Content(status: String, peers: Int) {
                 ),
         )
         Text(
-            "$peers ピア",
+            "peer $peers 台",
             style =
                 TextStyle(
                     color = dayNightColor(Color(0xFF44506B), Color(0xFFC3CAD9)),

@@ -9,7 +9,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -197,10 +196,10 @@ private fun MainScaffold(
 
     val tabs =
         listOf(
-            Dest(0, "ホーム", "ノードと同期の状態", Icons.Rounded.Home),
-            Dest(1, "ピア", "端末をつなぐ", Icons.Rounded.Group),
-            Dest(2, "アプリ", "接続と権限", Icons.Rounded.Apps),
-            Dest(3, "設定", "同期と所有者", Icons.Rounded.Settings),
+            Dest(0, "ホーム", Icons.Rounded.Home),
+            Dest(1, "Peer", Icons.Rounded.Group),
+            Dest(2, "アプリ", Icons.Rounded.Apps),
+            Dest(3, "設定", Icons.Rounded.Settings),
         )
     val current = tabs[tab]
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -210,14 +209,7 @@ private fun MainScaffold(
         topBar = {
             LargeTopAppBar(
                 title = {
-                    Column {
-                        Text(current.title, style = MaterialTheme.typography.headlineMedium)
-                        Text(
-                            current.subtitle,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    Text(current.title, style = MaterialTheme.typography.headlineMedium)
                 },
                 scrollBehavior = scrollBehavior,
             )
@@ -228,7 +220,7 @@ private fun MainScaffold(
                     NavigationBarItem(
                         selected = tab == item.index,
                         onClick = { tab = item.index },
-                        icon = { Icon(item.icon, contentDescription = item.title) },
+                        icon = { Icon(item.icon, contentDescription = null) },
                         label = { Text(item.title) },
                     )
                 }
@@ -249,6 +241,5 @@ private fun MainScaffold(
 private data class Dest(
     val index: Int,
     val title: String,
-    val subtitle: String,
     val icon: androidx.compose.ui.graphics.vector.ImageVector,
 )

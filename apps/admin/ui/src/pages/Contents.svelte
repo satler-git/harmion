@@ -68,12 +68,7 @@
 
 <div class="page-title">
   <div>
-    <p class="eyebrow">CONTENT BROWSER</p>
-    <h1>コンテンツ</h1>
-    <p class="muted">
-      ノードに保存されている Content を、本文・Kind・属性から確認します。競合の解決は
-      「競合解決」画面で行います。
-    </p>
+    <h1>Content</h1>
   </div>
   <button disabled={busy} onclick={() => load()}>{busy ? '読み込み中…' : '一覧を更新'}</button>
 </div>
@@ -146,7 +141,6 @@
     {#if selected}
       <div class="page-title">
         <div>
-          <h2>Content の内容</h2>
           <p class="muted small">表示しているのは現在値です。</p>
         </div>
         <button onclick={() => resolve(selected!.id)}>競合解決で開く</button>
@@ -178,7 +172,6 @@
     {:else}
       <div class="empty">
         <h2>Content を選択</h2>
-        <p>左の一覧から本文・Kind・属性を確認できます。</p>
       </div>
     {/if}
   </section>

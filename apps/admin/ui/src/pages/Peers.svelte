@@ -169,11 +169,7 @@
 
 <div class="page-title">
   <div>
-    <p class="eyebrow">PEER CONNECTIONS</p>
     <h1>Peer</h1>
-    <p class="muted">
-      同じクラスタに参加するノードを追加・確認します。参加資格の状態と、実際に接続できるかは別です。
-    </p>
   </div>
   <button disabled={busy} onclick={refresh}>{busy ? '更新中…' : '状態を更新'}</button>
 </div>
@@ -190,7 +186,6 @@
           この Worker は Peer 専用レプリカです。参加承認・退役・手動同期はこの画面では提供しません。
         </p>
       </div>
-      <span class="badge badge-muted">読み取り専用</span>
     </div>
     {#if (overview?.peers ?? []).length === 0}
       <p class="empty">登録された Peer はありません。</p>
@@ -267,7 +262,7 @@
         <Clipboard text={overview.peer_transfer} label="接続コードをコピー" />
       {:else}
         <p class="muted small">
-          このノードは現在 Peer 接続コードを発行していません。ノードの identity と Peer
+          このノードは現在 Peer 接続コードを発行していません。ノードの識別情報と Peer
           通信設定を確認してください。
         </p>
       {/if}
@@ -296,7 +291,6 @@
             input = text;
             preview = null;
             showScanner = false;
-            message = '読み取りました。内容の確認へ進んでください。';
           }}
         />
       {/if}
@@ -365,7 +359,6 @@
         ×
       </button>
       <img src={qr} alt="拡大した接続コードの QR" />
-      <p>Android のカメラで読み取るか、接続コードをコピーしてください。</p>
       <button type="button" onclick={() => (qrZoom = false)}>閉じる</button>
     </div>
   {/if}

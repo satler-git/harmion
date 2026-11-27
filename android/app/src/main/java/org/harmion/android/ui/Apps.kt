@@ -106,7 +106,7 @@ fun AppsScreen(controller: NodeRuntimeController) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    SectionHeader("接続アプリ", "承認待ち ${pending.size} 件 / 承認済み ${approved.size} 件")
+                    SectionHeader("接続アプリ")
                 }
                 IconButton(onClick = { reload() }) {
                     Icon(Icons.Rounded.Refresh, contentDescription = "再読み込み")
@@ -162,7 +162,7 @@ fun AppsScreen(controller: NodeRuntimeController) {
                     grants.optBoolean("manage_apps")
             }
         if (visibleApps.isNotEmpty()) {
-            item { SectionHeader("認可済みアプリ", "権限の変更は所有者承認が必要です") }
+            item { SectionHeader("認可済みアプリ") }
             items(visibleApps, key = { it.optString("app_id") }) { app ->
                 AppCredentialCard(app = app, onManage = { managing = app })
             }
@@ -197,7 +197,6 @@ fun AppsScreen(controller: NodeRuntimeController) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        StatusPill("承認済み")
                     }
                     val grants = connection.optJSONObject("grants")
                     grantSummary(grants).forEach {
@@ -212,7 +211,6 @@ fun AppsScreen(controller: NodeRuntimeController) {
                 EmptyState(
                     icon = Icons.Rounded.Apps,
                     title = "接続中のアプリはありません",
-                    body = "接続要求がここに表示されます。",
                 )
             }
         }
@@ -322,7 +320,6 @@ private fun PendingCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            StatusPill("承認待ち")
         }
         val grants = connection.optJSONObject("grants")
         val lines = grantSummary(grants)
@@ -431,11 +428,6 @@ private fun AppManageSheet(
             Text(
                 if (app.isNull("name") || app.optString("name").isEmpty()) "アプリ" else app.optString("name"),
                 style = MaterialTheme.typography.headlineSmall,
-            )
-            Text(
-                "所有者の生体認証で確定します",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             SheetSwitch("Interpreterを呼び出す", call) { call = it }
             SheetSwitch("Interpreterを提供する", provide) { provide = it }

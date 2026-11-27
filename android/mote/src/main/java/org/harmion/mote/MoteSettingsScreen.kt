@@ -109,14 +109,10 @@ internal fun MoteSettingsScreen(
             ) {
                 SettingsConnection(state.connection, state.busy, onConnect, onAuthorize)
                 SettingsSync(state, onSync)
-                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text("操作の反応", Modifier.padding(horizontal = 12.dp).semantics { heading() },
-                        color = colors.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
-                    Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.extraLarge, color = colors.surfaceContainer) {
-                        Column {
-                            SettingsToggle("アーカイブ時の触覚フィードバック", preferences.archiveHaptics) {
-                                onPreferences(preferences.copy(archiveHaptics = it))
-                            }
+                Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.extraLarge, color = colors.surfaceContainer) {
+                    Column {
+                        SettingsToggle("アーカイブ時の触覚フィードバック", preferences.archiveHaptics) {
+                            onPreferences(preferences.copy(archiveHaptics = it))
                         }
                     }
                 }

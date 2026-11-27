@@ -131,12 +131,7 @@
 
 <div class="page-title">
   <div>
-    <p class="eyebrow">INTEGRATED CONNECTION</p>
     <h1>接続要求</h1>
-    <p class="muted">
-      アプリの初回接続を、アプリ権限の確定・OAuth クライアント作成・Provider
-      登録の1回の承認にまとめます。 承認後にアプリがトークンを受け取ると「接続完了」になります。
-    </p>
   </div>
   <button class="quiet" disabled={busy} onclick={() => load()}>
     {busy ? '更新中…' : '再読み込み'}
@@ -145,24 +140,18 @@
 
 {#if error}<p class="error" role="alert">{error}</p>{/if}
 {#if message}<p class="success" role="status">{message}</p>{/if}
-{#if pending.length}
-  <div class="callout warn">
-    <strong>承認待ちが {pending.length} 件あります。</strong>
-    <span>内容を確認して承認または拒否してください。</span>
-  </div>
-{/if}
 {#if pending.length && approval?.mode === 'terminal' && approval.terminal_available}
   <div class="callout">
     <strong>承認時の端末確認</strong>
     <span>
-      承認を実行すると、管理アプリを起動したターミナルで <kbd>y</kbd> を押す必要があります。 ブラウザセッションの窃取だけでは承認を完結させないための確認です。
+      承認を実行すると、管理アプリを起動したターミナルで <kbd>y</kbd> を押す必要があります。
     </span>
   </div>
 {/if}
 {#if approvalBlocked}
   <div class="callout danger">
     <strong>この起動方法では R2 の承認を完了できません。</strong>
-    <span>{approval ? approvalModeLabel(approval) : 'R2 の承認を完了できません。'}</span>
+    {#if approval}<span>{approvalModeLabel(approval)}</span>{/if}
   </div>
 {/if}
 
@@ -194,20 +183,8 @@
 </div>
 
 <section class="panel">
-  <div class="section-head">
-    <div>
-      <h2>
-        {tab === 'pending' ? '承認待ちの要求' : tab === 'history' ? '最近の履歴' : '最近の接続要求'}
-      </h2>
-      <p class="muted small">
-        最新 32
-        件を表示します。表示中は5秒ごとに自動更新し、期限切れの要求は「期限切れ」へ移ります。
-      </p>
-    </div>
-    <span class="muted small">{visible.length} 件</span>
-  </div>
   {#if connections.length === 0}
-    <p class="empty">接続要求はありません。アプリが接続を開始すると、ここに要求が表示されます。</p>
+    <p class="empty">接続要求はありません。</p>
   {:else if visible.length === 0}
     <p class="empty">この条件に一致する接続要求はありません。</p>
   {:else}
@@ -396,7 +373,7 @@
         </label>
       {/if}
       <p class="muted small">
-        承認すると、アプリ grant の確定、OAuth クライアントの作成、Provider
+        承認すると、アプリ権限の確定、OAuth クライアントの作成、Provider
         の登録・承認を1つの操作で行います。トークンはアプリが完了通知を送った時点で発行されます。
       </p>
     {:else}

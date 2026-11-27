@@ -139,10 +139,10 @@ internal fun LongCaptureScreen(
                         IconButton(onClick = onLeave) {
                             MoteIcon(MoteGlyph.Back, contentDescription = "中断して戻る")
                         }
-                        Text("長文", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge)
+                        Text("long capture", Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleLarge)
                         Box {
                             IconButton(onClick = { menuOpen = true }) {
-                                MoteIcon(MoteGlyph.More, contentDescription = "長文メモのその他の操作")
+                                MoteIcon(MoteGlyph.More, contentDescription = "long capture のその他の操作")
                             }
                             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                                 if (state.body.isNotEmpty()) {
@@ -151,7 +151,7 @@ internal fun LongCaptureScreen(
                                         leadingIcon = { MoteIcon(MoteGlyph.Copy, contentDescription = null) },
                                         onClick = {
                                             menuOpen = false
-                                            val clip = ClipData.newPlainText("長文メモ", state.body)
+                                            val clip = ClipData.newPlainText("long capture", state.body)
                                             if (Build.VERSION.SDK_INT >= 33) {
                                                 clip.description.extras = PersistableBundle().apply {
                                                     putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
@@ -258,7 +258,7 @@ internal fun LongCaptureScreen(
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
-            text = { Text("削除しますか？") },
+            text = { Text("下書きを削除しますか？") },
             confirmButton = {
                 TextButton(
                     enabled = !state.busy,

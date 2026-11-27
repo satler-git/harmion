@@ -60,7 +60,7 @@ export function remainingTime(value: string | null | undefined, now = Date.now()
 
 export function filterLabel(filter: Filter | null | undefined): string {
   if (!filter) return 'なし';
-  if (filter.type === 'all') return 'すべての Content';
+  if (filter.type === 'all') return 'すべてのContent';
   return filter.kinds.length ? `Kind: ${filter.kinds.join('、')}` : 'Kind の指定なし';
 }
 

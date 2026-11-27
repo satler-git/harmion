@@ -71,7 +71,6 @@ import java.security.SecureRandom
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.harmion.android.BuildConfig
 import org.harmion.android.HarmionApplication
 import org.harmion.android.core.BatteryRule
 import org.harmion.android.core.NetworkRule
@@ -238,7 +237,6 @@ fun SettingsScreen(controller: NodeRuntimeController, policy: PolicyEvaluator) {
         item {
             HarmionCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
                 SectionHeader("ノード")
-                InfoRow("アプリ", BuildConfig.VERSION_NAME)
                 identifiers?.let { ids ->
                     val nodeId = ids.optString("node_id")
                     val clusterId = ids.optString("cluster_id")
@@ -496,10 +494,12 @@ private fun OwnerSection(controller: NodeRuntimeController) {
             title = { Text("リカバリコード") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        if (ownerEnrolled) "現在の所有者キーは失効します。" else "ノードの所有者キーを復元します。",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
+                    if (ownerEnrolled) {
+                        Text(
+                            "現在の所有者キーは失効します。",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                     androidx.compose.material3.OutlinedTextField(
                         value = recoverInput,
                         onValueChange = { recoverInput = it.trim().take(64) },
@@ -684,11 +684,6 @@ private fun OwnerSection(controller: NodeRuntimeController) {
                         onClick = {
                             copySecret(context, "Harmionのリカバリコード", code)
                             recoveryCopied = true
-                            Toast.makeText(
-                                context,
-                                "リカバリコードをコピーしました",
-                                Toast.LENGTH_SHORT,
-                            ).show()
                         },
                     ) {
                         Icon(

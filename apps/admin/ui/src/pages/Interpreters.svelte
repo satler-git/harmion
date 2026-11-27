@@ -82,12 +82,7 @@
 
 <div class="page-title">
   <div>
-    <p class="eyebrow">INTERPRETER PROVIDERS</p>
     <h1>Interpreter 提供元</h1>
-    <p class="muted">
-      このノードに登録された計算提供元と、その承認・接続状態を確認します。承認と接続は別の状態です。
-      承認済みでもアプリが未接続なら、Interpreter 呼び出しは利用できません。
-    </p>
   </div>
   <button class="quiet" disabled={busy} onclick={load}>{busy ? '更新中…' : '再読み込み'}</button>
 </div>
@@ -95,21 +90,10 @@
 {#if error}<p class="error" role="alert">{error}</p>{/if}
 {#if message}<p class="success" role="status">{message}</p>{/if}
 
-{#if waiting.length}
-  <div class="callout warn">
-    <strong>承認待ちの提供元が {waiting.length} 件あります。</strong>
-    <span>提供元アプリが登録した内容を確認し、必要なものだけ承認してください。</span>
-  </div>
-{/if}
-
 {#if providers.length === 0}
   <section class="panel">
     <div class="empty">
       <h2>登録された提供元はありません</h2>
-      <p>
-        提供元アプリが <span class="mono">provide</span> 権限で登録すると、ここに表示されます。 統合接続で
-        Provider を指定した場合は、接続の承認時に登録されます。
-      </p>
     </div>
   </section>
 {:else}

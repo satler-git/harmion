@@ -168,7 +168,7 @@ internal fun MetricTile(
 internal fun EmptyState(
     icon: ImageVector,
     title: String,
-    body: String,
+    body: String? = null,
     modifier: Modifier = Modifier,
     action: (@Composable () -> Unit)? = null,
 ) {
@@ -189,12 +189,14 @@ internal fun EmptyState(
             )
         }
         Text(title, style = MaterialTheme.typography.titleMedium)
-        Text(
-            body,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-        )
+        body?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
         action?.let {
             Spacer(Modifier.width(4.dp))
             it()

@@ -71,20 +71,20 @@ internal fun clockMicros(micros: Long): String =
 
 internal fun membershipLabel(value: String?): String =
     when (value) {
-        "active" -> "承認済み"
-        "unconfirmed" -> "承認待ち"
-        "retired" -> "退役"
-        "conflict" -> "競合"
+        "active" -> "active"
+        "unconfirmed" -> "unconfirmed"
+        "retired" -> "retired"
+        "conflict" -> "conflict"
         else -> "—"
     }
 
 internal fun memberStateLabel(value: String): String =
     when (value) {
-        "active" -> "稼働中"
-        "retired" -> "退役済み"
-        "pending" -> "保留中"
-        "unconfirmed" -> "承認待ち"
-        "conflict" -> "競合"
+        "active" -> "active"
+        "retired" -> "retired"
+        "pending" -> "pending"
+        "unconfirmed" -> "unconfirmed"
+        "conflict" -> "conflict"
         else -> value.ifBlank { "不明" }
     }
 
@@ -111,8 +111,8 @@ internal fun syncFailureLabel(code: String?): String =
         "transport_error" -> "接続できません"
         "invalid_response" -> "応答が不正です"
         "record_rejected" -> "更新が拒否されました"
-        "peer_retired" -> "退役済みのピアです"
-        "membership_conflict" -> "メンバーシップ競合"
+        "peer_retired" -> "retired peer"
+        "membership_conflict" -> "membership conflict"
         "unauthenticated" -> "認証に失敗しました"
         "identity_mismatch" -> "ノードIDが一致しません"
         "storage_error" -> "保存領域のエラー"
@@ -167,6 +167,6 @@ private fun filterLabel(filter: JSONObject): String =
         "kinds" ->
             filter.optJSONArray("kinds")?.let { array ->
                 (0 until array.length()).joinToString(", ") { array.getString(it) }
-            } ?: "指定kind"
+            } ?: "指定した種類"
         else -> "不明"
     }

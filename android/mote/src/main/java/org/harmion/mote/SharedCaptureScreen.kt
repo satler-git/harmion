@@ -161,7 +161,7 @@ internal fun SharedCaptureScreen(
                     ) {}
                 } else {
                     MoteComposer(
-                        value = state.sharedDraft, onValueChange = onDraft, placeholder = "メモを書く…",
+                        value = state.sharedDraft, onValueChange = onDraft, placeholder = "capture を書く…",
                         enabled = state.sharedAvailable, readOnly = readOnly, maxLines = 8,
                         actionCount = 0,
                     ) {}

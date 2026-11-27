@@ -278,7 +278,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
     fun setDraft(body: String) {
         if (!_state.value.draftAvailable || frozen != null || _state.value.busy) return
         if (body.length > MAX_DRAFT_CHARS) {
-            change { copy(message = "短文の入力が長すぎます。") }
+            change { copy(message = "short capture が長すぎます。") }
             return
         }
         change { copy(draft = body, message = null) }
@@ -592,14 +592,14 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
             localLongOperation {
                 longDraftWriter?.join()
                 persistLong(null)
-                change { copy(message = "長文メモを閉じました。") }
+                change { copy(message = "long capture を閉じました。") }
             }
             return
         }
         runLong { record ->
             if (record.draft.isNotBlank()) append(record)
             finish(checkNotNull(longRecord).copy(draft = ""))
-            change { copy(message = "長文を保存しました。") }
+            change { copy(message = "long capture を保存しました。") }
         }
     }
 
@@ -608,7 +608,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
         runLong { record ->
             checkPending(record)
             if (record.pending?.kind == LongCaptureKind.Finish) {
-                change { copy(message = "長文を保存しました。") }
+                change { copy(message = "long capture を保存しました。") }
             } else {
                 longMessage("Harmion の現在の本文を採用しました。")
             }
@@ -620,7 +620,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
         localLongOperation {
             longDraftWriter?.join()
             persistLong(null)
-            change { copy(message = "端末の長文記録だけを破棄しました。") }
+            change { copy(message = "端末の long capture 記録だけを破棄しました。") }
         }
     }
 
@@ -671,11 +671,11 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
         val state = _state.value
         if (state.busy) return
         if (longRecord?.pending != null) {
-            change { copy(message = "長文の結果が未確定です。先に照合してください。") }
+            change { copy(message = "long capture の結果が未確定です。先に照合してください。") }
             return
         }
         if (state.connection != MoteConnection.Ready) {
-            change { copy(message = "Harmion に接続してから長文へ移動してください。") }
+            change { copy(message = "Harmion に接続してから long capture へ移動してください。") }
             return
         }
         val selected = state.captures
@@ -704,9 +704,9 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
                 }
             }
             val summary = if (failed == 0) {
-                "${selected.size}件を長文に移動しました。"
+                "${selected.size}件を long capture に移動しました。"
             } else {
-                "${selected.size}件を長文に移動しました。${failed}件は削除できませんでした。"
+                "${selected.size}件を long capture に移動しました。${failed}件は削除できませんでした。"
             }
             longMessage(summary)
         }
@@ -760,8 +760,8 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
             try {
                 action()
             } catch (_: IOException) {
-                if (_state.value.longCaptureVisible) longMessage("端末の長文記録を更新できませんでした。")
-                else change { copy(message = "端末に長文セッションを作成できませんでした。") }
+                if (_state.value.longCaptureVisible) longMessage("端末の long capture 記録を更新できませんでした。")
+                else change { copy(message = "端末に long capture セッションを作成できませんでした。") }
             } finally {
                 change { copy(busy = false) }
             }
@@ -795,7 +795,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
             "Harmion の現在の本文や状態を確認できません。追記や完了は行わず、端末の本文と下書きを残しています。"
         "capture_too_large", "http_413" -> "本文がサイズ上限を超えています。下書きを短くするか退避してください。"
         "http_403" -> "この操作に必要な Harmion の権限がありません。"
-        else -> if (error is IOException) "端末の長文記録を更新できません。下書きは画面に残しています。"
+        else -> if (error is IOException) "端末の long capture 記録を更新できません。下書きは画面に残しています。"
         else "Harmion での保存結果を確認できません。下書きは端末に残っています。"
     }
 
@@ -996,10 +996,10 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
     private fun mutationFailure(error: Exception, create: Boolean): String = when {
         error is IOException -> "端末に保存できないため、Harmion には送信していません。"
         error is HarmionException -> when (error.code) {
-            "capture_too_large" -> "短文の入力が長すぎます。本文を短くしてください。"
+            "capture_too_large" -> "short capture が長すぎます。本文を短くしてください。"
             "pending_authorization_changed" -> "送信時と認可先が異なるため再送していません。本文を確認して保留を解除できます。"
-            "capture_changed", "http_410", "http_404" -> "Capture の最新状態を確認してから、やり直してください。"
-            "capture_shared" -> "ほかの Kind にも属する Capture は Mote から削除できません。"
+            "capture_changed", "http_410", "http_404" -> "capture の最新状態を確認してから、やり直してください。"
+            "capture_shared" -> "ほかの種類にも属する capture は Mote から削除できません。"
             "http_403" -> "この操作に必要な Harmion の権限がありません。"
             else -> if (create) UNKNOWN_CREATE else UNKNOWN_MUTATION
         }

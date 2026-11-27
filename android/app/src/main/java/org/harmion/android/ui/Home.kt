@@ -24,7 +24,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudOff
-import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Storage
@@ -93,10 +92,7 @@ fun HomeScreen(controller: NodeRuntimeController, snapshot: RuntimeSnapshot?) {
         }
     val statusBody =
         when {
-            !running -> "アプリを開くと再開します"
-            blocked != null && !autoSyncOff -> blockedReason
             inFlight -> "${snapshot.inflight.size} 台と同期中"
-            snapshot.lastSuccessAtMicros != null -> "最終 ${formatMicrosWithClock(snapshot.lastSuccessAtMicros)}"
             else -> null
         }
 
@@ -119,14 +115,14 @@ fun HomeScreen(controller: NodeRuntimeController, snapshot: RuntimeSnapshot?) {
                                 if (outcome.synced == 0) {
                                     "同期できませんでした（${outcome.failed} 台で失敗）"
                                 } else {
-                                    "一部のピアと同期できませんでした" +
+                                    "一部の peer と同期できませんでした" +
                                         "（${outcome.failed}/${outcome.synced + outcome.failed} 台）"
                                 }
                         }
                         outcome.synced == 0 -> {
                             phase = SyncActionPhase.Idle
                             feedbackIsError = false
-                            feedback = "同期対象のピアがいません。"
+                            feedback = "同期対象の peer がいません。"
                         }
                         else -> {
                             phase = SyncActionPhase.Done
@@ -207,7 +203,7 @@ fun HomeScreen(controller: NodeRuntimeController, snapshot: RuntimeSnapshot?) {
                             contentColor = MaterialTheme.colorScheme.onSurface,
                         )
                         StatusPill(
-                            text = "${snapshot?.peers ?: 0} ピア",
+                            text = "${snapshot?.peers ?: 0} 台",
                             container = MaterialTheme.colorScheme.surface.copy(alpha = 0.45f),
                             contentColor = MaterialTheme.colorScheme.onSurface,
                             icon = Icons.Rounded.Group,
@@ -227,19 +223,7 @@ fun HomeScreen(controller: NodeRuntimeController, snapshot: RuntimeSnapshot?) {
 
         item { ConflictsSection(controller) }
 
-        if (autoSyncOff) {
-            item {
-                HarmionCard(containerColor = MaterialTheme.colorScheme.tertiaryContainer) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        Icon(Icons.Rounded.CloudOff, contentDescription = null)
-                        Text("自動同期はオフです", style = MaterialTheme.typography.titleSmall)
-                    }
-                }
-            }
-        } else if (blocked != null) {
+        if (!autoSyncOff && blocked != null) {
             item {
                 HarmionCard(containerColor = MaterialTheme.colorScheme.errorContainer) {
                     Row(
@@ -256,31 +240,10 @@ fun HomeScreen(controller: NodeRuntimeController, snapshot: RuntimeSnapshot?) {
             }
         }
 
-        if (snapshot?.membership == "unconfirmed") {
-            item {
-                HarmionCard(containerColor = MaterialTheme.colorScheme.tertiaryContainer) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        Icon(Icons.Rounded.ErrorOutline, contentDescription = null)
-                        Column {
-                            Text("参加の承認待ち", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                "既存ノードの所有者に承認を依頼してください。",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
         item {
             HarmionCard {
                 SectionHeader("同期")
-                InfoRow("現在", if (inFlight) "同期中" else if (running) "待機" else "停止中")
-                snapshot?.retrying?.let { if (it > 0) InfoRow("再試行待ち", "$it ピア") }
+                snapshot?.retrying?.let { if (it > 0) InfoRow("再試行待ち", "$it 台") }
                 snapshot?.lastSuccessAtMicros?.let {
                     InfoRow(
                         "最終成功",
@@ -320,7 +283,6 @@ fun HomeScreen(controller: NodeRuntimeController, snapshot: RuntimeSnapshot?) {
 
         item {
             HarmionCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
-                SectionHeader("ノード")
                 InfoRow("ノードID", shortId(snapshot?.nodeId), emphasis = true)
             }
         }

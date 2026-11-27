@@ -103,11 +103,6 @@ private fun AboutScreen(onBack: () -> Unit) {
                             style = MaterialTheme.typography.headlineMedium,
                             fontWeight = FontWeight.Bold,
                         )
-                        Text(
-                            "Androidノード",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
                     }
                 }
             }
@@ -138,7 +133,6 @@ private fun AboutScreen(onBack: () -> Unit) {
 
             item {
                 HarmionCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
-                    SectionHeader("リンク")
                     OutlinedButton(onClick = { open(REPOSITORY) }, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
                         Text("GitHub", modifier = Modifier.padding(start = 8.dp))

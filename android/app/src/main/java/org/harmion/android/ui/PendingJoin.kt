@@ -126,7 +126,7 @@ fun PendingJoinCard(controller: NodeRuntimeController) {
         ) {
             Icon(Icons.Rounded.HourglassTop, contentDescription = null)
             Column(Modifier.weight(1f)) {
-                Text("参加承認待ち", style = MaterialTheme.typography.titleSmall)
+                Text("参加の承認待ち", style = MaterialTheme.typography.titleSmall)
                 Text(
                     "既存ノードの「参加要求を承認」でこのQRを読み取る",
                     style = MaterialTheme.typography.bodySmall,
@@ -142,7 +142,7 @@ fun PendingJoinCard(controller: NodeRuntimeController) {
                     }
                 },
             ) {
-                Icon(Icons.Rounded.Refresh, contentDescription = "参加コードを更新")
+                Icon(Icons.Rounded.Refresh, contentDescription = "参加要求コードを更新")
             }
             TextButton(
                 onClick = {
@@ -169,7 +169,7 @@ fun PendingJoinCard(controller: NodeRuntimeController) {
                         Intent(Intent.ACTION_SEND)
                             .setType("text/plain")
                             .putExtra(Intent.EXTRA_TEXT, current)
-                    context.startActivity(Intent.createChooser(send, "参加コードを共有"))
+                    context.startActivity(Intent.createChooser(send, "参加要求コードを共有"))
                 },
                 modifier = Modifier.weight(1f),
             ) {

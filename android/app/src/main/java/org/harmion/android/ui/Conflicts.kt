@@ -121,9 +121,6 @@ private fun ConflictSheet(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                item {
-                    Text("競合", style = MaterialTheme.typography.headlineSmall)
-                }
                 items(conflicts, key = { it.optJSONObject("content")?.optString("id").orEmpty() }) { item ->
                     val content = item.optJSONObject("content")
                     val id = content?.optString("id").orEmpty()
@@ -187,7 +184,6 @@ private fun ConflictDetail(
     Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onBack) { Text("戻る") }
-            Text("競合を解決", style = MaterialTheme.typography.titleLarge)
         }
         if (detail == null) {
             if (error == null) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)

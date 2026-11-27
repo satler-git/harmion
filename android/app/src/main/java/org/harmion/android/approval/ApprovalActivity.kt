@@ -471,10 +471,7 @@ private fun IdentityCard(
     grant: ApprovalRegistry.Grant?,
 ) {
     HarmionCard {
-        SectionHeader(
-            "要求元の確認",
-            "Android が確認したパッケージと署名だけを表示します",
-        )
+        SectionHeader("要求元の確認")
         Surface(
             shape = MaterialTheme.shapes.medium,
             color = MaterialTheme.colorScheme.secondaryContainer,
@@ -667,7 +664,7 @@ private fun PermissionDeltaCard(
 private fun RequestExpiryCard(request: JSONObject) {
     val expiresAt = request.optString("expires_at").toLongOrNull() ?: return
     HarmionCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
-        SectionHeader("要求の有効期限", "この時刻を過ぎると、この承認は失効します")
+        SectionHeader("要求の有効期限")
         Text(
             absoluteMicros(expiresAt),
             style = MaterialTheme.typography.titleMedium,
@@ -732,20 +729,6 @@ private fun ApprovalActionBar(
                     Text(if (deciding) "処理中…" else "許可")
                 }
             }
-            Text(
-                if (canAllow) {
-                    "許可すると、このアプリは上記の権限でノードにアクセスできます。"
-                } else {
-                    "権限情報を取得できないため許可できません。"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color =
-                    if (canAllow) {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    } else {
-                        MaterialTheme.colorScheme.error
-                    },
-            )
         }
     }
 }

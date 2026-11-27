@@ -181,7 +181,7 @@
     muted
     autoplay
     playsinline
-    aria-label="Peer の QR スキャナー"
+    aria-label="Peerの QR スキャナー"
   ></video>
   {#if scanning}
     <p class="muted small" role="status">

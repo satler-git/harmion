@@ -26,13 +26,13 @@
   import Connections from './pages/Connections.svelte';
   const links: { id: Page; label: string; icon: string }[] = [
     { id: 'overview', label: '概要', icon: '◈' },
-    { id: 'contents', label: 'コンテンツ', icon: '▤' },
+    { id: 'contents', label: 'Content', icon: '▤' },
     { id: 'conflicts', label: '競合解決', icon: '⇄' },
     { id: 'peers', label: 'Peer', icon: '⌘' },
     { id: 'apps', label: 'アプリ', icon: '▦' },
     { id: 'interpreters', label: 'Interpreter', icon: '⚙' },
     { id: 'connections', label: '接続要求', icon: '⇄' },
-    { id: 'export', label: 'エクスポート', icon: '↗' },
+    { id: 'export', label: 'Export', icon: '↗' },
   ];
   let page = $state<Page>('overview'),
     overview = $state<Overview | null>(null),
@@ -144,7 +144,6 @@
     <div class="brand"><span class="brand-icon">H</span>Harmion</div>
     <section class="panel">
       {#if worker}
-        <p class="eyebrow">REMOTE ACCESS</p>
         <h1>{opening ? '接続しています…' : 'Worker 管理画面に接続'}</h1>
         <p class="muted">
           {accessError ||
@@ -168,7 +167,6 @@
         </button>
         <p class="muted small">読み取り専用の管理画面です。承認・退役・同期は利用できません。</p>
       {:else}
-        <p class="eyebrow">OWNER ACCESS</p>
         <h1>
           {opening
             ? '接続しています…'
@@ -189,7 +187,6 @@
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand"><span class="brand-icon">H</span>Harmion</div>
-      <div class="sidebar-label">管理コンソール</div>
       <nav aria-label="管理画面">
         {#each visibleLinks as link}<button
             class:active={page === link.id}
@@ -207,7 +204,6 @@
     </aside>
     <div class="main-column">
       <header>
-        <span>WORKSPACE <b>/</b> {visibleLinks.find((link) => link.id === page)?.label}</span>
         <div class="actions">
           <span class="badge">{readOnly ? '読み取り専用' : '所有者'}</span>
           {#if overview?.approval}
@@ -239,7 +235,7 @@
             class="quiet"
             onclick={() => endSession()}
           >
-            終了
+            セッションを終了
           </button>
         </div>
       </header>
@@ -281,11 +277,6 @@
           <div class:hidden={page !== 'export'}><Export /></div>
         {/if}
       </main>
-      <footer>
-        Harmion / {worker ? 'Worker replica (read-only)' : 'Local administration'}<span>
-          {worker ? 'Cloudflare Access + 管理者トークン' : 'この端末の所有者セッション'}
-        </span>
-      </footer>
     </div>
   </div>
 {/if}

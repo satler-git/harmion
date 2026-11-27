@@ -393,7 +393,7 @@ internal fun MoteScreen(
                 .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)),
         ) {
             val startupMessage = state.message?.takeUnless { it in quietSuccessMessages }
-                ?: if (state.longCaptureStorageFailed) "端末の長文記録を読み込めません。長文入力は停止しています。" else null
+                ?: if (state.longCaptureStorageFailed) "端末の long capture 記録を読み込めません。long capture 入力は停止しています。" else null
             if (startupMessage != null) {
                 MessageBanner(
                     startupMessage,
@@ -451,7 +451,7 @@ internal fun MoteScreen(
                                     when {
                                         !ready -> "再接続しています"
                                         pinnedOnly -> "ピン留めはありません"
-                                        includeArchived -> "メモはありません"
+                                        includeArchived -> "capture はありません"
                                         else -> "Inbox は空です"
                                     },
                                     style = MaterialTheme.typography.bodyMedium,
@@ -620,7 +620,7 @@ internal fun MoteScreen(
                 }
             } else if (state.longCaptureStorageFailed) {
                 MessageBanner(
-                    "端末の長文記録を読み込めません。長文入力は停止しています。",
+                    "端末の long capture 記録を読み込めません。long capture 入力は停止しています。",
                     Modifier.padding(horizontal = 16.dp),
                     onDismiss = null,
                 )
@@ -709,7 +709,7 @@ internal fun MoteScreen(
     if (confirmPush) {
         AlertDialog(
             onDismissRequest = { confirmPush = false },
-            text = { Text("長文に移動しますか？") },
+            text = { Text("long capture に移動しますか？") },
             confirmButton = {
                 TextButton(
                     enabled = canMutate && pushableIds.isNotEmpty(),
@@ -740,7 +740,7 @@ internal fun MoteScreen(
 private val quietSuccessMessages = setOf(
     "Harmion に保存しました。",
     "削除しました。",
-    "長文メモを閉じました。",
+    "long capture を閉じました。",
     "下書きを削除しました。",
     "同期を要求しました。",
 )
@@ -908,7 +908,7 @@ private fun DetailHeader(
         ) {
             IconButton(onClick = onBack) { MoteIcon(MoteGlyph.Back, "戻る", tint = colors.onSurface) }
             Text(
-                if (capture.isLong) "長文" else "メモ",
+                if (capture.isLong) "long capture" else "short capture",
                 Modifier.weight(1f).semantics { heading() },
                 style = MaterialTheme.typography.titleLarge,
                 color = colors.onSurface,
@@ -962,7 +962,7 @@ private fun ConnectionStatus(connection: MoteConnection, onConnect: () -> Unit, 
         MoteConnection.Approving -> CenteredState("承認を待っています", "Harmion でアクセスを許可してください。", modifier, loading = true) {
             TextButton(onClick = onAuthorize) { Text("承認をやり直す") }
         }
-        MoteConnection.NeedsApproval -> CenteredState("Harmion とつなぐ", "Mote のメモだけにアクセスします。", modifier, mark = true) {
+        MoteConnection.NeedsApproval -> CenteredState("Harmion とつなぐ", "Mote の capture だけにアクセスします。", modifier, mark = true) {
             Button(onClick = onAuthorize) { Text("承認をリクエスト") }
         }
         MoteConnection.Unavailable, MoteConnection.Failed -> CenteredState("Harmion に未接続", "入力した下書きはこの端末に残ります。", modifier, glyph = MoteGlyph.Link) {
@@ -1076,8 +1076,8 @@ private fun HomeDock(
                     state.draft,
                     onDraft,
                     when {
-                        editing -> "メモを編集…"
-                        else -> "メモを書く…"
+                        editing -> "short capture を編集…"
+                        else -> "short capture を書く…"
                     },
                     enabled = state.draftAvailable,
                     readOnly = state.pending || state.busy,
@@ -1098,7 +1098,7 @@ private fun HomeDock(
                             IconButton(onClick = onOpenLong, enabled = canOpenLong) {
                                 MoteIcon(
                                     MoteGlyph.Expand,
-                                    "長文を書く",
+                                    "long capture を書く",
                                     Modifier.size(20.dp),
                                     colors.onSurfaceVariant.copy(alpha = if (canOpenLong) 1f else .45f),
                                 )
@@ -1124,7 +1124,7 @@ private fun LongDraftCard(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
             .combinedClickable(
                 enabled = enabled,
-                onClickLabel = "長文を再開",
+                onClickLabel = "long capture を再開",
                 onLongClickLabel = "下書きの操作",
                 onClick = onClick,
                 onLongClick = onLongClick,
@@ -1139,7 +1139,7 @@ private fun LongDraftCard(
         ) {
             MoteIcon(MoteGlyph.Edit, null, Modifier.size(17.dp), colors.primary)
             Column(Modifier.weight(1f)) {
-                Text("長文の下書き", style = MaterialTheme.typography.labelLarge)
+                Text("long capture の下書き", style = MaterialTheme.typography.labelLarge)
                 val preview = state.draft.ifBlank { state.body }.trimStart()
                 if (preview.isNotEmpty()) {
                     Text(
@@ -1148,7 +1148,6 @@ private fun LongDraftCard(
                     )
                 }
             }
-            Text("再開", style = MaterialTheme.typography.labelLarge, color = colors.primary)
         }
     }
 }
@@ -1202,7 +1201,7 @@ private fun ReplyComposerStrip(target: Capture?, missing: Boolean, onCancel: () 
             Box(Modifier.width(2.dp).height(24.dp).background(colors.primary.copy(alpha = .6f), CircleShape))
             MoteIcon(MoteGlyph.Reply, null, Modifier.size(14.dp), colors.primary)
             Text(
-                if (missing || target == null) "元のメモは見つかりません" else previewOf(target.body),
+                if (missing || target == null) "元の capture は見つかりません" else previewOf(target.body),
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1483,10 +1482,10 @@ private fun CaptureRow(
                                 enabled = !(selecting && capture.isLong),
                                 onClickLabel = when {
                                     selecting -> "選択"
-                                    capture.isLong -> "長文を開く"
+                                    capture.isLong -> "long capture を開く"
                                     expanded -> "詳細を開く"
                                     foldable -> "全文を表示"
-                                    else -> "メモを開く"
+                                    else -> "short capture を開く"
                                 },
                                 onClick = {
                                     when {
@@ -1497,7 +1496,7 @@ private fun CaptureRow(
                                         else -> onSelect(capture)
                                     }
                                 },
-                                onLongClickLabel = if (selecting) "選択を切り替える" else "メモの操作",
+                                onLongClickLabel = if (selecting) "選択を切り替える" else "capture の操作",
                                 onLongClick = {
                                     if (selecting) {
                                         if (!capture.isLong) onToggleSelection(capture)
@@ -1526,7 +1525,7 @@ private fun CaptureRow(
                         ) {
                             if (capture.isLong) {
                                 Text(
-                                    if (capture.sessionOpen) "長文・下書き" else "長文",
+                                    if (capture.sessionOpen) "long capture・下書き" else "long capture",
                                     color = colors.primary, style = MaterialTheme.typography.labelSmall,
                                 )
                             }
@@ -1607,7 +1606,7 @@ private fun ReplyQuote(target: Capture?, onOpen: (() -> Unit)?) {
             )
         }
         Text(
-            text = if (target == null) "元のメモは見つかりません" else previewOf(target.body),
+            text = if (target == null) "元の capture は見つかりません" else previewOf(target.body),
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1719,9 +1718,9 @@ private fun DetailActions(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            DetailAction(MoteGlyph.Archive, if (capture.archived) "戻す" else "アーカイブ", enabled, onArchive)
+            DetailAction(MoteGlyph.Archive, if (capture.archived) "Inbox に戻す" else "アーカイブ", enabled, onArchive)
             DetailAction(MoteGlyph.Share, "共有", capture.body.isNotEmpty(), onShare)
-            DetailAction(MoteGlyph.Pin, if (capture.pinned) "解除" else "ピン", enabled, onPin)
+            DetailAction(MoteGlyph.Pin, if (capture.pinned) "ピン留め解除" else "ピン留め", enabled, onPin)
             DetailAction(MoteGlyph.Copy, "コピー", capture.body.isNotEmpty(), onCopy)
         }
     }
@@ -1777,7 +1776,7 @@ private fun SelectionDock(
             TextButton(onClick = onPush, enabled = canPush) {
                 MoteIcon(MoteGlyph.Expand, null, Modifier.size(17.dp))
                 Spacer(Modifier.width(5.dp))
-                Text("長文へ")
+                Text("long capture へ")
             }
         }
     }

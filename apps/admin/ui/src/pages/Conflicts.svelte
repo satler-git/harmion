@@ -128,12 +128,7 @@
 
 <div class="page-title">
   <div>
-    <p class="eyebrow">CONFLICT RESOLVER</p>
     <h1>競合解決</h1>
-    <p class="muted">
-      同じフィールドに複数の値があるとき、採用する値・本文・削除の扱いを決めます。編集トークンは
-      Content ごとに固定されているため、解決するたびに候補を再取得します。
-    </p>
   </div>
 </div>
 
@@ -151,7 +146,7 @@
         bind:value={id}
         required
         pattern={'[a-fA-F0-9]{64}'}
-        placeholder="コンテンツ画面から選択するか、64桁の ID を貼り付け"
+        placeholder="Content 画面から選択するか、64桁の ID を貼り付け"
       />
     </label>
     <button disabled={busy || writes.busy}>{busy ? '取得中…' : '候補を取得'}</button>

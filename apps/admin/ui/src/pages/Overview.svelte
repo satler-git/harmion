@@ -4,7 +4,7 @@
   import Clipboard from '../lib/Clipboard.svelte';
   import Grants from '../lib/Grants.svelte';
   import { bindingTarget, transportLabel } from '../lib/format';
-  import { approvalModeLabel, approvalTone } from '../lib/format';
+  import { approvalModeLabel } from '../lib/format';
 
   let {
     overview,
@@ -34,7 +34,6 @@
       return '—';
     }
   }
-  const workerMode = $derived(overview?.mode === 'worker' || capabilities?.mode === 'worker');
   const activeMembers = $derived(
     overview?.members.members.filter((member) => member.state === 'active').length ?? 0,
   );
@@ -56,13 +55,7 @@
 
 <div class="page-title">
   <div>
-    <p class="eyebrow">{workerMode ? 'REMOTE REPLICA' : 'LOCAL NODE'}</p>
     <h1>ノードの概要</h1>
-    <p class="muted">
-      {workerMode
-        ? 'Peer 専用の読み取り専用レプリカです。表示できる範囲の状態だけを返します。'
-        : 'このノードの同一性、保存量、参加ノード、認可状態をまとめて確認します。'}
-    </p>
   </div>
   <button disabled={busy} onclick={refresh}>{busy ? '取得中…' : '最新の状態に更新'}</button>
 </div>
@@ -95,7 +88,6 @@
       </article>
       <article>
         <span>Peer 登録</span><strong>{overview.peers?.length ?? 0}</strong>
-        <small>routing projection</small>
       </article>
       <article>
         <span>参加ノード</span><strong>{overview.members.members.length}</strong>
@@ -115,9 +107,6 @@
           <h2>このノード</h2>
           <p class="muted small">Peer とアプリが接続するときの識別情報です。</p>
         </div>
-        <span class="badge {readOnly ? 'badge-muted' : 'badge-ok'}">
-          {readOnly ? '読み取り専用' : '所有者'}
-        </span>
       </div>
       <dl>
         <dt>Node ID</dt>
@@ -173,16 +162,7 @@
         </dd>
         {#if overview.approval}
           <dt>端末承認</dt>
-          <dd>
-            <span class="badge {approvalTone(overview.approval)}">
-              {overview.approval.mode}
-            </span>
-            <span class="small"> {approvalModeLabel(overview.approval)}</span>
-          </dd>
-        {/if}
-        {#if overview.sync_status}
-          <dt>同期状態</dt>
-          <dd class="small">同期情報を取得しました（詳細は Peer 画面で確認してください）。</dd>
+          <dd class="small">{approvalModeLabel(overview.approval)}</dd>
         {/if}
       </dl>
       <div class="actions">

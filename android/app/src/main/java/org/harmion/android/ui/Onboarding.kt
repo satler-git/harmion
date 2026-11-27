@@ -125,7 +125,7 @@ fun OnboardingScreen(
                         modifier = Modifier.padding(20.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        Text("参加承認待ち", style = MaterialTheme.typography.titleLarge)
+                        Text("参加の承認待ち", style = MaterialTheme.typography.titleLarge)
                         Text(
                             "既存ノードの「参加要求を承認」でこのQRを読み取ってください。",
                             style = MaterialTheme.typography.bodySmall,
@@ -149,7 +149,7 @@ fun OnboardingScreen(
                                             .setType("text/plain")
                                             .putExtra(Intent.EXTRA_TEXT, code)
                                     context.startActivity(
-                                        Intent.createChooser(send, "参加コードを共有"),
+                                        Intent.createChooser(send, "参加要求コードを共有"),
                                     )
                                 },
                                 modifier = Modifier.weight(1f),
@@ -227,7 +227,6 @@ fun OnboardingScreen(
                 OutlinedTextField(
                     value = pasteText,
                     onValueChange = { pasteText = it.trim() },
-                    label = { Text("harmion-peer:v1:…") },
                     minLines = 3,
                     maxLines = 6,
                     modifier = Modifier.fillMaxWidth(),

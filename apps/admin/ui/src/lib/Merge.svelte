@@ -88,9 +88,6 @@
   <div class="merge-head">
     <div>
       <h3>本文を編集・マージ</h3>
-      <p class="muted small">
-        2つの候補を比較してマージ案を作るか、どちらかの候補をそのまま編集できます。
-      </p>
     </div>
   </div>
   <div class="actions">
@@ -175,9 +172,6 @@
 <style>
   .merge-head h3 {
     margin: 0 0 0.2rem;
-  }
-  .merge-head p {
-    margin: 0;
   }
   .merge-preview {
     max-height: 14rem;
