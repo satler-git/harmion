@@ -141,6 +141,11 @@ internal fun MoteSettingsScreen(
 @Composable
 private fun MoteAboutScreen(onBack: () -> Unit) {
     val colors = MaterialTheme.colorScheme
+    var showLicenses by rememberSaveable { mutableStateOf(false) }
+    if (showLicenses) {
+        MoteLicensesScreen(onBack = { showLicenses = false })
+        return
+    }
     BackHandler(onBack = onBack)
     Scaffold(
         containerColor = colors.background,
@@ -177,6 +182,9 @@ private fun MoteAboutScreen(onBack: () -> Unit) {
                 AboutCard("リビジョン") {
                     AboutInfo("コミット", BuildConfig.GIT_REVISION + if (BuildConfig.GIT_DIRTY) " (変更あり)" else "", emphasis = true)
                     AboutInfo("ブランチ", BuildConfig.GIT_BRANCH)
+                }
+                OutlinedButton(onClick = { showLicenses = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text("ライセンス")
                 }
             }
         }

@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.android.application) apply false
     alias(libs.plugins.android.library) apply false
     alias(libs.plugins.kotlin.compose) apply false
+    alias(libs.plugins.aboutLibraries) apply false
 }
 
 // The Rust JNI libraries are build outputs, not sources. Make every Android

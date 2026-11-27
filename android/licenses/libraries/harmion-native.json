@@ -1,0 +1,8 @@
+{
+  "uniqueId": "dev.satler.harmion:native",
+  "artifactVersion": "0.1.1",
+  "name": "Harmion native",
+  "licenses": [
+    "harmion-native"
+  ]
+}

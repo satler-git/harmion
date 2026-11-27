@@ -1,0 +1,44 @@
+# cargo-about configuration for third-party notices.
+#
+# Generation is pinned to the targets Harmion actually ships: Linux (x86_64 and
+# aarch64) for the CLI/daemon/desktop, and Android (arm64-v8a and x86_64) for
+# the APKs. cargo-about evaluates all listed targets as a union, so this file
+# intentionally over-includes a crate for an artifact that only ships on one
+# platform. Over-inclusion is safe for compliance; missing attribution is not.
+#
+# Run `scripts/generate-third-party-notices.sh` instead of invoking
+# cargo-about directly. It applies this config per artifact manifest, writes
+# the committed notices, and can check that they are current.
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+]
+
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-linux-android",
+    "x86_64-linux-android",
+]
+
+# Dev-dependencies are not part of a distributed binary.
+ignore-dev-dependencies = true
+
+# Known upstream packaging quirks that cargo-about documents for these crates.
+workarounds = ["ring", "rustls"]
+
+[private]
+# Workspace crates are first-party and are covered by the repository LICENSE.
+ignore = true

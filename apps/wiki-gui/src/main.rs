@@ -5824,6 +5824,13 @@ fn main() {
             "--focus-outline" => focus_outline = true,
             "--focus-tabs" => focus_tabs = true,
             "--shortcuts" => shortcuts = true,
+            "--licenses" => {
+                print!(
+                    "{}",
+                    include_str!("../../../licenses/wiki-gui/THIRD-PARTY-NOTICES.txt")
+                );
+                return;
+            }
             "--tab" => {
                 tab = Some(
                     args.next()

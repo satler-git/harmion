@@ -88,6 +88,8 @@
               pkgs.wrangler
               # design_checks/*.py
               pkgs.python3
+              # scripts/generate-third-party-notices.sh
+              pkgs.cargo-about
               # Inspecting node DBs during operation/recovery.
               pkgs.sqlite
               # AntiWebUI (Wiki M0): pkg-config metadata, fonts and Wayland.
@@ -254,6 +256,7 @@
             extraInstall = ''
               install -Dm644 ${./deploy/systemd}/harmion@.service $out/share/systemd/user/harmion@.service
               install -Dm755 ${./deploy/backup/harmion-backup.sh} $out/share/harmion/harmion-backup.sh
+              install -Dm644 ${./licenses/harmiond/THIRD-PARTY-NOTICES.txt} $out/share/licenses/harmiond/THIRD-PARTY-NOTICES.txt
             '';
           };
 
@@ -261,12 +264,18 @@
             pname = "harmion";
             package = "harmion";
             bins = [ "harmion" ];
+            extraInstall = ''
+              install -Dm644 ${./licenses/harmion/THIRD-PARTY-NOTICES.txt} $out/share/licenses/harmion/THIRD-PARTY-NOTICES.txt
+            '';
           };
 
           harmion-admin = mkHarmion {
             pname = "harmion-admin";
             package = "harmion-admin";
             bins = [ "harmion-admin" ];
+            extraInstall = ''
+              install -Dm644 ${./licenses/harmion-admin/THIRD-PARTY-NOTICES.txt} $out/share/licenses/harmion-admin/THIRD-PARTY-NOTICES.txt
+            '';
             extraAttrs = {
               HARMION_ADMIN_UI_DIST = "${admin-ui}";
             };

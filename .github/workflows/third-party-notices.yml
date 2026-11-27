@@ -1,0 +1,46 @@
+name: third-party-notices
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - "about.toml"
+      - "about.hbs"
+      - "about-component.hbs"
+      - "licenses/**"
+      - "android/licenses/**"
+      - "android/gradle/libs.versions.toml"
+      - "scripts/generate-third-party-notices.sh"
+      - ".github/workflows/third-party-notices.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - "about.toml"
+      - "about.hbs"
+      - "about-component.hbs"
+      - "licenses/**"
+      - "android/licenses/**"
+      - "android/gradle/libs.versions.toml"
+      - "scripts/generate-third-party-notices.sh"
+      - ".github/workflows/third-party-notices.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: notices are current
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+      - run: nix develop --command scripts/generate-third-party-notices.sh --check

@@ -45,6 +45,11 @@
             android:exported="false"
             android:theme="@style/Theme.Harmion" />
 
+        <activity
+            android:name=".ui.LicensesActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Harmion" />
+
         <!--
           Approval UI for third-party apps. Exported on purpose: any app may ask
           for review, but the activity verifies the launching package against the

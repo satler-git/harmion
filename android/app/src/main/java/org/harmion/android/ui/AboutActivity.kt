@@ -133,6 +133,12 @@ private fun AboutScreen(onBack: () -> Unit) {
 
             item {
                 HarmionCard(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+                    OutlinedButton(
+                        onClick = { context.startActivity(Intent(context, LicensesActivity::class.java)) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("ライセンス")
+                    }
                     OutlinedButton(onClick = { open(REPOSITORY) }, modifier = Modifier.fillMaxWidth()) {
                         Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
                         Text("GitHub", modifier = Modifier.padding(start = 8.dp))

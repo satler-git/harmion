@@ -112,6 +112,7 @@ Worker は常設の中継・同期先を使う場合だけ必要です。通常�
 - [ship 戦略とロールアウト](docs/shipping.md)
 - [Cloudflare 中継の設計](docs/cloudflare-design.md)
 - [実装メモ（README から移した詳細）](docs/implementation-notes.md)
+- [サードパーティライセンス表記](docs/third-party-notices.md)
 
 ## 開発
 
@@ -134,3 +135,5 @@ native は GitHub Release のバイナリを作らず、flake からビルドし
 ## ライセンス
 
 [LICENSE](LICENSE)
+
+配布物に同梱するサードパーティ通知の生成と確認は[サードパーティライセンス表記](docs/third-party-notices.md)を参照してください。

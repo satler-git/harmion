@@ -20,6 +20,8 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Show third-party licenses bundled with this binary.
+    Licenses,
     /// Manage local nodes.
     Node {
         #[command(subcommand)]
@@ -202,6 +204,7 @@ pub(crate) enum NodeCommand {
 impl Command {
     pub fn operation(&self) -> &'static str {
         match self {
+            Self::Licenses => "licenses",
             Self::Node { .. } => "node",
             Self::Identity => "identity",
             Self::Capabilities => "capabilities",
@@ -357,6 +360,13 @@ mod tests {
         assert!(matches!(cli.command, Command::InterpreterCancel { id } if id == "id"));
         assert!(parse(&["interpreter-describe"]).is_err());
         assert!(parse(&["interpreter-cancel", "id", "extra"]).is_err());
+    }
+
+    #[test]
+    fn licenses_is_a_local_command() {
+        let cli = Cli::try_parse_from(["harmion", "licenses"]).unwrap();
+        assert!(cli.node.is_none());
+        assert!(matches!(cli.command, Command::Licenses));
     }
 
     #[test]

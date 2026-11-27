@@ -1,0 +1,20 @@
+Harmion third-party notices
+===========================
+
+Harmion itself is licensed under the MIT License; see LICENSE in the source
+repository. This file lists the third-party components distributed with the
+artifact and reproduces the license text that applies to each component.
+
+--------------------------------------------------------------------------------
+{{#each licenses}}
+{{name}} ({{id}})
+--------------------------------------------------------------------------------
+
+Used by:
+{{#each used_by}}
+  - {{crate.name}} {{crate.version}}{{#if crate.repository}} <{{crate.repository}}>{{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

@@ -196,6 +196,7 @@ async fn execute(cli: &Cli, directory: &Path) -> Result<serde_json::Value> {
             Ok(registration)
         }
         CliCommand::Node { .. } => unreachable!("node list is handled before opening a node"),
+        CliCommand::Licenses => unreachable!("licenses is handled before opening a node"),
         CliCommand::Identity
         | CliCommand::Capabilities
         | CliCommand::Permissions
@@ -524,6 +525,13 @@ async fn execute(cli: &Cli, directory: &Path) -> Result<serde_json::Value> {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    if matches!(cli.command, CliCommand::Licenses) {
+        print!(
+            "{}",
+            include_str!("../../../licenses/harmion/THIRD-PARTY-NOTICES.txt")
+        );
+        return;
+    }
     if matches!(
         cli.command,
         CliCommand::Node {
