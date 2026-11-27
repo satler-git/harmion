@@ -35,6 +35,17 @@ pub struct ContentChange {
     pub content: ContentId,
 }
 
+/// Coarse aggregates for a read-only replica. This is not a visibility view:
+/// `contents` includes deleted Content and `accepted_updates` is the local log
+/// size, not the cluster's latest position.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplicaStats {
+    pub contents: u64,
+    pub accepted_updates: u64,
+    pub record_bytes: u64,
+    pub membership_high: u64,
+}
+
 pub const MAX_RETAINED_CHANGES: u64 = 4096;
 
 /// No await or external side effects inside the callback. The adapter must roll
@@ -98,6 +109,11 @@ pub trait Transaction: crate::oauth::Storage {
     ) -> Result<Vec<LogEntry>, Error>;
     fn accepted_high(&mut self) -> Result<u64, Error>;
     fn node_metrics(&mut self, now: i64) -> Result<harmion_protocol::metrics::NodeMetrics, Error>;
+    /// Optional aggregate for a peer-only replica. Full nodes may leave this
+    /// unimplemented; the Worker store answers it from its own log.
+    fn replica_stats(&mut self) -> Result<Option<ReplicaStats>, Error> {
+        Ok(None)
+    }
     /// Ordered prefix of (after, high] within the replication count and byte budgets.
     fn accepted_page(&mut self, after: u64, high: u64) -> Result<Vec<LogEntry>, Error>;
     fn accepted_record(&mut self, id: UpdateId) -> Result<Option<Record>, Error>;
@@ -167,7 +183,19 @@ pub trait Transaction: crate::oauth::Storage {
         cursor: QueryCursor,
     ) -> Result<QueryCursor, Error>;
     fn cursor(&mut self, sender: NodeId, epoch: LogEpoch) -> Result<u64, Error>;
+    /// Most recently written cursor for one sender. The epoch is the sender's
+    /// log epoch, not the local node's; a caller that only needs a display value
+    /// must not substitute its own epoch.
+    fn latest_cursor(&mut self, _sender: NodeId) -> Result<Option<(LogEpoch, u64)>, Error> {
+        Ok(None)
+    }
     fn set_cursor(&mut self, sender: NodeId, epoch: LogEpoch, through: u64) -> Result<(), Error>;
+    fn latest_membership_cursor(
+        &mut self,
+        _sender: NodeId,
+    ) -> Result<Option<(LogEpoch, u64)>, Error> {
+        Ok(None)
+    }
     fn has_apps(&mut self) -> Result<bool, Error>;
     fn app_by_verifier(&mut self, verifier: [u8; 32]) -> Result<Option<App>, Error>;
     fn app_by_id(&mut self, id: AppId) -> Result<Option<App>, Error>;

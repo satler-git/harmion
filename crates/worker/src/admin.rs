@@ -65,7 +65,6 @@ pub fn capabilities() -> Value {
         "auth": {"access": true, "bearer": true},
         "sections": {
             "overview": true,
-            "members": true,
             "peers": true,
             "contents": false,
             "conflicts": false,
@@ -102,7 +101,7 @@ pub fn handle(operation: &str, store: &mut impl Store, origin: &str, now: i64) -
             Err(_) => Response::unavailable(),
         },
         "peers" => match store.transaction(|tx| peers(tx)) {
-            Ok(value) => Response::json(200, value),
+            Ok(value) => Response::json(200, json!({"peers": value})),
             Err(_) => Response::unavailable(),
         },
         "overview" => match store.transaction(|tx| overview(tx, origin, now)) {
@@ -140,6 +139,26 @@ fn state_label(status: &Status) -> &'static str {
     }
 }
 
+fn binding_json(binding: &Binding, endpoint: &str) -> Value {
+    match binding {
+        Binding::Https(certificate) => json!({
+            "transport": "https",
+            "certificate": hex(certificate),
+            "endpoint": endpoint,
+        }),
+        Binding::Iroh(key) => json!({
+            "transport": "iroh",
+            "endpoint_id": hex(key),
+            "relay_url": endpoint,
+        }),
+        Binding::SignedHttps(key) => json!({
+            "transport": "signed_https",
+            "signing_key": hex(key),
+            "origin": endpoint,
+        }),
+    }
+}
+
 fn members(tx: &mut dyn Transaction) -> Result<Value, harmion_node::Error> {
     let state = membership_state::state(tx)?;
     let Some(state) = state else {
@@ -148,7 +167,20 @@ fn members(tx: &mut dyn Transaction) -> Result<Value, harmion_node::Error> {
     let members: Vec<Value> = state
         .nodes
         .iter()
-        .map(|(node, status)| json!({"node_id": hex(&node.0), "state": state_label(status)}))
+        .map(|(node, status)| {
+            let mut entry = serde_json::Map::new();
+            entry.insert("node_id".into(), json!(hex(&node.0)));
+            entry.insert("state".into(), json!(state_label(status)));
+            if let Status::Active(member) = status {
+                entry.insert("signing_key".into(), json!(hex(&member.signing_key)));
+                entry.insert("endpoint".into(), json!(member.endpoint));
+                entry.insert(
+                    "binding".into(),
+                    binding_json(&member.binding, &member.endpoint),
+                );
+            }
+            Value::Object(entry)
+        })
         .collect();
     let pending: Vec<Value> = state
         .pending_retirements
@@ -168,11 +200,15 @@ fn members(tx: &mut dyn Transaction) -> Result<Value, harmion_node::Error> {
     }))
 }
 
-fn peers(tx: &mut dyn Transaction) -> Result<Value, harmion_node::Error> {
+fn peers(tx: &mut dyn Transaction) -> Result<Vec<Value>, harmion_node::Error> {
     let pins = tx.known_peer_identities()?;
     let mut result = Vec::new();
     for peer in tx.peers()? {
         let pin = pins.iter().find(|pin| pin.node == peer.node);
+        // Cursors are keyed by the sender's own log epoch. Use the latest
+        // written row instead of substituting this Worker's epoch.
+        let received = tx.latest_cursor(peer.node)?;
+        let membership_received = tx.latest_membership_cursor(peer.node)?;
         let pinning = pin.map(|pin| match &pin.provenance {
             harmion_node::identity::Provenance::OwnerRegistration => "owner_registration",
             harmion_node::identity::Provenance::OwnerRecovery => "owner_recovery",
@@ -205,9 +241,12 @@ fn peers(tx: &mut dyn Transaction) -> Result<Value, harmion_node::Error> {
                 "provenance": pinning,
             })),
             "binding": transport,
+            "received_through": received.map(|(_, through)| through.to_string()),
+            "membership_received_through": membership_received
+                .map(|(_, through)| through.to_string()),
         }));
     }
-    Ok(json!({"peers": result}))
+    Ok(result)
 }
 
 fn overview(
@@ -225,6 +264,7 @@ fn overview(
         "version": 4,
         "cluster_id": hex(&identity.cluster.0),
         "node_id": hex(&identity.node.0),
+        "epoch": hex(&identity.epoch.0),
         "signing_key": match &own {
             Some(Status::Active(member)) => hex(&member.signing_key),
             _ => String::new(),
@@ -236,6 +276,19 @@ fn overview(
         },
     });
     let members = members(tx)?;
+    let self_state = state
+        .as_ref()
+        .and_then(|state| state.nodes.get(&identity.node))
+        .map(state_label)
+        .unwrap_or("unconfigured");
+    let stats = tx.replica_stats()?.map(|stats| {
+        json!({
+            "contents": stats.contents.to_string(),
+            "accepted_updates": stats.accepted_updates.to_string(),
+            "record_bytes": stats.record_bytes.to_string(),
+            "membership_high": stats.membership_high.to_string(),
+        })
+    });
     let configured = state.is_some() && tx.membership_root()?.is_some();
     // Sync observations are not produced by the peer-only adapter; the UI must
     // show them as unavailable instead of a fabricated zero.
@@ -243,6 +296,8 @@ fn overview(
         "identity": own_registration,
         "mode": "worker",
         "configured": configured,
+        "self_state": self_state,
+        "stats": stats,
         "permissions": null,
         "capabilities": capabilities(),
         "metrics": null,

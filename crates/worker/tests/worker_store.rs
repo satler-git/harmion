@@ -375,10 +375,12 @@ fn peer_only_store_serves_membership_and_record_pages_durably() {
         PeerReply::Status { high: 0, .. }
     ));
 
-    // Upload one record through the Peer Accept path.
+    // Upload one record through the Peer Accept path. The page epoch is the
+    // sender's, not this Worker's.
     let expected = record();
+    let sender_epoch = LogEpoch([3; 32]);
     let page = Page {
-        epoch: identity().epoch,
+        epoch: sender_epoch,
         after: 0,
         through: 1,
         high: 1,
@@ -427,10 +429,24 @@ fn peer_only_store_serves_membership_and_record_pages_durably() {
                         .id()
                 )
             );
-            assert_eq!(tx.cursor(node(3), identity().epoch)?, 1);
+            assert_eq!(tx.cursor(node(3), sender_epoch)?, 1);
+            assert_eq!(tx.cursor(node(3), identity().epoch)?, 0);
+            assert_eq!(tx.latest_cursor(node(3))?, Some((sender_epoch, 1)));
             Ok(())
         })
         .unwrap();
+
+    let overview = harmion_worker::admin::handle("overview", &mut t.store, ORIGIN, 1);
+    let overview: serde_json::Value = serde_json::from_slice(&overview.body).unwrap();
+    assert_eq!(overview["peers"][0]["received_through"], "1");
+    let stats = t
+        .store
+        .transaction(|tx| tx.replica_stats())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stats.contents, 1);
+    assert_eq!(stats.accepted_updates, 1);
+    assert_eq!(stats.record_bytes, expected.bytes().len() as u64);
 
     // Reopening with a different Node ID must fail closed.
     assert!(
@@ -529,6 +545,34 @@ fn provisioned_store(path: &Path) -> WorkerStore<RusqliteHost> {
 }
 
 #[test]
+fn unprovisioned_worker_reports_an_unconfigured_replica() {
+    let path = std::env::temp_dir().join(format!(
+        "harmion-worker-unconfigured-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
+    let identity = Identity {
+        cluster: CLUSTER,
+        node: node(3),
+        epoch: LogEpoch([3; 32]),
+    };
+    let mut store = WorkerStore::open(RusqliteHost::open(path.join("do.db")), identity).unwrap();
+
+    let overview = harmion_worker::admin::handle("overview", &mut store, ORIGIN, 1);
+    let overview: serde_json::Value = serde_json::from_slice(&overview.body).unwrap();
+    assert_eq!(overview["self_state"], "unconfigured");
+    assert_eq!(overview["configured"], false);
+    assert_eq!(overview["stats"]["accepted_updates"], "0");
+    assert_eq!(overview["members"]["members"], serde_json::json!([]));
+    assert_eq!(overview["peers"], serde_json::json!([]));
+}
+
+#[test]
 fn provisioned_worker_exposes_only_the_read_only_admin_surface() {
     let path = std::env::temp_dir().join(format!(
         "harmion-worker-admin-{}-{}",
@@ -563,6 +607,22 @@ fn provisioned_worker_exposes_only_the_read_only_admin_surface() {
         .collect();
     assert!(states.contains(&(hex(&node(2).0), "active".to_owned())));
     assert!(states.contains(&(hex(&node(3).0), "active".to_owned())));
+    let active = members["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["node_id"] == hex(&node(3).0))
+        .unwrap();
+    assert_eq!(
+        active["signing_key"],
+        serde_json::json!(hex(&signer(3).public_key()))
+    );
+    assert_eq!(active["binding"]["transport"], "signed_https");
+    assert_eq!(
+        active["binding"]["origin"],
+        serde_json::json!(member(3).endpoint)
+    );
+    assert_eq!(active["endpoint"], serde_json::json!(member(3).endpoint));
 
     let peers = harmion_worker::admin::handle("peers", &mut store, ORIGIN, 1);
     let peers: serde_json::Value = serde_json::from_slice(&peers.body).unwrap();
@@ -571,12 +631,29 @@ fn provisioned_worker_exposes_only_the_read_only_admin_surface() {
     assert_eq!(peer["pinned"], true);
     assert_eq!(peer["pin"]["provenance"], "owner_registration");
     assert_eq!(peer["binding"]["transport"], "signed_https");
+    assert!(peer["received_through"].is_null());
+    assert!(peer["membership_received_through"].is_null());
+
+    let overview = harmion_worker::admin::handle("overview", &mut store, ORIGIN, 1);
+    let overview: serde_json::Value = serde_json::from_slice(&overview.body).unwrap();
+    assert_eq!(overview["self_state"], "active");
+    assert_eq!(overview["stats"]["accepted_updates"], "0");
+    assert_eq!(overview["stats"]["contents"], "0");
+    assert_eq!(overview["stats"]["record_bytes"], "0");
+    // The root and one evidence admission were written by provisioning.
+    assert_eq!(overview["stats"]["membership_high"], "3");
+    assert!(overview["peers"][0]["received_through"].is_null());
+    assert_eq!(
+        overview["identity"]["signing_key"],
+        serde_json::json!(hex(&signer(3).public_key()))
+    );
 
     let capabilities = harmion_worker::admin::handle("capabilities", &mut store, ORIGIN, 1);
     let capabilities: serde_json::Value = serde_json::from_slice(&capabilities.body).unwrap();
     assert_eq!(capabilities["mode"], "worker");
     assert_eq!(capabilities["read_only"], true);
     assert_eq!(capabilities["sections"]["contents"], false);
+    assert!(capabilities["sections"].get("members").is_none());
     assert_eq!(capabilities["operations"]["peer_approve"], false);
 
     // Unknown and write operations are not routed.

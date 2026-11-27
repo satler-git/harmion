@@ -14,7 +14,7 @@ use harmion_node::{
     identity::{KnownIdentity, Provenance},
     membership::{Peer, PeerKey},
     query::{QueryPosition, QueryRevision},
-    storage::{ChangeWindow, ContentChange, Identity, Store, Transaction},
+    storage::{ChangeWindow, ContentChange, Identity, ReplicaStats, Store, Transaction},
 };
 use harmion_protocol::membership::Certificate;
 use harmion_protocol::{
@@ -24,6 +24,11 @@ use harmion_protocol::{
 };
 
 const UNSUPPORTED: &str = "not supported by the peer-only Worker store";
+/// Incremental aggregates kept in `meta`, so `/overview` does not rescan the
+/// append-only log while it holds the Durable Object's serialization slot.
+const STATS_CONTENTS: &str = "stats_contents";
+const STATS_ACCEPTED: &str = "stats_accepted_updates";
+const STATS_BYTES: &str = "stats_record_bytes";
 
 pub struct WorkerStore<H: SqlHost> {
     host: H,
@@ -157,6 +162,33 @@ fn small(row: &[SqlValue], index: usize) -> Result<u8, Error> {
         _ => Err(Error::CorruptLog),
     }
 }
+fn nonnegative(row: &[SqlValue], index: usize) -> Result<u64, Error> {
+    match row.get(index) {
+        Some(SqlValue::Int(value)) if *value >= 0 => Ok(*value as u64),
+        _ => Err(Error::CorruptLog),
+    }
+}
+/// One-time backfill for the incremental counters. This is the only path that
+/// scans `content_records` / `accept_log`.
+fn compute_counts(sql: &mut dyn SqlTransaction) -> Result<(u64, u64, u64), Error> {
+    let rows = sql
+        .query(
+            "SELECT
+                (SELECT COUNT(DISTINCT content) FROM content_records),
+                (SELECT COUNT(*) FROM accept_log),
+                (SELECT COALESCE(SUM(length(bytes)),0) FROM accept_log)",
+            &[],
+        )
+        .map_err(host_error)?;
+    let Some(row) = rows.first() else {
+        return Err(Error::CorruptLog);
+    };
+    Ok((
+        nonnegative(row, 0)?,
+        nonnegative(row, 1)?,
+        nonnegative(row, 2)?,
+    ))
+}
 fn position(row: &[SqlValue], index: usize) -> Result<u64, Error> {
     let bytes = value(row, index)?;
     Ok(u64::from_be_bytes(
@@ -203,6 +235,33 @@ impl WorkerTransaction<'_> {
             .map(|row| position(&row, 0))
             .transpose()
             .map(|v| v.unwrap_or(0))
+    }
+    fn get_u64(&mut self, key: &str) -> Result<Option<u64>, Error> {
+        self.get(key)?
+            .map(|bytes| {
+                <[u8; 8]>::try_from(bytes)
+                    .map(u64::from_be_bytes)
+                    .map_err(|_| Error::CorruptLog)
+            })
+            .transpose()
+    }
+    fn put_u64(&mut self, key: &str, value: u64) -> Result<(), Error> {
+        self.put(key, value.to_be_bytes().to_vec())
+    }
+    /// Backfills the counters once for a store created by an older build. On
+    /// the normal path this is three indexed meta reads and no table scan.
+    fn ensure_stats(&mut self) -> Result<(), Error> {
+        if self.get_u64(STATS_CONTENTS)?.is_some()
+            && self.get_u64(STATS_ACCEPTED)?.is_some()
+            && self.get_u64(STATS_BYTES)?.is_some()
+        {
+            return Ok(());
+        }
+        let (contents, accepted, bytes) = compute_counts(self.sql)?;
+        self.put_u64(STATS_CONTENTS, contents)?;
+        self.put_u64(STATS_ACCEPTED, accepted)?;
+        self.put_u64(STATS_BYTES, bytes)?;
+        Ok(())
     }
     fn read_records(&mut self, sql: &str, params: &[SqlValue]) -> Result<Vec<LogEntry>, Error> {
         let rows = self.sql.query(sql, params).map_err(host_error)?;
@@ -577,6 +636,16 @@ impl Transaction for WorkerTransaction<'_> {
         }
     }
     fn append(&mut self, record: &Record) -> Result<u64, Error> {
+        self.ensure_stats()?;
+        let content = record.update().content_id.0.to_vec();
+        let new_content = self
+            .sql
+            .query(
+                "SELECT 1 FROM content_records WHERE content=? LIMIT 1",
+                &[SqlValue::Blob(content.clone())],
+            )
+            .map_err(host_error)?
+            .is_empty();
         let sequence = self.high("accept_log")? + 1;
         self.sql
             .execute(
@@ -592,12 +661,17 @@ impl Transaction for WorkerTransaction<'_> {
         self.sql
             .execute(
                 "INSERT INTO content_records(content,seq) VALUES(?,?)",
-                &[
-                    SqlValue::Blob(record.update().content_id.0.to_vec()),
-                    blob_u64(sequence),
-                ],
+                &[SqlValue::Blob(content), blob_u64(sequence)],
             )
             .map_err(host_error)?;
+        let contents = self.get_u64(STATS_CONTENTS)?.ok_or(Error::CorruptLog)?
+            + if new_content { 1 } else { 0 };
+        let accepted = self.get_u64(STATS_ACCEPTED)?.ok_or(Error::CorruptLog)? + 1;
+        let bytes =
+            self.get_u64(STATS_BYTES)?.ok_or(Error::CorruptLog)? + record.bytes().len() as u64;
+        self.put_u64(STATS_CONTENTS, contents)?;
+        self.put_u64(STATS_ACCEPTED, accepted)?;
+        self.put_u64(STATS_BYTES, bytes)?;
         Ok(sequence)
     }
     fn put_search_projection(
@@ -623,6 +697,24 @@ impl Transaction for WorkerTransaction<'_> {
             .transpose()
             .map(|v| v.unwrap_or(0))
     }
+    fn latest_cursor(&mut self, sender: NodeId) -> Result<Option<(LogEpoch, u64)>, Error> {
+        let mut rows = self
+            .sql
+            .query(
+                "SELECT epoch, through FROM peer_cursors WHERE sender=?
+                 ORDER BY rowid DESC LIMIT 1",
+                &[SqlValue::Blob(sender.0.to_vec())],
+            )
+            .map_err(host_error)?;
+        let Some(row) = rows.pop() else {
+            return Ok(None);
+        };
+        Ok(Some((
+            LogEpoch(fixed(value(&row, 0)?)?),
+            position(&row, 1)?,
+        )))
+    }
+
     fn set_cursor(&mut self, sender: NodeId, epoch: LogEpoch, through: u64) -> Result<(), Error> {
         self.sql
             .execute(
@@ -636,6 +728,37 @@ impl Transaction for WorkerTransaction<'_> {
             )
             .map_err(host_error)?;
         Ok(())
+    }
+
+    fn latest_membership_cursor(
+        &mut self,
+        sender: NodeId,
+    ) -> Result<Option<(LogEpoch, u64)>, Error> {
+        let mut rows = self
+            .sql
+            .query(
+                "SELECT epoch, through FROM membership_cursors WHERE sender=?
+                 ORDER BY rowid DESC LIMIT 1",
+                &[SqlValue::Blob(sender.0.to_vec())],
+            )
+            .map_err(host_error)?;
+        let Some(row) = rows.pop() else {
+            return Ok(None);
+        };
+        Ok(Some((
+            LogEpoch(fixed(value(&row, 0)?)?),
+            position(&row, 1)?,
+        )))
+    }
+
+    fn replica_stats(&mut self) -> Result<Option<ReplicaStats>, Error> {
+        self.ensure_stats()?;
+        Ok(Some(ReplicaStats {
+            contents: self.get_u64(STATS_CONTENTS)?.ok_or(Error::CorruptLog)?,
+            accepted_updates: self.get_u64(STATS_ACCEPTED)?.ok_or(Error::CorruptLog)?,
+            record_bytes: self.get_u64(STATS_BYTES)?.ok_or(Error::CorruptLog)?,
+            membership_high: self.high("membership_log")?,
+        }))
     }
 
     // ---- App/Query/OAuth/Subscription surface: fail closed ------------------

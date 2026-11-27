@@ -341,7 +341,17 @@ pub fn peer_handle(
             Ok(out)
         },
     );
-    response(result.status, result.body)
+    peer_response(result.status, result.body, result.data)
+}
+
+fn peer_response(status: u16, body: Vec<u8>, data: bool) -> Result<JsValue, JsValue> {
+    let object = response(status, body)?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("data"),
+        &JsValue::from_bool(data),
+    )?;
+    Ok(object)
 }
 
 #[wasm_bindgen]

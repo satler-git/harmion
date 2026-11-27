@@ -72,6 +72,7 @@ export interface Registration {
   version: number;
   cluster_id: string;
   node_id: string;
+  epoch?: string;
   signing_key?: string;
   cluster_root?: string;
   binding:
@@ -89,8 +90,16 @@ export interface Grants {
   manage_apps: boolean;
   manage_nodes: boolean;
 }
+export type MembershipState = 'active' | 'retired' | 'conflict' | 'unconfirmed';
+export interface WorkerMember {
+  node_id: string;
+  state: MembershipState;
+  signing_key?: string;
+  endpoint?: string;
+  binding?: WorkerPeerBinding;
+}
 export interface Members {
-  members: { node_id: string; state: 'active' | 'retired' | 'conflict' | 'unconfirmed' }[];
+  members: WorkerMember[];
   pending_retirements: { certificate_id: string; issuer: string; target: string }[];
   confirmed_certificates: number;
 }
@@ -122,6 +131,40 @@ export interface WorkerPeer {
   pinned: boolean;
   pin: { signing_key: string; provenance: string } | null;
   binding: WorkerPeerBinding;
+  received_through?: string;
+  membership_received_through?: string;
+}
+export interface WorkerReplicaStats {
+  contents: string;
+  accepted_updates: string;
+  record_bytes: string;
+  membership_high: string;
+}
+export interface WorkerHostStatus {
+  config: { ok: boolean; missing: string[]; invalid: string[] };
+  provisioning: {
+    provisioned: boolean;
+    provisioned_at: string | null;
+    identity_matches: boolean;
+    bootstrap_enabled: boolean;
+    allow_reprovision: boolean;
+  };
+  sync: {
+    interval_ms: string;
+    alarm_next_at: string | null;
+    last_inbound_at: string | null;
+    schedule: {
+      node: string;
+      failures: string;
+      next: string | null;
+      last_at: string | null;
+      last_ok: boolean | null;
+    }[];
+  };
+}
+export interface RegistrationCode {
+  code: string;
+  registration: Registration;
 }
 export interface ApprovalStatus {
   mode: 'terminal' | 'stdio' | 'session' | 'deny';
@@ -143,6 +186,8 @@ export interface Overview {
   peer_transfer: string | null;
   mode?: 'native' | 'worker';
   configured?: boolean;
+  self_state?: MembershipState | 'unconfigured';
+  stats?: WorkerReplicaStats | null;
   peers?: WorkerPeer[];
   sync_status?: unknown;
   approval?: ApprovalStatus | null;

@@ -1,4 +1,11 @@
-import type { Capabilities, Edit, Save } from './types';
+import type {
+  Capabilities,
+  Edit,
+  RegistrationCode,
+  Save,
+  WorkerHostStatus,
+  WorkerPeer,
+} from './types';
 export class ApiError extends Error {
   constructor(public status: number) {
     const messages: Record<number, string> = {
@@ -23,7 +30,12 @@ export const session = $state({
   ended: false,
   mode: 'native' as 'native' | 'worker',
 });
-export const workerAdmin = $state({ capabilities: null as Capabilities | null });
+export const workerAdmin = $state({
+  capabilities: null as Capabilities | null,
+  status: null as WorkerHostStatus | null,
+  statusError: '',
+  statusCode: 0,
+});
 const MARKER = (window as unknown as { __HARMION_ADMIN_MODE__?: string }).__HARMION_ADMIN_MODE__;
 // A Worker requires a bearer (401) even for capabilities; the native admin
 // server explicitly answers 404 for that Worker-only path. This distinguishes
@@ -72,6 +84,9 @@ export async function connect() {
 export async function endSession() {
   if (session.mode === 'worker') {
     sessionStorage.removeItem('harmion-admin-token');
+    workerAdmin.status = null;
+    workerAdmin.statusError = '';
+    workerAdmin.statusCode = 0;
     session.token = '';
     session.ended = true;
     return;
@@ -99,6 +114,24 @@ export async function loadCapabilities(): Promise<Capabilities | null> {
     throw error;
   }
 }
+export async function loadWorkerStatus(): Promise<WorkerHostStatus | null> {
+  try {
+    const value = await api<WorkerHostStatus>('/admin/host-status', {});
+    workerAdmin.status = value;
+    workerAdmin.statusError = '';
+    workerAdmin.statusCode = 0;
+    return value;
+  } catch (error) {
+    workerAdmin.status = null;
+    workerAdmin.statusError =
+      error instanceof ApiError ? errorMessage(error) : '状態を取得できませんでした。';
+    workerAdmin.statusCode = error instanceof ApiError ? error.status : 0;
+    return null;
+  }
+}
+export async function loadRegistrationCode(): Promise<RegistrationCode> {
+  return api<RegistrationCode>('/admin/registration-code', {});
+}
 export async function signInWorker(token: string) {
   session.token = token.trim();
   session.mode = 'worker';
@@ -119,6 +152,16 @@ export function errorMessage(error: unknown) {
 }
 export function short(id: string) {
   return id.slice(0, 10) + '…' + id.slice(-6);
+}
+
+/** Accept both the current array shape and the old doubly-wrapped overview. */
+export function peersOf(overview: { peers?: unknown } | null | undefined): WorkerPeer[] {
+  const value = overview?.peers;
+  if (Array.isArray(value)) return value as WorkerPeer[];
+  if (value && typeof value === 'object' && Array.isArray((value as { peers?: unknown }).peers)) {
+    return (value as { peers: WorkerPeer[] }).peers;
+  }
+  return [];
 }
 export function fieldName(field: import('./types').Field) {
   return field.type === 'body'

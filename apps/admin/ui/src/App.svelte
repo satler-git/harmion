@@ -6,6 +6,7 @@
     endSession,
     errorMessage,
     loadCapabilities,
+    loadWorkerStatus,
     detectMode,
     restoreWorkerSession,
     session,
@@ -82,7 +83,11 @@
     busy = true;
     error = '';
     try {
-      overview = await api<Overview>('/overview', {});
+      const [nextOverview] = await Promise.all([
+        api<Overview>(worker ? '/admin/overview' : '/overview', {}),
+        worker ? loadWorkerStatus() : Promise.resolve(null),
+      ]);
+      overview = nextOverview;
       sampledAt = new Date().toLocaleTimeString('ja-JP');
     } catch (e) {
       error = errorMessage(e);
@@ -146,8 +151,7 @@
       {#if worker}
         <h1>{opening ? '接続しています…' : 'Worker 管理画面に接続'}</h1>
         <p class="muted">
-          {accessError ||
-            'デプロイ時に発行された管理者トークンを入力してください。Cloudflare Access の背後でのみ利用できます。'}
+          {accessError || 'デプロイ時に発行された管理者トークンを入力してください。'}
         </p>
         <input
           type="password"
@@ -165,7 +169,6 @@
         >
           {opening ? '確認中…' : '接続'}
         </button>
-        <p class="muted small">読み取り専用の管理画面です。承認・退役・同期は利用できません。</p>
       {:else}
         <h1>
           {opening
@@ -259,6 +262,7 @@
             {error}
             {navigate}
             {readOnly}
+            {now}
           />
         </div>
         {#if !readOnly}

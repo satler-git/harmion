@@ -139,6 +139,12 @@ async function identityFingerprint(env) {
   ).join("");
 }
 
+// Admin JSON times are decimal microseconds, like the native admin API.
+function micros(value) {
+  const millis = Number(value);
+  return Number.isFinite(millis) && millis > 0 ? String(millis * 1000) : null;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -266,6 +272,9 @@ export class Node {
       Date.now() * 1000,
       body,
     );
+    if (url.pathname === "/peer/v2/exchange" && result.status === 200 && result.data) {
+      await this.recordInbound();
+    }
     await this.storage.sync();
     return new Response(result.body, {
       status: result.status,
@@ -273,9 +282,101 @@ export class Node {
     });
   }
 
+  // Host metadata, not node state: a failed write must not change the peer
+  // response. Throttle so a page-by-page sync round performs one write.
+  async recordInbound() {
+    try {
+      const now = Date.now();
+      const previous = await this.storage.get("sync/last_inbound");
+      if (
+        previous &&
+        typeof previous === "object" &&
+        Number(previous.at) > now - 60000
+      ) {
+        return;
+      }
+      await this.storage.put("sync/last_inbound", { at: now });
+    } catch (error) {
+      console.error("last inbound metadata failed", error);
+    }
+  }
+
+  async hostStatus() {
+    try {
+      const problem = configurationProblem(this.env);
+      const provisioned = await this.storage.get("provisioned_state");
+      const hasProvisioning = Boolean(provisioned && typeof provisioned === "object");
+      const currentIdentity = hasProvisioning
+        ? await identityFingerprint(this.env)
+        : null;
+      const alarm = await this.storage.getAlarm();
+      const lastInbound = await this.storage.get("sync/last_inbound");
+      const storedSchedule = await this.storage.get("sync/schedule");
+      const schedule =
+        storedSchedule &&
+        typeof storedSchedule === "object" &&
+        !Array.isArray(storedSchedule)
+          ? storedSchedule
+          : {};
+      const interval = Number(this.env.SYNC_INTERVAL_MS ?? "0");
+      return Response.json(
+        {
+          config: {
+            ok: !problem,
+            missing: problem?.missing ?? [],
+            invalid: problem?.invalid ?? [],
+          },
+          provisioning: {
+            provisioned: hasProvisioning,
+            provisioned_at: hasProvisioning
+              ? micros(provisioned.provisioned_at)
+              : null,
+            identity_matches:
+              hasProvisioning && provisioned.identity === currentIdentity,
+            bootstrap_enabled:
+              typeof this.env.BOOTSTRAP_TOKEN === "string" &&
+              this.env.BOOTSTRAP_TOKEN.length >= 32 &&
+              this.env.ALLOW_PROVISION === "1",
+            allow_reprovision: this.env.ALLOW_REPROVISION === "1",
+          },
+          sync: {
+            interval_ms: String(Number.isFinite(interval) && interval > 0 ? interval : 0),
+            alarm_next_at: micros(alarm),
+            last_inbound_at:
+              lastInbound && typeof lastInbound === "object"
+                ? micros(lastInbound.at)
+                : null,
+            schedule: Object.entries(schedule)
+              .sort(([left], [right]) => left.localeCompare(right))
+              .map(([node, entry]) => ({
+                node,
+                failures: String(entry?.failures ?? 0),
+                next: micros(entry?.next),
+                last_at: micros(entry?.last_at),
+                last_ok: typeof entry?.last_ok === "boolean" ? entry.last_ok : null,
+              })),
+          },
+        },
+        { headers: { "cache-control": "no-store" } },
+      );
+    } catch (error) {
+      console.error("host status failed", error);
+      return Response.json(
+        { error: "unavailable" },
+        { status: 503, headers: { "cache-control": "no-store" } },
+      );
+    }
+  }
+
   async admin(request, operation) {
     const authorization = request.headers.get("authorization") ?? "";
     const provided = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+    if (operation === "host-status") {
+      if (!this.authorized(request)) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+      return this.hostStatus();
+    }
     const result = rust.admin_handle(
       this.env.CLUSTER,
       this.env.NODE_ID,
@@ -337,7 +438,11 @@ export class Node {
 
   async scheduledSync() {
     const now = Date.now();
-    const schedule = (await this.storage.get("sync/schedule")) ?? {};
+    const storedSchedule = await this.storage.get("sync/schedule");
+    const schedule =
+      storedSchedule && typeof storedSchedule === "object" && !Array.isArray(storedSchedule)
+        ? storedSchedule
+        : {};
     const peers = await rust.outbound_peers(
       this.env.CLUSTER,
       this.env.NODE_ID,
@@ -359,6 +464,8 @@ export class Node {
     );
     for (const result of results) {
       const entry = schedule[result.peer] ?? { failures: 0, next: 0 };
+      entry.last_at = now;
+      entry.last_ok = result.ok;
       if (result.ok) {
         entry.failures = 0;
         entry.next = now + Number(this.env.SYNC_INTERVAL_MS ?? "300000");

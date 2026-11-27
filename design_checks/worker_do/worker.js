@@ -16,6 +16,44 @@ const ADMIN_PATHS = [
   "/registration-code",
 ];
 
+const REQUIRED_ENV = ["CLUSTER", "NODE_ID", "EPOCH", "SEED", "ORIGIN", "ADMIN_TOKEN"];
+const HEX_ENV = ["CLUSTER", "NODE_ID", "EPOCH", "SEED"];
+
+// Local probe: unlike the production host, a short test ADMIN_TOKEN is allowed.
+function configurationProblem(env) {
+  const missing = REQUIRED_ENV.filter((name) => {
+    const value = env[name];
+    return typeof value !== "string" || value.length === 0 || value.startsWith("REPLACE_");
+  });
+  const invalid = HEX_ENV.filter((name) => !/^[0-9a-f]{64}$/.test(env[name] ?? ""));
+  try {
+    const origin = new URL(env.ORIGIN);
+    if (origin.protocol !== "https:" || origin.pathname !== "/" || origin.search || origin.hash) {
+      invalid.push("ORIGIN");
+    }
+  } catch {
+    invalid.push("ORIGIN");
+  }
+  return missing.length || invalid.length ? { missing, invalid } : null;
+}
+
+async function identityFingerprint(env) {
+  const material = [env.CLUSTER, env.NODE_ID, env.EPOCH, env.SEED, env.ORIGIN].join("|");
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(material),
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+// Admin JSON times are decimal microseconds, like the native admin API.
+function micros(value) {
+  const millis = Number(value);
+  return Number.isFinite(millis) && millis > 0 ? String(millis * 1000) : null;
+}
+
 export default {
   async fetch(request, env) {
     globalThis.__harmionPeers = env.LEAF ? { "leaf.internal": env.LEAF } : {};
@@ -50,7 +88,11 @@ export class Node {
 
   async scheduledSync() {
     const now = Date.now();
-    const schedule = (await this.storage.get("sync/schedule")) ?? {};
+    const storedSchedule = await this.storage.get("sync/schedule");
+    const schedule =
+      storedSchedule && typeof storedSchedule === "object" && !Array.isArray(storedSchedule)
+        ? storedSchedule
+        : {};
     const peers = await rust.outbound_peers(
       this.env.CLUSTER,
       this.env.NODE_ID,
@@ -72,6 +114,8 @@ export class Node {
     );
     for (const result of results) {
       const entry = schedule[result.peer] ?? { failures: 0, next: 0 };
+      entry.last_at = now;
+      entry.last_ok = result.ok;
       if (result.ok) {
         entry.failures = 0;
         entry.next = now + Number(this.env.SYNC_INTERVAL_MS ?? "300000");
@@ -142,6 +186,9 @@ export class Node {
       Date.now() * 1000,
       body,
     );
+    if (url.pathname === "/peer/v2/exchange" && result.status === 200 && result.data) {
+      await this.recordInbound();
+    }
     await this.storage.sync();
     return new Response(result.body, {
       status: result.status,
@@ -149,9 +196,108 @@ export class Node {
     });
   }
 
+  async recordInbound() {
+    try {
+      const now = Date.now();
+      const previous = await this.storage.get("sync/last_inbound");
+      if (
+        previous &&
+        typeof previous === "object" &&
+        Number(previous.at) > now - 60000
+      ) {
+        return;
+      }
+      await this.storage.put("sync/last_inbound", { at: now });
+    } catch (error) {
+      console.error("last inbound metadata failed", error);
+    }
+  }
+
+  authorized(request) {
+    const authorization = request.headers.get("authorization") ?? "";
+    return (
+      typeof this.env.ADMIN_TOKEN === "string" &&
+      this.env.ADMIN_TOKEN.length > 0 &&
+      authorization === `Bearer ${this.env.ADMIN_TOKEN}`
+    );
+  }
+
+  async hostStatus() {
+    try {
+      const problem = configurationProblem(this.env);
+      const provisioned = await this.storage.get("provisioned_state");
+      const hasProvisioning = Boolean(provisioned && typeof provisioned === "object");
+      const currentIdentity = hasProvisioning
+        ? await identityFingerprint(this.env)
+        : null;
+      const alarm = await this.storage.getAlarm();
+      const lastInbound = await this.storage.get("sync/last_inbound");
+      const storedSchedule = await this.storage.get("sync/schedule");
+      const schedule =
+        storedSchedule &&
+        typeof storedSchedule === "object" &&
+        !Array.isArray(storedSchedule)
+          ? storedSchedule
+          : {};
+      const interval = Number(this.env.SYNC_INTERVAL_MS ?? "0");
+      return Response.json(
+        {
+          config: {
+            ok: !problem,
+            missing: problem?.missing ?? [],
+            invalid: problem?.invalid ?? [],
+          },
+          provisioning: {
+            provisioned: hasProvisioning,
+            provisioned_at: hasProvisioning
+              ? micros(provisioned.provisioned_at)
+              : null,
+            identity_matches:
+              hasProvisioning && provisioned.identity === currentIdentity,
+            bootstrap_enabled:
+              typeof this.env.BOOTSTRAP_TOKEN === "string" &&
+              this.env.BOOTSTRAP_TOKEN.length >= 32 &&
+              this.env.ALLOW_PROVISION === "1",
+            allow_reprovision: this.env.ALLOW_REPROVISION === "1",
+          },
+          sync: {
+            interval_ms: String(Number.isFinite(interval) && interval > 0 ? interval : 0),
+            alarm_next_at: micros(alarm),
+            last_inbound_at:
+              lastInbound && typeof lastInbound === "object"
+                ? micros(lastInbound.at)
+                : null,
+            schedule: Object.entries(schedule)
+              .sort(([left], [right]) => left.localeCompare(right))
+              .map(([node, entry]) => ({
+                node,
+                failures: String(entry?.failures ?? 0),
+                next: micros(entry?.next),
+                last_at: micros(entry?.last_at),
+                last_ok: typeof entry?.last_ok === "boolean" ? entry.last_ok : null,
+              })),
+          },
+        },
+        { headers: { "cache-control": "no-store" } },
+      );
+    } catch (error) {
+      console.error("host status failed", error);
+      return Response.json(
+        { error: "unavailable" },
+        { status: 503, headers: { "cache-control": "no-store" } },
+      );
+    }
+  }
+
   async admin(request, operation) {
     const authorization = request.headers.get("authorization") ?? "";
     const provided = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+    if (operation === "host-status") {
+      if (!this.authorized(request)) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+      return this.hostStatus();
+    }
     const result = rust.admin_handle(
       this.env.CLUSTER,
       this.env.NODE_ID,
@@ -206,6 +352,10 @@ export class Node {
       this.env.SEED,
       manifest,
     );
+    await this.storage.put("provisioned_state", {
+      identity: await identityFingerprint(this.env),
+      provisioned_at: Date.now(),
+    });
     await this.storage.put("provisioned", true);
     await this.storage.sync();
     return Response.json({ configured: true });

@@ -84,6 +84,9 @@ Initial deployment uses the app-layer boundary explicitly:
 - `/admin/*`, `/capabilities`, `/overview`, `/members`, `/peers`,
   `/provision-status`, `/registration-code` and `/internal/*` require
   `Authorization: Bearer ADMIN_TOKEN`.
+- `/admin/host-status` returns configuration validity, provisioning fingerprint
+  match, alarm timing and the last inbound data exchange time to the admin UI. It
+  never returns secret values.
 - `/peer/v2/*` is public by design and authenticated by signed frames, pinned
   node keys and durable challenges.
 - `/provision` requires the one-time bootstrap token **and** `ALLOW_PROVISION=1`.

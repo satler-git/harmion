@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import QRCode from 'qrcode';
-  import { api, errorMessage, short } from '../lib/api.svelte';
+  import { api, count, errorMessage, peersOf, short } from '../lib/api.svelte';
   import type { Overview, PeerPreview, SyncResult } from '../lib/types';
   import Confirm from '../lib/Confirm.svelte';
   import Clipboard from '../lib/Clipboard.svelte';
@@ -43,6 +43,15 @@
     target: string;
     action: 'confirm_retirement' | 'dismiss_retirement';
   } | null>(null);
+  const workerPeers = $derived(peersOf(overview));
+  const selfNode = $derived(overview?.identity.node_id ?? '');
+  const workerMembers = $derived(
+    [...(overview?.members.members ?? [])].sort(
+      (left, right) => Number(right.node_id === selfNode) - Number(left.node_id === selfNode),
+    ),
+  );
+  const workerPending = $derived(overview?.members.pending_retirements ?? []);
+  const workerActive = $derived(workerMembers.filter((member) => member.state === 'active').length);
 
   $effect(() => {
     if (!active) {
@@ -178,19 +187,55 @@
 {#if message}<p class="success" role="status">{message}</p>{/if}
 
 {#if readOnly}
-  <section class="panel">
-    <div class="section-head">
-      <div>
-        <h2>Peer（読み取り専用）</h2>
-        <p class="muted small">
-          この Worker は Peer 専用レプリカです。参加承認・退役・手動同期はこの画面では提供しません。
-        </p>
-      </div>
+  <section class="panel" aria-label="Peer の状態">
+    <div class="worker-summary">
+      <span>参加 {workerActive} / {workerMembers.length}</span>
+      <span>Peer {workerPeers.length}</span>
+      <span>pin {workerPeers.filter((peer) => peer.pinned).length}</span>
+      {#if workerPending.length}<span class="badge badge-warn">
+          退役証明 {workerPending.length}
+        </span>{/if}
     </div>
-    {#if (overview?.peers ?? []).length === 0}
+
+    <h2>メンバー</h2>
+    {#if workerMembers.length === 0}
+      <p class="empty">参加状態はまだありません。</p>
+    {:else}
+      {#each workerMembers as member}
+        <div class="peer-row">
+          <div>
+            <div class="title-line">
+              <strong>
+                {member.node_id === overview?.identity.node_id
+                  ? 'このノード'
+                  : short(member.node_id)}
+              </strong>
+              <span class="badge {membershipStateTone(member.state)}">
+                {membershipStateLabel(member.state)}
+              </span>
+            </div>
+            <div class="id-line">
+              <p class="mono muted small">{member.node_id}</p>
+              <Clipboard text={member.node_id} label="コピー" />
+            </div>
+            {#if member.binding}
+              <p class="small">
+                {transportLabel(member.binding.transport)} · {bindingTarget(member.binding)}
+              </p>
+            {/if}
+            {#if member.signing_key}
+              <p class="mono muted small">公開鍵 {short(member.signing_key)}</p>
+            {/if}
+          </div>
+        </div>
+      {/each}
+    {/if}
+
+    <h2>Peer 接続</h2>
+    {#if workerPeers.length === 0}
       <p class="empty">登録された Peer はありません。</p>
     {:else}
-      {#each overview?.peers ?? [] as peer}
+      {#each workerPeers as peer}
         <div class="peer-row">
           <div>
             <div class="title-line">
@@ -204,32 +249,39 @@
                 <span class="badge badge-warn">未 pin</span>
               {/if}
             </div>
-            <p class="mono muted small">{peer.node_id}</p>
+            <div class="id-line">
+              <p class="mono muted small">{peer.node_id}</p>
+              <Clipboard text={peer.node_id} label="コピー" />
+            </div>
             <p class="small">
               {transportLabel(peer.binding.transport)} · {bindingTarget(peer.binding)}
+            </p>
+            <p class="muted small">
+              更新 {peer.received_through ? count(peer.received_through) : '—'} · 参加 {peer.membership_received_through
+                ? count(peer.membership_received_through)
+                : '—'}
             </p>
           </div>
         </div>
       {/each}
     {/if}
-    <h3>参加状態</h3>
-    {#if (overview?.members.members ?? []).length === 0}
-      <p class="muted small">参加状態はまだありません。</p>
-    {:else}
-      {#each overview?.members.members ?? [] as member}
+
+    {#if workerPending.length}
+      <h2>保留中の退役証明</h2>
+      <p class="muted small">確定・却下はローカルの管理画面で行います。</p>
+      {#each workerPending as pending}
         <div class="peer-row">
           <div>
-            <div class="title-line">
-              <strong>
-                {member.node_id === overview?.identity.node_id
-                  ? 'このノード'
-                  : short(member.node_id)}
-              </strong>
-              <span class="badge {membershipStateTone(member.state)}">
-                {membershipStateLabel(member.state)}
-              </span>
+            <p class="meta-label">対象 Node ID</p>
+            <div class="id-line">
+              <p class="mono small">{pending.target}</p>
+              <Clipboard text={pending.target} label="コピー" />
             </div>
-            <p class="mono muted small">{member.node_id}</p>
+            <details>
+              <summary>証明と発行元を表示</summary>
+              <p class="mono small">証明 ID: {pending.certificate_id}</p>
+              <p class="mono small">発行元: {pending.issuer}</p>
+            </details>
           </div>
         </div>
       {/each}
@@ -492,6 +544,30 @@
   }
   .peer-row p {
     margin: 0.25rem 0;
+  }
+  .id-line {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .id-line p {
+    margin: 0;
+    min-width: 0;
+  }
+  .id-line :global(button) {
+    padding: 0.15rem 0.45rem;
+    font-size: 0.72rem;
+    flex-shrink: 0;
+  }
+  .worker-summary {
+    display: flex;
+    gap: 1.2rem;
+    flex-wrap: wrap;
+    color: var(--muted);
+    font-size: 0.82rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--line);
   }
   .hint-box {
     border: 1px solid #2a3448;

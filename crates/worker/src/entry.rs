@@ -44,6 +44,9 @@ pub struct HostContext<'a> {
 pub struct Response {
     pub status: u16,
     pub body: Vec<u8>,
+    /// True when the exchange carried a data-class command, so the host can
+    /// distinguish data receipt from membership-only control traffic.
+    pub data: bool,
 }
 
 impl Response {
@@ -51,13 +54,15 @@ impl Response {
         Self {
             status,
             body: Vec::new(),
+            data: false,
         }
     }
-    fn frame(outcome: &harmion_node::https_peer::PeerV2Response) -> Self {
+    fn frame(outcome: &harmion_node::https_peer::PeerV2Response, data: bool) -> Self {
         match outcome.encode() {
             Ok(body) => Self {
                 status: outcome.http_status(),
                 body,
+                data,
             },
             Err(_) => Self::empty(500),
         }
@@ -117,6 +122,7 @@ pub fn handle<S: Store, C: ChallengeStore + ?Sized>(
     let Ok(frame) = Frame::decode(request.body) else {
         return Response::empty(400);
     };
+    let is_data = matches!(request_class(&frame), Ok(PayloadClass::Data));
     if https_peer::check_common(&frame, local, &config.origin).is_err() {
         return Response::empty(400);
     }
@@ -132,7 +138,7 @@ pub fn handle<S: Store, C: ChallengeStore + ?Sized>(
     if https_peer::verify_frame(&frame, &pin.signing_key).is_err() {
         return Response::empty(403);
     }
-    if matches!(request_class(&frame), Ok(PayloadClass::Data)) {
+    if is_data {
         match node.transaction(|tx| membership_state::active_member(tx, requester).map(|_| ())) {
             Ok(()) => {}
             Err(harmion_node::Error::Storage(_) | harmion_node::Error::CorruptLog) => {
@@ -150,21 +156,22 @@ pub fn handle<S: Store, C: ChallengeStore + ?Sized>(
     };
     if request.path == CHALLENGE_PATH {
         return match https_peer::issue_challenge(challenges, &session, &frame, random) {
-            Ok(outcome) => Response::frame(&outcome),
+            Ok(outcome) => Response::frame(&outcome, false),
             Err(error) => Response::empty(status_for(&error)),
         };
     }
     let consumed = match https_peer::begin_exchange(challenges, &session, &frame, random) {
         Ok(ExchangeOutcome::Consumed(consumed)) => consumed,
-        Ok(ExchangeOutcome::Rejected(rejected)) => return Response::frame(&rejected),
+        Ok(ExchangeOutcome::Rejected(rejected)) => return Response::frame(&rejected, false),
         Err(error) => return Response::empty(status_for(&error)),
     };
     let key = PeerKey::SignedHttps(pin.signing_key);
     // `handle` owns its own node transaction; the challenge was already consumed.
     let dispatched = membership::handle(node, &key, &consumed.request)
         .and_then(|reply| Ok(encode_peer_response(&reply)?));
+    let data = is_data && dispatched.is_ok();
     match https_peer::complete_exchange(&session, &consumed, dispatched) {
-        Ok(outcome) => Response::frame(&outcome),
+        Ok(outcome) => Response::frame(&outcome, data),
         Err(_) => Response::empty(500),
     }
 }

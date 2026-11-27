@@ -21,6 +21,8 @@ wasm-bindgen --target web --out-dir "$here/src/pkg" --out-name harmion_worker_do
 cp "$here/src/host-api.js" "$here/src/pkg/host-api.js"
 sed -i "s|from 'host-api'|from './host-api.js'|; s|from \"host-api\"|from \"./host-api.js\"|" "$here/src/pkg/harmion_worker_do.js"
 admin_ui="$(nix build .#admin-ui --no-link --print-out-paths)"
+# The Nix output is read-only; a previous copy would otherwise make rm/cp fail.
+if [ -d "$here/public" ]; then chmod -R u+w "$here/public"; fi
 rm -rf "$here/public"
 mkdir -p "$here/public"
 cp -R "$admin_ui"/. "$here/public/"

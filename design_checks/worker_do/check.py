@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run the Harmion DO bridge in local workerd with a real Rust Peer client."""
+import json
 import os
 from pathlib import Path
 import re
@@ -89,6 +90,74 @@ def unauthorized_admin(url: str):
     raise AssertionError("admin overview accepted a request without a bearer")
 
 
+def unauthorized_host_status(url: str):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(
+        url + "/admin/host-status", data=b"{}", method="POST"
+    )
+    try:
+        opener.open(request, timeout=2)
+    except urllib.error.HTTPError as error:
+        require(error.code == 401, f"expected 401, received {error.code}")
+        error.close()
+        return
+    raise AssertionError("host status accepted a request without a bearer")
+
+
+def wrong_bearer_host_status(url: str):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(
+        url + "/admin/host-status",
+        data=b"{}",
+        method="POST",
+        headers={"authorization": "Bearer wrong-token"},
+    )
+    try:
+        opener.open(request, timeout=2)
+    except urllib.error.HTTPError as error:
+        require(error.code == 401, f"expected 401, received {error.code}")
+        error.close()
+        return
+    raise AssertionError("host status accepted a wrong bearer")
+
+
+def admin_host_status(url: str):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(
+        url + "/admin/host-status",
+        data=b"{}",
+        method="POST",
+        headers={"authorization": "Bearer local-test-admin-token"},
+    )
+    with opener.open(request, timeout=5) as response:
+        require(response.status == 200, "host status response")
+        require(
+            response.headers.get("cache-control") == "no-store",
+            "host status cache policy",
+        )
+        status = json.load(response)
+    raw = json.dumps(status)
+    for secret in (
+        "local-test-admin-token",
+        "local-test-bootstrap-token",
+        "0303030303030303030303030303030303030303030303030303030303030303",
+    ):
+        require(secret not in raw, "host status leaked a secret value")
+    require(status["provisioning"]["provisioned"] is True, "host provisioned")
+    require(status["provisioning"]["identity_matches"] is True, "host identity")
+    require(status["sync"]["last_inbound_at"] is not None, "last inbound")
+    require(
+        len(status["sync"]["last_inbound_at"]) >= 16,
+        "last inbound is microseconds",
+    )
+    require(
+        len(status["provisioning"]["provisioned_at"]) >= 16,
+        "provisioned_at is microseconds",
+    )
+    require("missing" in status["config"], "config detail")
+    print("PASS: host status reports provisioning and freshness", flush=True)
+
+
 def unauthorized_internal(url: str):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     request = urllib.request.Request(
@@ -169,13 +238,19 @@ def main():
                 print("PASS: provision rejects a wrong bootstrap token", flush=True)
                 unauthorized_admin(runtime.url)
                 print("PASS: admin requires the app-layer bearer", flush=True)
+                unauthorized_host_status(runtime.url)
+                print("PASS: host status requires the app-layer bearer", flush=True)
+                wrong_bearer_host_status(runtime.url)
+                print("PASS: host status rejects a wrong bearer", flush=True)
                 unauthorized_internal(runtime.url)
                 print("PASS: outbound sync requires the app-layer bearer", flush=True)
                 static_assets(runtime.url)
                 client(runtime.url)
+                admin_host_status(runtime.url)
                 runtime.stop()
                 runtime.start()
                 print("PASS: workerd restarted with the same durable storage", flush=True)
+                admin_host_status(runtime.url)
                 client(runtime.url, verify=True)
             except BaseException:
                 try:
