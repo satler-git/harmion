@@ -14,6 +14,7 @@ internal const val CAPTURE_KIND = "capture"
 private const val CAPTURE_NAMESPACE = "capture"
 private const val CREATED_AT = "created_at_micros"
 private const val ARCHIVED = "archived"
+private const val ARCHIVED_AT = "archived_at_micros"
 private const val PINNED = "pinned"
 private const val SESSION_OPEN = "session_open"
 private const val REPLY_TO = "reply_to"
@@ -56,7 +57,7 @@ internal class CaptureRepository(
         buildList {
             add(Requests.body(body))
             add(Requests.kind(CAPTURE_KIND))
-            add(Requests.attribute(CAPTURE_NAMESPACE, CREATED_AT, System.currentTimeMillis() * 1000L))
+            add(Requests.attribute(CAPTURE_NAMESPACE, CREATED_AT, nowMicros()))
             if (open) add(Requests.attribute(CAPTURE_NAMESPACE, SESSION_OPEN, true))
             if (replyTo != null) add(Requests.attribute(CAPTURE_NAMESPACE, REPLY_TO, replyTo))
         },
@@ -74,7 +75,30 @@ internal class CaptureRepository(
 
     override suspend fun readLong(id: String): LongCaptureView = currentView(id).longCapture()
 
-    suspend fun setArchived(capture: Capture, value: Boolean) = patch(capture, ARCHIVED, capture.archived, value)
+    /**
+     * Archive and its timestamp change together; restoring removes the timestamp.
+     * A null [archivedAtMicros] keeps a pre-timestamp archive without inventing one.
+     */
+    suspend fun setArchived(capture: Capture, value: Boolean, archivedAtMicros: Long?) {
+        val current = currentView(capture.id)
+        if (current.hasDeletionConflict || current.hasAttributeConflict(ARCHIVED) ||
+            current.hasAttributeConflict(ARCHIVED_AT) ||
+            current.attributeFlag(ARCHIVED) != capture.archived
+        ) changed()
+        if (capture.archived == value) return
+        val fields = if (value) {
+            listOfNotNull(
+                Requests.attribute(CAPTURE_NAMESPACE, ARCHIVED, true),
+                archivedAtMicros?.let { Requests.attribute(CAPTURE_NAMESPACE, ARCHIVED_AT, it) },
+            )
+        } else {
+            listOf(
+                Requests.attribute(CAPTURE_NAMESPACE, ARCHIVED, false),
+                Requests.unsetAttribute(CAPTURE_NAMESPACE, ARCHIVED_AT),
+            )
+        }
+        session.save(Requests.edit(capture.id, current.token, fields), identity)
+    }
 
     suspend fun setPinned(capture: Capture, value: Boolean) = patch(capture, PINNED, capture.pinned, value)
 
@@ -165,6 +189,8 @@ private fun boundedRequest(request: String): String {
 }
 
 private fun changed(): Nothing = throw HarmionException("capture_changed", "capture changed before the operation")
+
+private fun nowMicros(): Long = System.currentTimeMillis() * 1_000L
 
 internal fun captureSnapshots(events: Flow<SubscriptionEvent>): Flow<CaptureSnapshot> = flow {
     var index: Map<String, Capture>? = null
@@ -264,6 +290,7 @@ private class CaptureReadView(view: JSONObject, expectedId: String) {
         body = body(),
         createdAtMicros = captureTimestamp(attributes[CREATED_AT]),
         archived = attributeFlag(ARCHIVED),
+        archivedAtMicros = captureTimestamp(attributes[ARCHIVED_AT]),
         pinned = attributeFlag(PINNED),
         token = token,
         sessionOpen = attributeFlag(SESSION_OPEN),

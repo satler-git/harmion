@@ -15,15 +15,32 @@ data class Capture(
     val isLong: Boolean = sessionOpen,
     /** Capture ID this one replies to, if any. The target may have been deleted. */
     val replyTo: String? = null,
+    /**
+     * UTC Unix microseconds recorded when the capture was archived.
+     * Absent for captures archived before this attribute was introduced.
+     */
+    val archivedAtMicros: Long? = null,
 ) {
     // Avoid including private capture text or the node-local edit token in diagnostic logs.
     override fun toString(): String = "Capture(id=$id)"
 }
 
-/** Independent Inbox/All and Pinned controls; neither pinning nor archiving affects order. */
-data class CaptureFilter(val includeArchived: Boolean = false, val pinnedOnly: Boolean = false) {
-    /** Oldest first. Undated records sort first; Content ID breaks ties across snapshot orders. */
+private val inboxOrder = compareBy<Capture>(Capture::createdAtMicros, Capture::id)
+
+/**
+ * Oldest archive first. Captures without an archive time sort first, by creation
+ * time, so they stay at the top instead of being mixed into the dated sequence.
+ */
+private val archiveOrder = compareBy<Capture> { it.archivedAtMicros ?: Long.MIN_VALUE }
+    .thenBy(Capture::createdAtMicros)
+    .thenBy(Capture::id)
+
+/**
+ * Inbox shows unarchived captures. Archived shows only archived captures in
+ * archive order. Pinning filters either list; it never changes the order.
+ */
+data class CaptureFilter(val archivedOnly: Boolean = false, val pinnedOnly: Boolean = false) {
     fun applyTo(captures: Iterable<Capture>): List<Capture> =
-        captures.filter { (includeArchived || !it.archived) && (!pinnedOnly || it.pinned) }
-            .sortedWith(compareBy(Capture::createdAtMicros, Capture::id))
+        captures.filter { it.archived == archivedOnly && (!pinnedOnly || it.pinned) }
+            .sortedWith(if (archivedOnly) archiveOrder else inboxOrder)
 }

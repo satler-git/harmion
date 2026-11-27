@@ -42,6 +42,7 @@ internal object CaptureCacheCodec {
                     .put("body", capture.body)
                     .put("created_at", capture.createdAtMicros ?: JSONObject.NULL)
                     .put("archived", capture.archived)
+                    .put("archived_at", capture.archivedAtMicros ?: JSONObject.NULL)
                     .put("pinned", capture.pinned)
                     .put("session_open", capture.sessionOpen)
                     .put("is_long", capture.isLong)
@@ -70,6 +71,12 @@ internal object CaptureCacheCodec {
                     createdAtMicros =
                         if (entry.has("created_at") && !entry.isNull("created_at")) entry.getLong("created_at") else null,
                     archived = entry.optBoolean("archived"),
+                    archivedAtMicros =
+                        if (entry.has("archived_at") && !entry.isNull("archived_at")) {
+                            entry.getLong("archived_at")
+                        } else {
+                            null
+                        },
                     pinned = entry.optBoolean("pinned"),
                     // A cached row is read-only; never carry a node edit token across processes.
                     token = "",

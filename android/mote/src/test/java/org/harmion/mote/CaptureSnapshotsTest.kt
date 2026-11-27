@@ -66,7 +66,7 @@ class CaptureSnapshotsTest {
     }
 
     @Test
-    fun readsReplyTargetAndOpenSessionFromAttributes() {
+    fun readsReplyTargetOpenSessionAndArchiveTimeFromAttributes() {
         val replyTo = "b".repeat(64)
         val view = JSONObject()
             .put("edit_token", "token")
@@ -84,6 +84,9 @@ class CaptureSnapshotsTest {
                             listOf(
                                 JSONObject().put("namespace", "capture").put("key", "reply_to").put("value", replyTo),
                                 JSONObject().put("namespace", "capture").put("key", "session_open").put("value", true),
+                                JSONObject().put("namespace", "capture").put("key", "archived").put("value", true),
+                                JSONObject().put("namespace", "capture").put("key", "archived_at_micros")
+                                    .put("value", 1_795_644_250_000_000L),
                             ),
                         ),
                     ),
@@ -96,5 +99,7 @@ class CaptureSnapshotsTest {
         assertEquals(replyTo, capture.replyTo)
         assertTrue(capture.sessionOpen)
         assertTrue(capture.isLong)
+        assertTrue(capture.archived)
+        assertEquals(1_795_644_250_000_000L, capture.archivedAtMicros)
     }
 }

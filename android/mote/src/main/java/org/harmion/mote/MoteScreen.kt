@@ -5,7 +5,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
@@ -138,7 +137,6 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.LineBreak
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -160,21 +158,6 @@ private fun gapPadding(micros: Long?): Dp = when {
     micros < 2L * 60 * 60 * 1_000_000 -> 8.dp
     else -> 18.dp
 }
-
-private val BubbleLineBreak =
-    if (Build.VERSION.SDK_INT >= 35) {
-        LineBreak(
-            strategy = LineBreak.Strategy.HighQuality,
-            strictness = LineBreak.Strictness.Strict,
-            wordBreak = LineBreak.WordBreak.Phrase,
-        )
-    } else {
-        LineBreak(
-            strategy = LineBreak.Strategy.HighQuality,
-            strictness = LineBreak.Strictness.Strict,
-            wordBreak = LineBreak.WordBreak.Default,
-        )
-    }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -221,7 +204,7 @@ internal fun MoteScreen(
     var expandAnchor by remember { mutableStateOf<ExpandAnchor?>(null) }
     val replyFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     var requestReplyFocus by remember { mutableStateOf(false) }
-    var includeArchived by rememberSaveable { mutableStateOf(false) }
+    var archivedOnly by rememberSaveable { mutableStateOf(false) }
     var pinnedOnly by rememberSaveable { mutableStateOf(false) }
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     var deleteSnapshot by remember { mutableStateOf<Capture?>(null) }
@@ -253,12 +236,14 @@ internal fun MoteScreen(
     val imeVisible = WindowInsets.isImeVisible
     var pendingLongOpen by remember { mutableStateOf(false) }
     val localLongId = state.longCapture?.captureId
-    val filtered = remember(allCaptures, includeArchived, pinnedOnly, state.archivePreviews, localLongId) {
+    val filtered = remember(allCaptures, archivedOnly, pinnedOnly, state.archivePreviews, localLongId) {
         val projected = allCaptures.mapNotNull { item ->
             if (item.sessionOpen && item.id == localLongId) null
-            else state.archivePreviews[item.id]?.let { item.copy(archived = it.archived) } ?: item
+            else state.archivePreviews[item.id]?.let { preview ->
+                item.copy(archived = preview.archived, archivedAtMicros = preview.archivedAtMicros)
+            } ?: item
         }
-        CaptureFilter(includeArchived, pinnedOnly).applyTo(projected)
+        CaptureFilter(archivedOnly, pinnedOnly).applyTo(projected)
     }
     val headerVisible = selected == null
     val topPadding = with(density) { (if (headerHeight == 0) 76.dp else headerHeight.toDp()) + 4.dp }
@@ -308,7 +293,7 @@ internal fun MoteScreen(
     }
 
     fun jumpToReplyTarget(target: Capture) {
-        if (target.archived && !includeArchived) includeArchived = true
+        if (archivedOnly != target.archived) archivedOnly = target.archived
         if (pinnedOnly && !target.pinned) pinnedOnly = false
         selectedId = null
         highlightId = null
@@ -334,7 +319,7 @@ internal fun MoteScreen(
     }
     LaunchedEffect(jumpTargetId, filtered) {
         val id = jumpTargetId ?: return@LaunchedEffect
-        val index = timelineItemIndex(filtered, id, ZoneId.systemDefault())
+        val index = timelineItemIndex(filtered, id, ZoneId.systemDefault(), groupByDay = !archivedOnly)
         if (index == null) {
             jumpTargetId = null
             return@LaunchedEffect
@@ -451,7 +436,7 @@ internal fun MoteScreen(
                                     when {
                                         !ready -> "再接続しています"
                                         pinnedOnly -> "ピン留めはありません"
-                                        includeArchived -> "capture はありません"
+                                        archivedOnly -> "アーカイブはありません"
                                         else -> "Inbox は空です"
                                     },
                                     style = MaterialTheme.typography.bodyMedium,
@@ -462,13 +447,14 @@ internal fun MoteScreen(
                             }
                         }
                     } else {
-                        key(includeArchived, pinnedOnly) {
+                        key(archivedOnly, pinnedOnly) {
                             CaptureTimeline(
                                 captures = filtered,
                                 listState = homeList,
                                 backdrop = backdrop,
                                 topPadding = topPadding,
                                 bottomPadding = dockPadding,
+                                groupByDay = !archivedOnly,
                                 enabled = canMutate,
                                 updating = state.archivePreviews.keys,
                                 archiveHaptics = preferences.archiveHaptics,
@@ -558,7 +544,7 @@ internal fun MoteScreen(
                     state = state,
                     ready = ready,
                     canMutate = canMutate,
-                    includeArchived = includeArchived,
+                    archivedOnly = archivedOnly,
                     pinnedOnly = pinnedOnly,
                     replyTarget = replyTarget,
                     replyMissing = state.replyTo != null && replyTarget == null,
@@ -571,8 +557,8 @@ internal fun MoteScreen(
                     onSubmit = onSubmit,
                     editing = state.editingId != null,
                     onCancelEdit = onCancelEdit,
-                    onIncludeArchived = {
-                        includeArchived = it
+                    onArchivedOnly = {
+                        archivedOnly = it
                         leaveSelection()
                     },
                     onPinnedOnly = {
@@ -1006,7 +992,7 @@ private fun HomeDock(
     state: MoteUiState,
     ready: Boolean,
     canMutate: Boolean,
-    includeArchived: Boolean,
+    archivedOnly: Boolean,
     pinnedOnly: Boolean,
     replyTarget: Capture?,
     replyMissing: Boolean,
@@ -1016,7 +1002,7 @@ private fun HomeDock(
     onSubmit: () -> Unit,
     editing: Boolean,
     onCancelEdit: () -> Unit,
-    onIncludeArchived: (Boolean) -> Unit,
+    onArchivedOnly: (Boolean) -> Unit,
     onPinnedOnly: (Boolean) -> Unit,
     onRelease: () -> Unit,
     onOpenLong: () -> Unit,
@@ -1030,6 +1016,7 @@ private fun HomeDock(
     val canSubmit = ready && state.draftAvailable && !state.busy && state.draft.isNotBlank() &&
         (!editing || state.draft != editingBody)
     val canOpenLong = state.longCaptureAvailable && !state.busy
+    val canStartLong = canOpenLong && !state.pending
     val long = state.longCapture
     Box(modifier.fillMaxWidth().onSizeChanged { dockHeight(it.height) }) {
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
@@ -1052,9 +1039,9 @@ private fun HomeDock(
                         Spacer(Modifier.weight(1f))
                         FilterRow(
                             ready = ready || state.cacheLoaded,
-                            includeArchived = includeArchived,
+                            archivedOnly = archivedOnly,
                             pinnedOnly = pinnedOnly,
-                            onIncludeArchived = onIncludeArchived,
+                            onArchivedOnly = onArchivedOnly,
                             onPinnedOnly = onPinnedOnly,
                         )
                     }
@@ -1075,10 +1062,8 @@ private fun HomeDock(
                 MoteComposer(
                     state.draft,
                     onDraft,
-                    when {
-                        editing -> "short capture を編集…"
-                        else -> "short capture を書く…"
-                    },
+                    placeholder = if (editing) "short capture を編集…" else null,
+                    accessibilityLabel = if (editing) "short capture を編集" else "short capture を書く",
                     enabled = state.draftAvailable,
                     readOnly = state.pending || state.busy,
                     focusRequester = focusRequester,
@@ -1095,12 +1080,12 @@ private fun HomeDock(
                                 MoteIcon(MoteGlyph.Close, "編集をやめる", Modifier.size(20.dp), colors.onSurfaceVariant)
                             }
                         } else if (long == null) {
-                            IconButton(onClick = onOpenLong, enabled = canOpenLong) {
+                            IconButton(onClick = onOpenLong, enabled = canStartLong) {
                                 MoteIcon(
                                     MoteGlyph.Expand,
                                     "long capture を書く",
                                     Modifier.size(20.dp),
-                                    colors.onSurfaceVariant.copy(alpha = if (canOpenLong) 1f else .45f),
+                                    colors.onSurfaceVariant.copy(alpha = if (canStartLong) 1f else .45f),
                                 )
                             }
                         }
@@ -1156,16 +1141,16 @@ private fun LongDraftCard(
 @Composable
 private fun FilterRow(
     ready: Boolean,
-    includeArchived: Boolean,
+    archivedOnly: Boolean,
     pinnedOnly: Boolean,
-    onIncludeArchived: (Boolean) -> Unit,
+    onArchivedOnly: (Boolean) -> Unit,
     onPinnedOnly: (Boolean) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     SingleChoiceSegmentedButtonRow {
-        listOf("Inbox", "All").forEachIndexed { index, label ->
+        listOf(MoteGlyph.Inbox to "Inbox", MoteGlyph.Archive to "Archived").forEachIndexed { index, (glyph, label) ->
             SegmentedButton(
-                selected = includeArchived == (index == 1), onClick = { onIncludeArchived(index == 1) },
+                selected = archivedOnly == (index == 1), onClick = { onArchivedOnly(index == 1) },
                 enabled = ready, shape = SegmentedButtonDefaults.itemShape(index, 2),
                 colors = SegmentedButtonDefaults.colors(
                     activeContainerColor = colors.primaryContainer, activeContentColor = colors.onPrimaryContainer,
@@ -1173,7 +1158,7 @@ private fun FilterRow(
                     inactiveContentColor = colors.onSurfaceVariant, inactiveBorderColor = colors.outlineVariant,
                 ),
                 icon = {},
-            ) { Text(label, maxLines = 1) }
+            ) { MoteIcon(glyph, label, Modifier.size(19.dp)) }
         }
     }
     FilledTonalIconToggleButton(
@@ -1224,6 +1209,7 @@ private fun CaptureTimeline(
     backdrop: MoteBackdrop,
     topPadding: Dp,
     bottomPadding: Dp,
+    groupByDay: Boolean,
     enabled: Boolean,
     updating: Set<String>,
     archiveHaptics: Boolean,
@@ -1250,23 +1236,29 @@ private fun CaptureTimeline(
 ) {
     val zone = ZoneId.systemDefault()
     val today = LocalDate.now(zone)
-    val days = remember(captures, zone) {
-        captures.asReversed().groupBy { it.createdAtMicros?.atZone(zone)?.toLocalDate() }
+    val groups: List<Pair<LocalDate?, List<Capture>>> = remember(captures, zone, groupByDay) {
+        if (groupByDay) {
+            captures.asReversed().groupBy { it.createdAtMicros?.atZone(zone)?.toLocalDate() }.toList()
+        } else {
+            listOf(null to captures.asReversed())
+        }
     }
-    val gaps = remember(captures, zone) {
+    val gaps = remember(captures, zone, groupByDay) {
         val result = HashMap<String, Long?>()
-        var previous: Long? = null
-        var previousDay: LocalDate? = null
-        for (capture in captures) {
-            val time = capture.createdAtMicros
-            val day = time?.atZone(zone)?.toLocalDate()
-            result[capture.id] = if (time != null && previous != null && day == previousDay) time - previous else null
-            if (time != null) {
-                previous = time
-                previousDay = day
-            } else {
-                previous = null
-                previousDay = null
+        if (groupByDay) {
+            var previous: Long? = null
+            var previousDay: LocalDate? = null
+            for (capture in captures) {
+                val time = capture.createdAtMicros
+                val day = time?.atZone(zone)?.toLocalDate()
+                result[capture.id] = if (time != null && previous != null && day == previousDay) time - previous else null
+                if (time != null) {
+                    previous = time
+                    previousDay = day
+                } else {
+                    previous = null
+                    previousDay = null
+                }
             }
         }
         result
@@ -1292,7 +1284,7 @@ private fun CaptureTimeline(
                 contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = topPadding, bottom = bottomPadding),
                 verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.Bottom),
             ) {
-                days.forEach { (day, entries) ->
+                groups.forEach { (day, entries) ->
                     items(entries, key = Capture::id, contentType = { "capture" }) { capture ->
                         CaptureRow(
                             capture = capture,
@@ -1321,14 +1313,25 @@ private fun CaptureTimeline(
                             onMenu = onMenu,
                         )
                     }
-                    item(key = "day:$day", contentType = "day") { TimelineDay(day, today) }
+                    if (groupByDay) {
+                        item(key = "day:$day", contentType = "day") { TimelineDay(day, today) }
+                    }
                 }
             }
         }
     }
 }
 
-private fun timelineItemIndex(captures: List<Capture>, targetId: String, zone: ZoneId): Int? {
+private fun timelineItemIndex(
+    captures: List<Capture>,
+    targetId: String,
+    zone: ZoneId,
+    groupByDay: Boolean,
+): Int? {
+    if (!groupByDay) {
+        val index = captures.asReversed().indexOfFirst { it.id == targetId }
+        return index.takeIf { it >= 0 }
+    }
     val days = captures.asReversed().groupBy { it.createdAtMicros?.atZone(zone)?.toLocalDate() }
     var index = 0
     for ((_, entries) in days) {
@@ -1538,14 +1541,14 @@ private fun CaptureRow(
                             if (capture.isLong) {
                                 Text(
                                     preview,
-                                    style = MaterialTheme.typography.bodyMedium.copy(lineBreak = BubbleLineBreak),
+                                    style = MaterialTheme.typography.bodyMedium,
                                     maxLines = 3,
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             } else {
                                 Text(
                                     text = preview.ifBlank { "（本文なし）" },
-                                    style = MaterialTheme.typography.bodyMedium.copy(lineBreak = BubbleLineBreak),
+                                    style = MaterialTheme.typography.bodyMedium,
                                     maxLines = if (expanded) Int.MAX_VALUE else CollapsedShortLines,
                                     overflow = if (expanded) TextOverflow.Clip else TextOverflow.Ellipsis,
                                     onTextLayout = { layout -> if (!expanded) foldable = layout.hasVisualOverflow },
@@ -1620,7 +1623,7 @@ private fun ReplyQuote(target: Capture?, onOpen: (() -> Unit)?) {
 private fun CaptureTimeGutter(capture: Capture, selected: Boolean, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
     val time = capture.createdAtMicros?.atZone(ZoneId.systemDefault())?.format(shortTime) ?: "—"
-    val markers = capture.archived || capture.pinned || capture.replyTo != null || selected
+    val markers = capture.pinned || capture.replyTo != null || selected
     Column(
         modifier.padding(bottom = 7.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -1628,7 +1631,6 @@ private fun CaptureTimeGutter(capture: Capture, selected: Boolean, modifier: Mod
     ) {
         if (markers) {
             Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (capture.archived) MoteIcon(MoteGlyph.Archive, "アーカイブ済み", Modifier.size(9.dp), colors.onSurfaceVariant)
                 if (capture.pinned) MoteIcon(MoteGlyph.Pin, "ピン留め済み", Modifier.size(9.dp), colors.primary)
                 if (capture.replyTo != null) MoteIcon(MoteGlyph.Reply, "返信", Modifier.size(9.dp), colors.primary)
                 if (selected) MoteIcon(MoteGlyph.Check, "選択中", Modifier.size(9.dp), colors.primary)
@@ -1644,7 +1646,6 @@ private fun CaptureMetadata(capture: Capture) {
     val time = date?.format(detailTime) ?: "日時不明"
     val labels = buildList {
         add(time)
-        if (capture.archived) add("アーカイブ済み")
         if (capture.sessionOpen) add("下書き")
         if (capture.pinned) add("ピン留め済み")
     }
@@ -1689,7 +1690,7 @@ private fun CaptureDetail(
                 if (capture.isLong) {
                     items(slices, key = { it.start }) { slice -> LongCaptureThreadSlice(body, slice) }
                 } else {
-                    item(key = "body") { Text(body, style = MaterialTheme.typography.bodyLarge.copy(lineBreak = BubbleLineBreak), color = colors.onSurface) }
+                    item(key = "body") { Text(body, style = MaterialTheme.typography.bodyLarge, color = colors.onSurface) }
                 }
             }
         }

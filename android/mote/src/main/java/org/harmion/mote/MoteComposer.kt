@@ -57,7 +57,8 @@ import androidx.compose.ui.unit.dp
 internal fun MoteComposer(
     value: String,
     onValueChange: (String) -> Unit,
-    placeholder: String,
+    placeholder: String?,
+    accessibilityLabel: String = placeholder.orEmpty(),
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     readOnly: Boolean = false,
@@ -105,7 +106,7 @@ internal fun MoteComposer(
                     .padding(end = actionPadding)
                     .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
                     .background(fieldColor, fieldShape)
-                    .semantics { contentDescription = placeholder },
+                    .semantics { contentDescription = accessibilityLabel },
                 enabled = enabled,
                 readOnly = readOnly,
                 textStyle = textStyle.copy(color = colors.onSurface),
@@ -118,7 +119,9 @@ internal fun MoteComposer(
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         contentAlignment = Alignment.CenterStart,
                     ) {
-                        if (value.isEmpty()) Text(placeholder, color = colors.onSurfaceVariant, style = textStyle)
+                        if (value.isEmpty() && placeholder != null) {
+                            Text(placeholder, color = colors.onSurfaceVariant, style = textStyle)
+                        }
                         inner()
                     }
                 },

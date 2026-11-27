@@ -14,6 +14,7 @@ class CaptureCacheTest {
                 body = "一行目\n二行目",
                 createdAtMicros = 1_795_644_249_000_000L,
                 archived = true,
+                archivedAtMicros = 1_795_644_250_000_000L,
                 pinned = true,
                 token = "node-token",
                 isLong = true,
@@ -30,6 +31,18 @@ class CaptureCacheTest {
         )
         val decoded = CaptureCacheCodec.decode(CaptureCacheCodec.encode(captures))
         assertEquals(captures.map { it.copy(token = "") }, decoded.items)
+    }
+
+    @Test
+    fun readsACacheWrittenBeforeArchiveTimesExisted() {
+        val old = """
+            {"version":1,"saved_at_micros":0,"captures":[
+              {"id":"a","body":"one","created_at":1,"archived":true,"pinned":false,
+               "session_open":false,"is_long":false}
+            ]}
+        """.trimIndent()
+        val decoded = CaptureCacheCodec.decode(old.toByteArray())
+        assertEquals(null, decoded.items.single().archivedAtMicros)
     }
 
     @Test

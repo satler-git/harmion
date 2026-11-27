@@ -78,7 +78,7 @@ internal data class SyncUi(
 )
 
 internal data class ArchiveNotice(val capture: Capture, val archived: Boolean, val sequence: Long)
-internal data class ArchivePreview(val archived: Boolean, val sequence: Long)
+internal data class ArchivePreview(val archived: Boolean, val sequence: Long, val archivedAtMicros: Long? = null)
 
 internal data class LongCaptureUi(
     val captureId: String,
@@ -545,8 +545,16 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
             change { copy(longCaptureVisible = true, longCapture = longCapture?.copy(message = null)) }
             return
         }
+        if (_state.value.pending) return
+        val movedDraft = _state.value.draft.takeIf { it.isNotBlank() }
         localLongOperation {
-            persistLong(LongCaptureRecord(Requests.randomIdHex()))
+            draftWriter?.join()
+            persistLong(LongCaptureRecord(Requests.randomIdHex(), draft = movedDraft.orEmpty()))
+            if (movedDraft != null) {
+                // Continue the short draft in the long capture instead of leaving a duplicate.
+                change { copy(draft = "", replyTo = null) }
+                runCatching { persist(CaptureDraft("", replyTo = null)) }
+            }
             change { copy(longCaptureVisible = true, longCapture = longCapture?.copy(message = null)) }
         }
     }
@@ -801,8 +809,23 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
 
     fun archive(capture: Capture, value: Boolean) = archive(capture, value, offerUndo = true)
 
-    private fun archive(capture: Capture, value: Boolean, offerUndo: Boolean) {
-        val preview = ArchivePreview(value, ++noticeSequence)
+    private fun archive(
+        capture: Capture,
+        value: Boolean,
+        offerUndo: Boolean,
+        restoreArchiveTime: Boolean = false,
+    ) {
+        // Undo restores the original position. A legacy capture without a time stays legacy.
+        val archiveTime = if (value) {
+            if (restoreArchiveTime) capture.archivedAtMicros else System.currentTimeMillis() * 1_000L
+        } else {
+            null
+        }
+        val preview = ArchivePreview(
+            archived = value,
+            sequence = ++noticeSequence,
+            archivedAtMicros = archiveTime,
+        )
         fun clearPreview() = change {
             if (archivePreviews[capture.id]?.sequence == preview.sequence) {
                 copy(archivePreviews = archivePreviews - capture.id)
@@ -813,7 +836,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
             onBegin = { change { copy(archivePreviews = archivePreviews + (capture.id to preview)) } },
             onFailure = { error -> clearPreview(); change { copy(message = mutationFailure(error, false)) } },
         ) { captures ->
-            captures.setArchived(capture, value)
+            captures.setArchived(capture, value, archiveTime)
             if (offerUndo && _state.value.connection == MoteConnection.Ready) {
                 change { copy(archiveNotice = ArchiveNotice(capture, value, preview.sequence)) }
             }
@@ -826,7 +849,12 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
         if (_state.value.archiveNotice?.sequence != notice.sequence || _state.value.busy) return
         dismissArchive(notice)
         // The subscription can lag; the repository verifies the actual attribute before writing.
-        archive(notice.capture.copy(archived = notice.archived), notice.capture.archived, offerUndo = false)
+        archive(
+            notice.capture.copy(archived = notice.archived),
+            notice.capture.archived,
+            offerUndo = false,
+            restoreArchiveTime = true,
+        )
     }
 
     fun dismissArchive(notice: ArchiveNotice) {
