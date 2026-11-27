@@ -71,9 +71,15 @@ fun HomeScreen(controller: NodeRuntimeController, snapshot: RuntimeSnapshot?) {
     var attempt by remember { mutableIntStateOf(0) }
 
     val running = snapshot?.running == true
-    val blocked = snapshot?.syncBlockedCode
-    val autoSyncOff =
-        snapshot?.syncEnabled == false || blocked == SyncBlockCode.AUTO_SYNC_DISABLED
+    // sync.enabled in the status snapshot is fixed at runtime start. Use the
+    // user setting for the switch state, and ignore a stale auto-sync block
+    // while the setting is already on.
+    val autoSyncEnabled = controller.settings().autoSync
+    val blocked =
+        snapshot?.syncBlockedCode?.takeUnless {
+            it == SyncBlockCode.AUTO_SYNC_DISABLED && autoSyncEnabled
+        }
+    val autoSyncOff = !autoSyncEnabled
     val blockedReason =
         snapshot?.syncBlockedMessage?.takeIf { it.isNotBlank() } ?: syncBlockedLabel(blocked)
     val inFlight = snapshot?.inflight?.isNotEmpty() == true

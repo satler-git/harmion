@@ -254,8 +254,22 @@ class NodeRuntimeController(
     fun settings(): SyncSettings = policyStore.load()
 
     fun saveSettings(settings: SyncSettings) {
+        val previous = policyStore.load()
         policyStore.save(settings)
         refreshPolicy()
+        // The runtime captures sync_seconds when it starts. Restart it when the
+        // interval or automatic-sync switch changes so that re-enabling auto
+        // sync actually installs the scheduler instead of waiting for an app
+        // restart.
+        if (previous.syncSeconds() == settings.syncSeconds()) return
+        scope.launch {
+            // Restart even if a previous settings restart already stopped the
+            // runtime: ensureStarted() loads the latest settings.
+            stop()
+            if (!ensureStarted()) {
+                android.util.Log.w("Harmion", "node restart after sync settings change failed")
+            }
+        }
     }
 
     /** Raw status JSON used by the bound service; errors keep their code. */
