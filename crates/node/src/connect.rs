@@ -9,9 +9,8 @@ use crate::storage::{Store, Transaction};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use harmion_protocol::AppId;
 use harmion_protocol::connect::{
-    CONNECTION_TTL_SECONDS,
-    ConnectionId, ConnectionOffer, ConnectionStatus, ConnectionStatusView, MAX_PENDING_CONNECTIONS,
-    validate_offer,
+    CONNECTION_TTL_SECONDS, ConnectionId, ConnectionOffer, ConnectionStatus, ConnectionStatusView,
+    MAX_PENDING_CONNECTIONS, validate_offer,
 };
 use harmion_protocol::interpreter::{ProviderId, ProviderRegistration, ProviderStatus};
 use sha2::{Digest, Sha256};
