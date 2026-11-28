@@ -106,10 +106,12 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.listSaver
@@ -124,13 +126,11 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -150,6 +150,7 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 private const val CollapsedShortLines = 7
 private const val MaxTextWidthFraction = .97f
@@ -197,6 +198,7 @@ internal fun MoteScreen(
     onCancelEdit: () -> Unit,
     onSync: () -> Unit,
     preferences: MotePreferences,
+    backdrop: MoteBackdrop,
     onOpenSettings: () -> Unit,
 ) {
     val ready = state.connection == MoteConnection.Ready
@@ -206,8 +208,7 @@ internal fun MoteScreen(
     val density = LocalDensity.current
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
-    val haptic = LocalHapticFeedback.current
-    val backdrop = rememberMoteBackdrop()
+    val haptics = rememberMoteHaptics(preferences.haptics)
     val homeList = rememberLazyListState()
     var expandAnchor by remember { mutableStateOf<ExpandAnchor?>(null) }
     val replyFocus = remember { androidx.compose.ui.focus.FocusRequester() }
@@ -228,10 +229,17 @@ internal fun MoteScreen(
     ) { mutableStateListOf<String>() }
     var highlightId by remember { mutableStateOf<String?>(null) }
     var menuTargetId by rememberSaveable { mutableStateOf<String?>(null) }
-    var jumpTargetId by remember { mutableStateOf<String?>(null) }
-    var headerHeight by remember { mutableIntStateOf(0) }
-    var dockHeight by remember { mutableIntStateOf(0) }
-    var homeDockHeight by remember { mutableIntStateOf(0) }
+    var pendingReplyJumpId by remember { mutableStateOf<String?>(null) }
+    var replyScroll by remember { mutableStateOf<ReplyScroll?>(null) }
+    var replyJumpSequence by remember { mutableLongStateOf(0L) }
+    // Home and detail keep separate insets. Sharing them made the timeline use the detail
+    // dock's height for its first frame when returning. Save them so a top-level round trip
+    // (settings) does not fall back to the 76/164 defaults either.
+    var homeHeaderHeight by rememberSaveable { mutableStateOf(0) }
+    var detailHeaderHeight by rememberSaveable { mutableStateOf(0) }
+    var homeDockHeight by rememberSaveable { mutableStateOf(0) }
+    var homeDockExpandedHeight by rememberSaveable { mutableStateOf(0) }
+    var detailDockHeight by rememberSaveable { mutableStateOf(0) }
     val allCaptures = state.captures
     val byId = remember(allCaptures) { allCaptures.associateBy(Capture::id) }
     val selected = selectedId?.let(byId::get)
@@ -254,8 +262,21 @@ internal fun MoteScreen(
         CaptureFilter(archivedOnly, pinnedOnly).applyTo(projected)
     }
     val headerVisible = selected == null
-    val topPadding = with(density) { (if (headerHeight == 0) 76.dp else headerHeight.toDp()) + 4.dp }
-    val dockPadding = with(density) { (if (dockHeight == 0) 164.dp else dockHeight.toDp()) + 6.dp }
+    val homeTopPadding = with(density) { (if (homeHeaderHeight == 0) 76.dp else homeHeaderHeight.toDp()) + 4.dp }
+    val homeDockInset = when {
+        imeVisible -> homeDockHeight
+        homeDockExpandedHeight != 0 -> homeDockExpandedHeight
+        else -> homeDockHeight
+    }
+    val homeDockPadding = with(density) { (if (homeDockInset == 0) 164.dp else homeDockInset.toDp()) + 6.dp }
+    val detailTopPadding = with(density) { (if (detailHeaderHeight == 0) 76.dp else detailHeaderHeight.toDp()) + 4.dp }
+    val detailDockPadding = with(density) { (if (detailDockHeight == 0) 112.dp else detailDockHeight.toDp()) + 6.dp }
+    val topPadding = if (selected == null) homeTopPadding else detailTopPadding
+    val dockPadding = if (selected == null) homeDockPadding else detailDockPadding
+    val latestFiltered by rememberUpdatedState(filtered)
+    val latestArchivedOnly by rememberUpdatedState(archivedOnly)
+    val currentTopPadding by rememberUpdatedState(topPadding)
+    val currentDockPadding by rememberUpdatedState(dockPadding)
 
     fun dismissInput() {
         focusManager.clearFocus()
@@ -300,12 +321,22 @@ internal fun MoteScreen(
         selectedIds.add(capture.id)
     }
 
+    fun togglePin(capture: Capture) {
+        haptics.perform(if (capture.pinned) MoteHaptic.ToggleOff else MoteHaptic.ToggleOn)
+        onPin(capture, !capture.pinned)
+    }
+
+    fun archiveFromControl(capture: Capture) {
+        haptics.perform(MoteHaptic.Confirm)
+        onArchive(capture, !capture.archived)
+    }
+
     fun jumpToReplyTarget(target: Capture) {
         if (archivedOnly != target.archived) archivedOnly = target.archived
         if (pinnedOnly && !target.pinned) pinnedOnly = false
         selectedId = null
         highlightId = null
-        jumpTargetId = target.id
+        pendingReplyJumpId = target.id
     }
 
     fun beginReply(capture: Capture) {
@@ -325,20 +356,48 @@ internal fun MoteScreen(
         selectedIds.retainAll { it in ids }
         if (selecting && selectedIds.isEmpty()) selecting = false
     }
-    LaunchedEffect(jumpTargetId, filtered) {
-        val id = jumpTargetId ?: return@LaunchedEffect
-        val index = timelineItemIndex(filtered, id, ZoneId.systemDefault(), groupByDay = !archivedOnly)
-        if (index == null) {
-            jumpTargetId = null
+    LaunchedEffect(pendingReplyJumpId, filtered, archivedOnly, pinnedOnly) {
+        val id = pendingReplyJumpId ?: return@LaunchedEffect
+        val target = allCaptures.firstOrNull { it.id == id }
+        if (target == null) {
+            pendingReplyJumpId = null
             return@LaunchedEffect
         }
-        homeList.animateScrollToItem(index)
-        homeList.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }?.let { info ->
-            val viewport = homeList.layoutInfo.viewportSize.height
-            homeList.animateScrollBy((info.offset + info.size / 2 - viewport / 2).toFloat())
+        val index = timelineItemIndex(filtered, id, ZoneId.systemDefault(), groupByDay = !archivedOnly)
+        if (index == null) {
+            // While a filter change settles the target may legitimately be absent. If it
+            // already matches the filters, it is hidden by the local session projection;
+            // drop the request instead of leaving it pending forever.
+            if (target.archived == archivedOnly && (!pinnedOnly || target.pinned)) {
+                pendingReplyJumpId = null
+            }
+            return@LaunchedEffect
         }
-        highlightId = id
-        jumpTargetId = null
+        pendingReplyJumpId = null
+        replyScroll = ReplyScroll(id, ++replyJumpSequence)
+    }
+    LaunchedEffect(replyScroll) {
+        val request = replyScroll ?: return@LaunchedEffect
+        // Let a filter change and the new list settle before measuring what is on screen.
+        withFrameNanos { }
+        withFrameNanos { }
+        val index = timelineItemIndex(
+            latestFiltered,
+            request.id,
+            ZoneId.systemDefault(),
+            groupByDay = !latestArchivedOnly,
+        )
+        if (index == null) {
+            replyScroll = null
+            return@LaunchedEffect
+        }
+        val viewport = homeList.layoutInfo.viewportSize.height
+        val safeTop = with(density) { currentTopPadding.toPx() }.toInt()
+        val safeBottom = viewport - with(density) { currentDockPadding.toPx() }.toInt()
+        val margin = with(density) { 4.dp.toPx() }.toInt()
+        revealListItem(homeList, index, safeTop, safeBottom, margin)
+        highlightId = request.id
+        replyScroll = null
     }
 
     LaunchedEffect(pendingLongOpen, imeVisible) {
@@ -460,12 +519,12 @@ internal fun MoteScreen(
                                 captures = filtered,
                                 listState = homeList,
                                 backdrop = backdrop,
-                                topPadding = topPadding,
-                                bottomPadding = dockPadding,
+                                topPadding = homeTopPadding,
+                                bottomPadding = homeDockPadding,
                                 groupByDay = !archivedOnly,
                                 enabled = canMutate,
                                 updating = state.archivePreviews.keys,
-                                archiveHaptics = preferences.archiveHaptics,
+                                hapticsEnabled = preferences.haptics,
                                 selecting = selecting,
                                 selectedIds = selectedIds,
                                 expandedIds = expandedIds,
@@ -476,13 +535,14 @@ internal fun MoteScreen(
                                 onSelect = { dismissInput(); selectedId = it.id },
                                 onReply = { beginReply(it) },
                                 onArchive = { dismissInput(); onArchive(it, !it.archived) },
-                                onPin = { onPin(it, !it.pinned) },
+                                onPin = { togglePin(it) },
                                 onCopy = { copyCapture(context, it.body) },
                                 onShare = { shareCapture(context, it.body) },
                                 onDelete = { deleteSnapshot = it },
                                 onEdit = { requestReplyFocus = true; onBeginEdit(it) },
                                 onEnterSelection = { enterSelection(it) },
                                 onToggleSelection = {
+                                    haptics.perform(MoteHaptic.Tick)
                                     if (it.id in selectedIds) selectedIds.remove(it.id) else selectedIds.add(it.id)
                                     if (selectedIds.isEmpty()) selecting = false
                                 },
@@ -511,7 +571,7 @@ internal fun MoteScreen(
                         onSync = onSync,
                         onOpenSettings = { dismissInput(); onOpenSettings() },
                         backdrop = backdrop,
-                        modifier = Modifier.onSizeChanged { headerHeight = it.height },
+                        modifier = Modifier.onSizeChanged { homeHeaderHeight = it.height },
                     )
                 }
             }
@@ -529,14 +589,14 @@ internal fun MoteScreen(
                     onBack = { selectedId = null },
                     onDelete = { deleteSnapshot = selected },
                     backdrop = backdrop,
-                    modifier = Modifier.onSizeChanged { headerHeight = it.height },
+                    modifier = Modifier.onSizeChanged { detailHeaderHeight = it.height },
                 )
             }
         }
 
         if (selected == null) {
             if (selecting) {
-                val selectionHeight = with(LocalDensity.current) { homeDockHeight.toDp() }
+                val selectionHeight = with(LocalDensity.current) { homeDockExpandedHeight.toDp() }
                     .takeIf { it > 0.dp } ?: 164.dp
                 Box(Modifier.align(Alignment.BottomCenter).height(selectionHeight)) {
                     SelectionDock(
@@ -557,8 +617,8 @@ internal fun MoteScreen(
                     replyTarget = replyTarget,
                     replyMissing = state.replyTo != null && replyTarget == null,
                     dockHeight = { height ->
-                        if (!imeVisible) homeDockHeight = height
-                        dockHeight = height
+                        if (!imeVisible) homeDockExpandedHeight = height
+                        homeDockHeight = height
                     },
                     focusRequester = replyFocus,
                     onDraft = onDraft,
@@ -566,12 +626,18 @@ internal fun MoteScreen(
                     editing = state.editingId != null,
                     onCancelEdit = onCancelEdit,
                     onArchivedOnly = {
-                        archivedOnly = it
-                        leaveSelection()
+                        if (it != archivedOnly) {
+                            haptics.perform(MoteHaptic.Tick)
+                            archivedOnly = it
+                            leaveSelection()
+                        }
                     },
                     onPinnedOnly = {
-                        pinnedOnly = it
-                        leaveSelection()
+                        if (it != pinnedOnly) {
+                            haptics.perform(if (it) MoteHaptic.ToggleOn else MoteHaptic.ToggleOff)
+                            pinnedOnly = it
+                            leaveSelection()
+                        }
                     },
                     onRelease = { confirmRelease = true },
                     onOpenLong = { dismissInput(); pendingLongOpen = true },
@@ -587,9 +653,9 @@ internal fun MoteScreen(
                 inFlight = selected.id in state.archivePreviews,
                 onCopy = { copyCapture(context, selected.body) },
                 onShare = { shareCapture(context, selected.body) },
-                onArchive = { onArchive(selected, !selected.archived) },
-                onPin = { onPin(selected, !selected.pinned) },
-                modifier = Modifier.align(Alignment.BottomCenter).onSizeChanged { dockHeight = it.height },
+                onArchive = { archiveFromControl(selected) },
+                onPin = { togglePin(selected) },
+                modifier = Modifier.align(Alignment.BottomCenter).onSizeChanged { detailDockHeight = it.height },
             )
         }
 
@@ -664,10 +730,10 @@ internal fun MoteScreen(
             onEdit = { requestReplyFocus = true; onBeginEdit(target) },
             onDetail = { selectedId = target.id },
             onSelect = { enterSelection(target) },
-            onPin = { onPin(target, !target.pinned) },
+            onPin = { togglePin(target) },
             onCopy = { copyCapture(context, target.body) },
             onShare = { shareCapture(context, target.body) },
-            onArchive = { onArchive(target, !target.archived) },
+            onArchive = { archiveFromControl(target) },
             onDelete = { deleteSnapshot = target },
         )
     }
@@ -1210,6 +1276,8 @@ private fun ReplyComposerStrip(target: Capture?, missing: Boolean, onCancel: () 
 
 private data class ExpandAnchor(val id: String, val top: Int, val firstIndex: Int, val firstOffset: Int)
 
+private data class ReplyScroll(val id: String, val sequence: Long)
+
 @Composable
 private fun CaptureTimeline(
     captures: List<Capture>,
@@ -1220,7 +1288,7 @@ private fun CaptureTimeline(
     groupByDay: Boolean,
     enabled: Boolean,
     updating: Set<String>,
-    archiveHaptics: Boolean,
+    hapticsEnabled: Boolean,
     selecting: Boolean,
     selectedIds: List<String>,
     expandedIds: List<String>,
@@ -1272,10 +1340,20 @@ private fun CaptureTimeline(
         result
     }
     val latest = captures.lastOrNull()?.id
-    val followLatest = listState.firstVisibleItemIndex == 0 &&
-        listState.firstVisibleItemScrollOffset == 0 && !listState.isScrollInProgress
+    // The timeline is recreated when the filter changes. Do not treat that first value as a
+    // new arrival: only follow a capture that appears after this timeline was already shown.
+    var observedLatest by remember { mutableStateOf(latest) }
     LaunchedEffect(latest) {
-        if (followLatest) listState.scrollToItem(0)
+        if (latest == observedLatest) return@LaunchedEffect
+        observedLatest = latest
+        // Re-check at execution time. A value captured during composition can still be
+        // true when a reply jump has just started scrolling, which would yank the list back.
+        if (listState.firstVisibleItemIndex == 0 &&
+            listState.firstVisibleItemScrollOffset == 0 &&
+            !listState.isScrollInProgress
+        ) {
+            listState.scrollToItem(0)
+        }
     }
     Box(
         Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
@@ -1298,7 +1376,7 @@ private fun CaptureTimeline(
                             capture = capture,
                             enabled = enabled && capture.id !in updating,
                             canReply = canReply && capture.id !in updating,
-                            archiveHaptics = archiveHaptics,
+                            hapticsEnabled = hapticsEnabled,
                             gapBeforeMicros = gaps[capture.id],
                             selecting = selecting,
                             selected = capture.id in selectedIds,
@@ -1352,6 +1430,47 @@ private fun timelineItemIndex(
     return null
 }
 
+/**
+ * Bring one list item into the band that is not covered by the header or the dock.
+ * Nothing moves when it is already there, and the correction is the smallest one that works,
+ * so a tap on a visible reply quote does not scroll at all.
+ */
+private suspend fun revealListItem(
+    list: LazyListState,
+    index: Int,
+    safeTop: Int,
+    safeBottom: Int,
+    margin: Int,
+) {
+    var info = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+    if (info == null) {
+        list.animateScrollToItem(index)
+        info = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+    }
+    val item = info ?: return
+    val delta = revealDelta(item.offset, item.size, safeTop, safeBottom, margin)
+    if (delta != 0) list.animateScrollBy(delta.toFloat())
+}
+
+/** The smallest scroll that puts [itemOffset, itemOffset + itemSize] inside the safe band. */
+internal fun revealDelta(
+    itemOffset: Int,
+    itemSize: Int,
+    safeTop: Int,
+    safeBottom: Int,
+    margin: Int,
+): Int {
+    val top = safeTop + margin
+    val bottom = (safeBottom - margin).coerceAtLeast(top + 1)
+    return when {
+        // A capture taller than the free band keeps its beginning in view.
+        itemSize >= bottom - top -> itemOffset - top
+        itemOffset < top -> itemOffset - top
+        itemOffset + itemSize > bottom -> itemOffset + itemSize - bottom
+        else -> 0
+    }
+}
+
 @Composable
 private fun TimelineDay(day: LocalDate?, today: LocalDate) {
     val label = when (day) {
@@ -1372,7 +1491,7 @@ private fun CaptureRow(
     capture: Capture,
     enabled: Boolean,
     canReply: Boolean,
-    archiveHaptics: Boolean,
+    hapticsEnabled: Boolean,
     gapBeforeMicros: Long?,
     selecting: Boolean,
     selected: Boolean,
@@ -1402,7 +1521,7 @@ private fun CaptureRow(
         tween(durationMillis = 260),
         label = "reply highlight",
     )
-    val haptic = LocalHapticFeedback.current
+    val haptics = rememberMoteHaptics(hapticsEnabled)
     val density = LocalDensity.current
     val layoutDirection = LocalLayoutDirection.current
     // Reply is a left swipe and archiving is a right swipe. SwipeToDismissBoxValue is
@@ -1415,6 +1534,20 @@ private fun CaptureRow(
     val swipe = remember(capture.id, swipeThreshold) {
         SwipeToDismissBoxState(SwipeToDismissBoxValue.Settled, positionalThreshold = { swipeThreshold })
     }
+    // Tick once when the drag becomes a commit, not when it settles: release and settle
+    // already have their own visible response.
+    LaunchedEffect(swipe, haptics, enabled, canReply, selecting, archiveDirection, replyDirection) {
+        snapshotFlow { swipe.targetValue }
+            .distinctUntilChanged()
+            .collect { value ->
+                val commits = when (value) {
+                    archiveDirection -> enabled && !selecting
+                    replyDirection -> canReply && !selecting
+                    else -> false
+                }
+                if (commits) haptics.perform(MoteHaptic.Threshold)
+            }
+    }
     LaunchedEffect(swipe, swipe.settledValue) {
         when (swipe.settledValue) {
             replyDirection -> {
@@ -1422,10 +1555,7 @@ private fun CaptureRow(
                 swipe.reset()
             }
             archiveDirection -> {
-                if (enabled) {
-                    if (archiveHaptics) haptic.performHapticFeedback(HapticFeedbackType.Confirm)
-                    onArchive(capture)
-                }
+                if (enabled) onArchive(capture)
                 swipe.reset()
             }
             else -> Unit
@@ -1506,6 +1636,7 @@ private fun CaptureRow(
                             .clip(shape)
                             .combinedClickable(
                                 enabled = !(selecting && capture.isLong),
+                                hapticFeedbackEnabled = hapticsEnabled && !selecting,
                                 onClickLabel = when {
                                     selecting -> "選択"
                                     capture.isLong -> "long capture を開く"
@@ -1527,7 +1658,6 @@ private fun CaptureRow(
                                     if (selecting) {
                                         if (!capture.isLong) onToggleSelection(capture)
                                     } else {
-                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                         onMenu(capture)
                                     }
                                 },
@@ -1620,17 +1750,12 @@ private fun ReplyQuote(target: Capture?, onOpen: (() -> Unit)?) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(
-            Modifier.size(28.dp).clip(CircleShape).background(colors.primaryContainer.copy(alpha = .45f), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            MoteIcon(
-                MoteGlyph.Reply,
-                if (target == null) "返信元が見つかりません" else "元のメッセージを表示",
-                Modifier.size(15.dp),
-                if (target == null) colors.onSurfaceVariant.copy(alpha = .6f) else colors.primary,
-            )
-        }
+        MoteIcon(
+            MoteGlyph.Reply,
+            if (target == null) "返信元が見つかりません" else "元のメッセージを表示",
+            Modifier.size(16.dp),
+            if (target == null) colors.onSurfaceVariant.copy(alpha = .6f) else colors.primary,
+        )
         Text(
             text = if (target == null) "元の capture は見つかりません" else previewOf(target.body),
             modifier = Modifier.weight(1f),

@@ -46,25 +46,34 @@ import java.time.format.DateTimeFormatter
 
 internal data class MotePreferences(
     val completionMotion: Boolean = true,
-    val archiveHaptics: Boolean = true,
+    val haptics: Boolean = true,
 ) {
     fun write(context: Context) {
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
             .putBoolean(COMPLETION_MOTION, completionMotion)
-            .putBoolean(ARCHIVE_HAPTICS, archiveHaptics)
+            .putBoolean(HAPTICS, haptics)
+            .remove(LEGACY_ARCHIVE_HAPTICS)
             .apply()
     }
 
     companion object {
         private const val FILE = "mote_preferences"
         private const val COMPLETION_MOTION = "completion_motion"
-        private const val ARCHIVE_HAPTICS = "archive_haptics"
+        private const val HAPTICS = "haptics"
+        private const val LEGACY_ARCHIVE_HAPTICS = "archive_haptics"
 
         fun read(context: Context): MotePreferences {
             val saved = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            // The first version only controlled the archive pulse. Respect that choice
+            // when it is the only one a user has ever made.
+            val haptics = if (saved.contains(HAPTICS)) {
+                saved.getBoolean(HAPTICS, true)
+            } else {
+                saved.getBoolean(LEGACY_ARCHIVE_HAPTICS, true)
+            }
             return MotePreferences(
                 completionMotion = saved.getBoolean(COMPLETION_MOTION, true),
-                archiveHaptics = saved.getBoolean(ARCHIVE_HAPTICS, true),
+                haptics = haptics,
             )
         }
     }
@@ -111,8 +120,8 @@ internal fun MoteSettingsScreen(
                 SettingsSync(state, onSync)
                 Surface(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.extraLarge, color = colors.surfaceContainer) {
                     Column {
-                        SettingsToggle("アーカイブ時の触覚フィードバック", preferences.archiveHaptics) {
-                            onPreferences(preferences.copy(archiveHaptics = it))
+                        SettingsToggle("触覚フィードバック", preferences.haptics) {
+                            onPreferences(preferences.copy(haptics = it))
                         }
                     }
                 }

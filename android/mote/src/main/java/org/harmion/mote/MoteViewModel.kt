@@ -13,9 +13,15 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
@@ -31,6 +37,9 @@ import org.harmion.sdk.NodeStatus
 import org.harmion.sdk.Requests
 
 internal enum class MoteConnection { Loading, NeedsApproval, Approving, Ready, Unavailable, Failed }
+
+/** Signals that are worth touching only after the write has actually landed. */
+internal enum class MoteHapticEvent { Saved, Deleted, LongAppended, LongFinished }
 
 internal data class MoteUiState(
     val connection: MoteConnection = MoteConnection.Loading,
@@ -111,8 +120,13 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
     private val cacheUse = Mutex()
     private val _state = MutableStateFlow(MoteUiState())
     val state: StateFlow<MoteUiState> = _state
+    private val _hapticEvents = MutableSharedFlow<MoteHapticEvent>(extraBufferCapacity = 8)
+    val hapticEvents: SharedFlow<MoteHapticEvent> = _hapticEvents
     private var connectionJob: Job? = null
     private var connectionGeneration = 0L
+    private var autoReconnectJob: Job? = null
+    private var appForeground = false
+    private var lastConnectionMessage: String? = null
     private var draftWriter: Job? = null
     private var repository: CaptureRepository? = null
     private var draftOnDisk: CaptureDraft? = null
@@ -125,6 +139,13 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
     private var noticeSequence = 0L
 
     init {
+        // Connection failures are the only signal that can wake the retry loop. Saves and
+        // other writes never trigger it.
+        viewModelScope.launch {
+            _state.map { it.connection }.distinctUntilChanged().collect { connection ->
+                if (AutoReconnectPolicy.shouldAttempt(connection)) scheduleAutoReconnect()
+            }
+        }
         viewModelScope.launch {
             // Restore the last snapshot first so a cold start does not flash the connection screen.
             try {
@@ -169,19 +190,45 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
-    fun connect() = startConnection(approve = false)
-    fun authorize() = startConnection(approve = true)
-    fun reconnect() = startConnection(approve = false, force = true)
-    fun retryAuthorization() = startConnection(approve = true, force = true)
+    fun onAppForeground() {
+        if (appForeground) return
+        appForeground = true
+        scheduleAutoReconnect()
+    }
 
-    private fun startConnection(approve: Boolean, force: Boolean = false) {
+    fun onAppBackground() {
+        appForeground = false
+        cancelAutoReconnect()
+    }
+
+    fun connect() = startConnection(approve = false)
+
+    fun authorize() {
+        cancelAutoReconnect()
+        startConnection(approve = true)
+    }
+
+    fun reconnect() {
+        cancelAutoReconnect()
+        startConnection(approve = false, force = true)
+    }
+
+    fun retryAuthorization() {
+        cancelAutoReconnect()
+        startConnection(approve = true, force = true)
+    }
+
+    private fun startConnection(approve: Boolean, force: Boolean = false, quiet: Boolean = false) {
         val current = _state.value
         if (!force && (current.busy || (approve && current.connection != MoteConnection.NeedsApproval))) return
         if (force && current.busy) change { copy(busy = false) }
         val previous = connectionJob
         val generation = ++connectionGeneration
-        if (_state.value.draftAvailable) change { copy(message = null) }
-        updateConnection(if (approve) MoteConnection.Approving else MoteConnection.Loading)
+        if (!quiet && _state.value.draftAvailable) change { copy(message = null) }
+        updateConnection(
+            if (approve) MoteConnection.Approving else MoteConnection.Loading,
+            preserveTransient = quiet,
+        )
         connectionJob = viewModelScope.launch {
             // A cancelled native long-poll may not return promptly. Never let it block a fresh
             // connection; the generation guard below keeps late results from publishing.
@@ -196,7 +243,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
                 if (approve) {
                     val scope = Filter.Kinds(listOf(CAPTURE_KIND))
                     session.authorize(AuthorizationRequest(read = scope, write = scope), "Mote")
-                    updateConnection(MoteConnection.Loading)
+                    updateConnection(MoteConnection.Loading, preserveTransient = quiet)
                 }
                 val captures = CaptureRepository(session, session.authorizationIdentity())
                 bound = captures
@@ -206,7 +253,11 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
                 watchdog = launch {
                     delay(20_000L)
                     if (generation == connectionGeneration && _state.value.connection != MoteConnection.Ready) {
-                        updateConnection(MoteConnection.Unavailable, "Harmion から一覧を取得できませんでした。")
+                        updateConnection(
+                            MoteConnection.Unavailable,
+                            "Harmion から一覧を取得できませんでした。",
+                            preserveTransient = quiet,
+                        )
                         self?.cancel()
                     }
                 }
@@ -214,14 +265,14 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
                     val retryable = (failure as? HarmionException)?.code in setOf("transport", "timeout", "reauthorize")
                     if (generation == connectionGeneration && retryable && attempt < 2L) {
                         // Reopen only the read subscription. Outstanding saves are never replayed here.
-                        updateConnection(MoteConnection.Loading)
+                        updateConnection(MoteConnection.Loading, preserveTransient = quiet)
                         delay(650)
                         true
                     } else false
                 }.collect { snapshot ->
                     if (generation != connectionGeneration) return@collect
                     when (snapshot) {
-                        CaptureSnapshot.Loading -> updateConnection(MoteConnection.Loading)
+                        CaptureSnapshot.Loading -> updateConnection(MoteConnection.Loading, preserveTransient = quiet)
                         is CaptureSnapshot.Ready -> {
                             watchdog?.cancel()
                             watchdog = null
@@ -235,29 +286,43 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
                                     archivePreviews = archivePreviews.filter { (id, preview) ->
                                         id in newFlags && newFlags[id] != preview.archived
                                     },
+                                    message = message.takeUnless { it == lastConnectionMessage },
                                 )
                             }
+                            lastConnectionMessage = null
                             scheduleCacheWrite(snapshot.items)
                         }
                     }
                 }
                 if (generation == connectionGeneration) {
-                    updateConnection(MoteConnection.Failed, "Harmion との接続が終了しました。")
+                    updateConnection(
+                        MoteConnection.Failed,
+                        "Harmion との接続が終了しました。",
+                        preserveTransient = quiet,
+                    )
                 }
             } catch (_: TimeoutCancellationException) {
                 if (generation == connectionGeneration) {
-                    updateConnection(MoteConnection.Unavailable, "Harmion に接続できませんでした。")
+                    updateConnection(
+                        MoteConnection.Unavailable,
+                        "Harmion に接続できませんでした。",
+                        preserveTransient = quiet,
+                    )
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
                 if (generation == connectionGeneration) {
                     val (connection, reason) = connectionFailure(error)
-                    updateConnection(connection, reason)
+                    updateConnection(connection, reason, preserveTransient = quiet)
                 }
             } catch (_: LinkageError) {
                 if (generation == connectionGeneration) {
-                    updateConnection(MoteConnection.Failed, "この端末で Harmion SDK を起動できませんでした。")
+                    updateConnection(
+                        MoteConnection.Failed,
+                        "この端末で Harmion SDK を起動できませんでした。",
+                        preserveTransient = quiet,
+                    )
                 }
             } finally {
                 watchdog?.cancel()
@@ -335,6 +400,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
             onFailure = { error -> change { copy(message = mutationFailure(error, false)) } },
         ) { captures ->
             captures.editBody(original, body)
+            haptic(MoteHapticEvent.Saved)
             draftWriter?.join()
             editBackupDraft = null
             editBackupReplyTo = null
@@ -383,6 +449,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
             // journal write also keeps the same in-memory request for the next explicit retry.
             persist(CaptureDraft(body, pending, replyTo))
             captures.create(pending)
+            haptic(MoteHapticEvent.Saved)
             try {
                 persist(CaptureDraft())
             } catch (_: IOException) {
@@ -473,6 +540,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
                 persistShared(CaptureDraft(body, pending))
                 change { copy(sharedPending = true, sharedMessage = null) }
                 captures.create(pending)
+                haptic(MoteHapticEvent.Saved)
                 try {
                     persistShared(CaptureDraft())
                 } catch (_: IOException) {
@@ -589,7 +657,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
 
     fun appendLong() {
         if (_state.value.longCapture?.draft?.isNotBlank() != true || longRecord?.pending != null) return
-        runLong { record -> append(record) }
+        runLong(MoteHapticEvent.LongAppended) { record -> append(record) }
     }
 
     fun finishLong() {
@@ -604,7 +672,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
             }
             return
         }
-        runLong { record ->
+        runLong(MoteHapticEvent.LongFinished) { record ->
             if (record.draft.isNotBlank()) append(record)
             finish(checkNotNull(longRecord).copy(draft = ""))
             change { copy(message = "long capture を保存しました。") }
@@ -616,6 +684,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
         runLong { record ->
             checkPending(record)
             if (record.pending?.kind == LongCaptureKind.Finish) {
+                haptic(MoteHapticEvent.LongFinished)
                 change { copy(message = "long capture を保存しました。") }
             } else {
                 longMessage("Harmion の現在の本文を採用しました。")
@@ -629,6 +698,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
             longDraftWriter?.join()
             persistLong(null)
             change { copy(message = "端末の long capture 記録だけを破棄しました。") }
+            haptic(MoteHapticEvent.Deleted)
         }
     }
 
@@ -649,6 +719,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
                 longDraftWriter?.join()
                 persistLong(null)
                 change { copy(longCaptureVisible = false, message = "下書きを削除しました。") }
+                haptic(MoteHapticEvent.Deleted)
             }
             return
         }
@@ -666,6 +737,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
             }
             persistLong(null)
             change { copy(longCaptureVisible = false, message = "下書きを削除しました。") }
+            haptic(MoteHapticEvent.Deleted)
         }
     }
 
@@ -725,7 +797,10 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
      * leave it while the frozen write completes. The journal/pending state still serializes the
      * node write and keeps it crash-recoverable.
      */
-    private fun runLong(operation: suspend LongCaptureSession.(LongCaptureRecord) -> Unit) {
+    private fun runLong(
+        hapticEvent: MoteHapticEvent? = null,
+        operation: suspend LongCaptureSession.(LongCaptureRecord) -> Unit,
+    ) {
         if (!_state.value.longCaptureVisible || longRecord == null) return
         if (longSaveJob?.isActive == true) return
         val captures = repository ?: return
@@ -744,6 +819,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
                     val input = record.copy(draft = draft)
                     if (input != record) persistLong(input, publish = false)
                     LongCaptureSession(captures) { persistLong(it) }.operation(input)
+                    hapticEvent?.let(::haptic)
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -885,6 +961,7 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
                 persistLong(null)
             }
             change { copy(message = "削除しました。") }
+            haptic(MoteHapticEvent.Deleted)
         }
     }
 
@@ -937,16 +1014,94 @@ internal class MoteViewModel(application: Application) : AndroidViewModel(applic
         ))
     }
 
-    /** Cached captures intentionally survive reconnect attempts; mutations stay disabled until Ready. */
-    private fun updateConnection(connection: MoteConnection, reason: String? = null) = change {
-        copy(
-            connection = connection,
-            archiveNotice = null,
-            archivePreviews = emptyMap(),
-            message = reason ?: message,
-            sync = if (connection == MoteConnection.Ready) sync else sync.copy(inFlight = false, retrying = 0),
-            syncRequestBusy = if (connection == MoteConnection.Ready) syncRequestBusy else false,
-        )
+    private fun haptic(event: MoteHapticEvent) {
+        _hapticEvents.tryEmit(event)
+    }
+
+    /**
+     * Cached captures intentionally survive reconnect attempts; mutations stay disabled until
+     * Ready. A quiet reconnect only moves the connection state: it leaves the archive undo,
+     * the optimistic archive projections, and the current message alone so an automatic
+     * retry does not erase something the user is still looking at.
+     */
+    private fun updateConnection(
+        connection: MoteConnection,
+        reason: String? = null,
+        preserveTransient: Boolean = false,
+    ) {
+        if (!preserveTransient && reason != null) lastConnectionMessage = reason
+        change {
+            copy(
+                connection = connection,
+                archiveNotice = if (preserveTransient) archiveNotice else null,
+                archivePreviews = if (preserveTransient) archivePreviews else emptyMap(),
+                message = if (preserveTransient) message else reason ?: message,
+                sync = if (connection == MoteConnection.Ready) sync else sync.copy(inFlight = false, retrying = 0),
+                syncRequestBusy = if (connection == MoteConnection.Ready) syncRequestBusy else false,
+            )
+        }
+    }
+
+    private fun cancelAutoReconnect() {
+        autoReconnectJob?.cancel()
+        autoReconnectJob = null
+    }
+
+    /**
+     * Reconnect only, never resend. This runs while the app is foreground, stops for the
+     * owner-approval state, and gives up after a small number of bounded attempts.
+     */
+    private fun scheduleAutoReconnect() {
+        if (!appForeground) return
+        if (autoReconnectJob?.isActive == true) return
+        if (!AutoReconnectPolicy.shouldAttempt(_state.value.connection)) return
+        autoReconnectJob = viewModelScope.launch {
+            val self = coroutineContext[Job]
+            var attemptJob: Job? = null
+            try {
+                delay(AutoReconnectPolicy.SettleMillis)
+                var attempt = 0
+                while (isActive && appForeground && attempt < AutoReconnectPolicy.MaxAttempts) {
+                    if (_state.value.busy) _state.first { !it.busy }
+                    if (!appForeground) return@launch
+                    if (!AutoReconnectPolicy.shouldAttempt(_state.value.connection)) return@launch
+                    if (attempt > 0) delay(AutoReconnectPolicy.RetryDelayMillis)
+                    if (!appForeground) return@launch
+                    if (!AutoReconnectPolicy.shouldAttempt(_state.value.connection)) return@launch
+                    attempt++
+                    startConnection(approve = false, quiet = true)
+                    attemptJob = connectionJob
+                    val outcome = withTimeoutOrNull(AutoReconnectPolicy.AttemptTimeoutMillis) {
+                        _state.first { AutoReconnectPolicy.isTerminal(it.connection) }
+                    }?.connection
+                    if (outcome == null) {
+                        // A stuck connect is cancelled so the next attempt, or the manual
+                        // reconnect, is not queued behind it.
+                        val job = attemptJob
+                        if (job != null && connectionJob === job) {
+                            job.cancel()
+                            if (_state.value.connection == MoteConnection.Loading) {
+                                updateConnection(MoteConnection.Unavailable, preserveTransient = true)
+                            }
+                        }
+                    }
+                    when (outcome ?: _state.value.connection) {
+                        MoteConnection.Ready, MoteConnection.NeedsApproval -> return@launch
+                        else -> Unit
+                    }
+                }
+            } finally {
+                if (autoReconnectJob === self) autoReconnectJob = null
+                val attempt = attemptJob
+                if (attempt?.isActive == true && connectionJob === attempt &&
+                    _state.value.connection == MoteConnection.Loading
+                ) {
+                    attempt.cancel()
+                    updateConnection(MoteConnection.Unavailable, preserveTransient = true)
+                    if (appForeground) scheduleAutoReconnect()
+                }
+            }
+        }
     }
 
     private fun scheduleCacheWrite(items: List<Capture>) {

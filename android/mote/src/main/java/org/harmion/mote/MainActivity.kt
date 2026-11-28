@@ -20,8 +20,11 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 
 class MainActivity : ComponentActivity() {
     private val mote by lazy { ViewModelProvider(this)[MoteViewModel::class.java] }
@@ -42,6 +45,16 @@ class MainActivity : ComponentActivity() {
                 val screenState = rememberSaveableStateHolder()
                 var settingsVisible by rememberSaveable { mutableStateOf(false) }
                 var preferences by remember { mutableStateOf(MotePreferences.read(this)) }
+                val backdrop = rememberMoteBackdrop()
+                val haptics = rememberMoteHaptics(preferences.haptics)
+                val lifecycleOwner = LocalLifecycleOwner.current
+                LaunchedEffect(haptics, lifecycleOwner) {
+                    // A write can land after the app goes to the background; do not buzz
+                    // from the pocket.
+                    lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                        mote.hapticEvents.collect { haptics.perform(it) }
+                    }
+                }
                 var handledSharedReturn by remember { mutableLongStateOf(initialSharedReturn) }
                 val sharedReturn = state.sharedReturn
                 LaunchedEffect(sharedReturn) {
@@ -109,12 +122,23 @@ class MainActivity : ComponentActivity() {
                             onCancelEdit = mote::cancelEdit,
                             onSync = mote::requestSync,
                             preferences = preferences,
+                            backdrop = backdrop,
                             onOpenSettings = { settingsVisible = true },
                         )
                     }
                 }
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        mote.onAppForeground()
+    }
+
+    override fun onStop() {
+        mote.onAppBackground()
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
