@@ -117,6 +117,9 @@
             ];
             shellHook = ''
               echo "harmion dev shell: $(rustc --version), node $(node --version), $(python3 --version)"
+              # The cc-wrapper supplies the crt search paths. A user-level cargo
+              # config that sets linker = "clang" cannot link build scripts here.
+              export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="cc"
               export HARMION_WASM_CC="${pkgs.llvmPackages.clang-unwrapped}/bin/clang"
               # wgpu and AntiWebUI load Vulkan/EGL at runtime. NixOS puts the
               # drivers in /run/opengl-driver, outside the default loader
@@ -152,11 +155,9 @@
               export ANDROID_SDK_ROOT="$ANDROID_HOME"
               export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/30.0.16248370"
               export JAVA_HOME="${androidPkgs.jdk}"
-              # The sandbox may make ~/.android and ~/.gradle read-only; keep
-              # tool caches inside the checkout.
-              export ANDROID_USER_HOME="''${ANDROID_USER_HOME:-$PWD/target/android-home}"
-              export GRADLE_USER_HOME="''${GRADLE_USER_HOME:-$PWD/target/gradle-home}"
-              export CARGO_TARGET_DIR="''${CARGO_TARGET_DIR:-$PWD/target}"
+              # Host-side build scripts link with the cc-wrapper for the same
+              # reason as in the default shell.
+              export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="cc"
               echo "harmion android shell: $(rustc --version), Java $(${androidPkgs.jdk}/bin/java -version 2>&1 | head -1), SDK $ANDROID_HOME"
             '';
           };

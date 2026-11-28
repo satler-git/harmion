@@ -93,7 +93,6 @@ def main():
             runtime = AssetsRuntime(executable, data, log, HERE / "native-config.capnp")
             try:
                 runtime.start()
-                environment = dict(os.environ, RUSTC_WRAPPER="")
                 result = subprocess.run(
                     [
                         "cargo",
@@ -111,7 +110,6 @@ def main():
                     cwd=REPO,
                     text=True,
                     capture_output=True,
-                    env=environment,
                     timeout=180,
                 )
                 print(result.stdout, end="", flush=True)

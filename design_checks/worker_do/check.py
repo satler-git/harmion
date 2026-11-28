@@ -66,10 +66,7 @@ def client(url: Path, verify=False):
     ]
     if verify:
         command.append("--verify")
-    environment = dict(os.environ, RUSTC_WRAPPER="")
-    result = subprocess.run(
-        command, cwd=REPO, text=True, capture_output=True, env=environment
-    )
+    result = subprocess.run(command, cwd=REPO, text=True, capture_output=True)
     if result.returncode != 0:
         print(result.stdout, flush=True)
         print(result.stderr, flush=True)

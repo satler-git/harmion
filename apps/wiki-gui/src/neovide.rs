@@ -342,19 +342,6 @@ impl Manager {
 }
 
 fn sanitize_editor_env(command: &mut Command, editor_socket: &Path) {
-    for key in [
-        "XDG_CACHE_HOME",
-        "XDG_STATE_HOME",
-        "XDG_DATA_HOME",
-        "XDG_CONFIG_HOME",
-    ] {
-        if let Some(value) = env::var_os(key) {
-            let value = value.to_string_lossy();
-            if value.contains("/target/nix-") || value.contains("/target/cargo-home") {
-                command.env_remove(key);
-            }
-        }
-    }
     if let Ok(value) = env::var("WIKI_SOCKET") {
         let path = PathBuf::from(value);
         if path.is_relative() {
@@ -553,10 +540,6 @@ mod tests {
             .expect("query editor cache path");
         let cache = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         eprintln!("editor cache: {cache}");
-        assert!(
-            !cache.contains("/target/nix-cache"),
-            "editor inherited the sandbox cache: {cache}"
-        );
         assert!(cache.ends_with("/nvim"), "unexpected cache path: {cache}");
     }
 }

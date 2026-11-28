@@ -58,9 +58,7 @@ checks `filetype=ledger`.
 ## Profile and cache
 
 The plugin uses the editor's normal profile. It does not set `NVIM_APPNAME`
-and does not create a separate Wiki config. When Neovide is started from the
-GUI, the manager removes repository-local `XDG_CACHE_HOME` / `XDG_STATE_HOME` /
-`XDG_DATA_HOME` values (the development-shell workaround) so the editor uses
-the usual `~/.cache/nvim`, `~/.local/state/nvim` and `~/.local/share/nvim`.
+and does not create a separate Wiki config, so Neovide uses the usual
+`~/.cache/nvim`, `~/.local/state/nvim` and `~/.local/share/nvim`.
 Wiki-specific state is limited to the dedicated `--listen` socket and the
 `WIKI_SOCKET` / `WIKI_NVIM_SERVER` environment variables.
