@@ -5,7 +5,6 @@
   import Grants from '../lib/Grants.svelte';
   import WorkerRegistration from '../lib/WorkerRegistration.svelte';
   import {
-    approvalModeLabel,
     formatDateTime,
     membershipStateLabel,
     membershipStateTone,
@@ -23,6 +22,7 @@
     navigate,
     readOnly,
     now,
+    approvalCount = 0,
   }: {
     overview: Overview | null;
     capabilities: Capabilities | null;
@@ -33,6 +33,7 @@
     navigate: (page: Page) => void;
     readOnly: boolean;
     now: number;
+    approvalCount?: number;
   } = $props();
 
   function bytes(value: string) {
@@ -84,7 +85,7 @@
   );
   const syncIntervalText = $derived.by(() => {
     if (!hostStatus) return '—';
-    if (!(syncInterval > 0)) return '無効（Peer からの受信のみ）';
+    if (!(syncInterval > 0)) return '無効（受信のみ）';
     if (syncInterval < 60000) return `${Math.round(syncInterval / 1000)} 秒間隔`;
     return `${Math.round(syncInterval / 60000)} 分間隔`;
   });
@@ -158,9 +159,9 @@
 
 <div class="page-title">
   <div>
-    <h1>ノードの概要</h1>
+    <h1>概要</h1>
   </div>
-  <button disabled={busy} onclick={refresh}>{busy ? '取得中…' : '最新の状態に更新'}</button>
+  <button disabled={busy} onclick={refresh}>{busy ? '取得中…' : '更新'}</button>
 </div>
 
 {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -202,27 +203,25 @@
         <small>削除済みを含む</small>
       </article>
       <article>
-        <span>Peer</span><strong>{peers.length}</strong>
+        <span>ノード</span><strong>{peers.length}</strong>
         <small>pin {pinnedPeers} · 参加 {activeMembers}</small>
       </article>
     </div>
   {:else if overview.metrics}
     <div class="stats">
       <article>
-        <span>表示中の Content</span><strong>{count(overview.metrics.visible_contents)}</strong>
-        <small>削除済みを含む合計 {count(overview.metrics.contents)}</small>
+        <span>Content</span><strong>{count(overview.metrics.visible_contents)}</strong>
+        <small>削除込み {count(overview.metrics.contents)}</small>
       </article>
       <article>
-        <span>保存した更新</span><strong>{count(overview.metrics.accepted_updates)}</strong>
-        <small>ローカルで受理した履歴</small>
+        <span>受信した更新</span><strong>{count(overview.metrics.accepted_updates)}</strong>
       </article>
       <article>
-        <span>履歴データ量</span><strong>{bytes(overview.metrics.record_bytes)}</strong>
-        <small>更新レコードの合計サイズ</small>
+        <span>データ量</span><strong>{bytes(overview.metrics.record_bytes)}</strong>
+        <small>更新レコード</small>
       </article>
       <article>
-        <span>有効なアプリ登録</span><strong>{count(overview.metrics.active_apps)}</strong>
-        <small>所有者の管理用登録を含む</small>
+        <span>アプリ</span><strong>{count(overview.metrics.active_apps)}</strong>
       </article>
     </div>
   {/if}
@@ -231,8 +230,7 @@
     <section class="panel">
       <div class="section-head">
         <div>
-          <h2>このノード</h2>
-          <p class="muted small">Peer とアプリが接続するときの識別情報です。</p>
+          <h2>識別情報</h2>
         </div>
       </div>
       <dl>
@@ -253,7 +251,7 @@
             <Clipboard text={overview.identity.epoch} label="コピー" />
           </dd>
         {/if}
-        <dt>Peer 通信</dt>
+        <dt>接続方式</dt>
         <dd>
           {binding ? transportLabel(binding.transport) : '—'}
           {#if bindingDetail}<span class="mono muted small binding-detail">
@@ -295,14 +293,8 @@
             {/if}
           </dd>
         {/if}
-        <dt>所有者権限</dt>
-        <dd>
-          {readOnly
-            ? '読み取り専用（Peer 専用レプリカ）'
-            : '全 Content の読み書き・アプリ管理・ノード管理'}
-        </dd>
         {#if overview.permissions}
-          <dt>管理セッションの grant</dt>
+          <dt>権限</dt>
           <dd><Grants grants={overview.permissions} dense /></dd>
         {/if}
       </dl>
@@ -345,7 +337,7 @@
           {/if}
         </dl>
         {#if peers.length}
-          <h3>Peer ごとの受信位置</h3>
+          <h3>ノードごとの受信位置</h3>
           {#each peers as peer}
             <div class="sync-peer">
               <span class="mono small">{peer.node_id.slice(0, 10)}…</span>
@@ -358,47 +350,70 @@
           {/each}
         {/if}
         <div class="actions">
-          <button onclick={() => navigate('peers')}>Peer を表示</button>
+          <button onclick={() => navigate('peers')}>ノードを表示</button>
         </div>
       </section>
     {:else}
-      <section class="panel">
-        <div class="section-head">
-          <div>
-            <h2>接続と認可</h2>
-            <p class="muted small">クラスタ参加とアプリ接続の入口です。</p>
+      <div class="stack">
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <h2>接続</h2>
+            </div>
           </div>
-        </div>
-        <dl>
-          <dt>参加が有効なノード</dt>
-          <dd>{activeMembers} 台</dd>
-          <dt>判断待ちの退役証明</dt>
-          <dd>{overview.members.pending_retirements.length} 件</dd>
-          <dt>OAuth</dt>
-          <dd>
-            {overview.capabilities.oauth ? '有効' : '無効'}
-            {#if oauthOrigin}<span class="mono muted small binding-detail">{oauthOrigin}</span>{/if}
-          </dd>
-          {#if overview.approval}
-            <dt>端末承認</dt>
-            <dd class="small">{approvalModeLabel(overview.approval)}</dd>
+          <dl>
+            <dt>参加が有効なノード</dt>
+            <dd>{activeMembers} 台</dd>
+            <dt>保留中の退役証明</dt>
+            <dd>{overview.members.pending_retirements.length} 件</dd>
+            {#if approvalCount > 0}
+              <dt>承認待ち</dt>
+              <dd>{approvalCount} 件</dd>
+            {/if}
+            <dt>OAuth</dt>
+            <dd>
+              {overview.capabilities.oauth ? '有効' : '無効'}
+              {#if oauthOrigin}<span class="mono muted small binding-detail">
+                  {oauthOrigin}
+                </span>{/if}
+            </dd>
+          </dl>
+          <div class="actions">
+            <button onclick={() => navigate('peers')}>ノード</button>
+            {#if !readOnly}<button onclick={() => navigate('approvals')}>承認</button>{/if}
+            {#if !readOnly}<button class="primary" onclick={() => navigate('apps')}>
+                アプリ
+              </button>{/if}
+          </div>
+        </section>
+        <section class="panel">
+          <div class="section-head">
+            <div>
+              <h2>ノード</h2>
+            </div>
+            <button class="quiet" onclick={() => navigate('peers')}>すべて</button>
+          </div>
+          {#if overview.members.members.length === 0}
+            <p class="empty">参加ノードはありません。</p>
+          {:else}
+            {#each overview.members.members as member}
+              <div class="node-row">
+                <div class="title-line">
+                  <strong>
+                    {member.node_id === overview.identity.node_id
+                      ? 'このノード'
+                      : short(member.node_id)}
+                  </strong>
+                  <span class="badge {membershipStateTone(member.state)}">
+                    {membershipStateLabel(member.state)}
+                  </span>
+                </div>
+                <p class="mono muted small" title={member.node_id}>{short(member.node_id)}</p>
+              </div>
+            {/each}
           {/if}
-        </dl>
-        <div class="actions">
-          {#if capabilities?.sections?.peers !== false}
-            <button onclick={() => navigate('peers')}>Peer を{readOnly ? '表示' : '管理'}</button>
-          {/if}
-          {#if !readOnly && capabilities?.sections?.connections !== false}
-            <button onclick={() => navigate('connections')}>接続要求を見る</button>
-          {/if}
-          {#if !readOnly && capabilities?.sections?.interpreters !== false}
-            <button onclick={() => navigate('interpreters')}>Interpreter 提供元</button>
-          {/if}
-          {#if !readOnly && capabilities?.sections?.apps !== false}
-            <button class="primary" onclick={() => navigate('apps')}>アプリを接続</button>
-          {/if}
-        </div>
-      </section>
+        </section>
+      </div>
     {/if}
   </div>
 
@@ -420,11 +435,7 @@
     {/key}
   {/if}
 
-  <p class="muted small">
-    取得時刻 {sampledAt || '—'}{#if !worker}
-      · このノードで観測した状態です。履歴データ量には索引・WAL・ファイルの余白を含みません。
-    {/if}
-  </p>
+  <p class="muted small">取得 {sampledAt || '—'}</p>
 {:else if busy}
   <p class="empty">ノードの状態を取得しています…</p>
 {/if}
@@ -486,6 +497,33 @@
     padding: 0.55rem 0;
     border-top: 1px solid var(--line);
     flex-wrap: wrap;
+  }
+  .stack {
+    display: flex;
+    flex-direction: column;
+    gap: 1.3rem;
+  }
+  .node-row {
+    padding: 0.6rem 0;
+    border-top: 1px solid var(--line);
+  }
+  .node-row:first-of-type {
+    border-top: 0;
+  }
+  .node-row:first-of-type {
+    padding-top: 0.2rem;
+  }
+  .node-row p {
+    margin: 0.2rem 0 0;
+  }
+  .title-line {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .title-line strong {
+    font-size: 0.9rem;
   }
   .issues {
     margin: 0.6rem 0 0;

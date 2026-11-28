@@ -79,7 +79,7 @@
 {:else}
   <section class="panel registration">
     <h2>この Worker を承認</h2>
-    <p class="muted">ローカルの Peer 画面で読み取ります。</p>
+    <p class="muted">ローカルのノード画面で読み取ります。</p>
     {#if loading}
       <p class="muted small" role="status">読み込み中…</p>
     {:else if error}

@@ -13,19 +13,25 @@
   import ProviderList from '../lib/ProviderList.svelte';
   import {
     approvalModeLabel,
-    approvalTone,
     connectionStatusLabel,
     connectionStatusTone,
     formatDateTime,
     microsDate,
     prettyJson,
-    providerHint,
     relativeTime,
     remainingTime,
     shortId,
   } from '../lib/format';
 
-  let { approval = null }: { approval?: ApprovalStatus | null } = $props();
+  let {
+    approval = null,
+    embedded = false,
+    onchange,
+  }: {
+    approval?: ApprovalStatus | null;
+    embedded?: boolean;
+    onchange?: () => void;
+  } = $props();
 
   let connections = $state<ConnectionRequest[]>([]);
   let busy = $state(false),
@@ -64,15 +70,15 @@
   function statusDetail(status: ConnectionStatus, request: ConnectionRequest): string {
     switch (status) {
       case 'pending':
-        return `${remainingTime(request.expires_at, now)}。承認するとアプリの権限と Provider 登録が確定します。`;
+        return '';
       case 'approved':
-        return '所有者の承認は完了しています。アプリの完了通知（connect-complete）待ちです。';
+        return 'アプリの完了通知待ち';
       case 'completed':
-        return `接続完了 ${formatDateTime(request.completed_at)}。アプリはトークンを取得済みです。`;
+        return `接続完了 ${formatDateTime(request.completed_at)}`;
       case 'denied':
-        return '所有者が拒否しました。トークンも Provider も発行されません。';
+        return '拒否';
       case 'expired':
-        return `承認されないまま期限が切れました（${formatDateTime(request.expires_at)}）。新しい要求を作り直してください。`;
+        return `期限切れ ${formatDateTime(request.expires_at)}`;
     }
   }
   async function load(silent = false) {
@@ -98,12 +104,11 @@
         allow: decision.allow,
         replace: decision.allow ? replace : false,
       });
-      message = decision.allow
-        ? '接続を承認しました。アプリの完了通知が届くと接続完了になります。'
-        : '接続要求を拒否しました。トークンも Provider も発行されていません。';
+      message = decision.allow ? '承認しました。完了通知待ち' : '拒否しました';
       decision = null;
       replace = false;
       await load();
+      onchange?.();
     } catch (e) {
       error = errorMessage(e);
     } finally {
@@ -129,28 +134,22 @@
   });
 </script>
 
-<div class="page-title">
-  <div>
-    <h1>接続要求</h1>
+{#if !embedded}
+  <div class="page-title">
+    <div>
+      <h1>接続</h1>
+    </div>
+    <button class="quiet" disabled={busy} onclick={() => load()}>
+      {busy ? '更新中…' : '再読み込み'}
+    </button>
   </div>
-  <button class="quiet" disabled={busy} onclick={() => load()}>
-    {busy ? '更新中…' : '再読み込み'}
-  </button>
-</div>
+{/if}
 
 {#if error}<p class="error" role="alert">{error}</p>{/if}
 {#if message}<p class="success" role="status">{message}</p>{/if}
-{#if pending.length && approval?.mode === 'terminal' && approval.terminal_available}
-  <div class="callout">
-    <strong>承認時の端末確認</strong>
-    <span>
-      承認を実行すると、管理アプリを起動したターミナルで <kbd>y</kbd> を押す必要があります。
-    </span>
-  </div>
-{/if}
 {#if approvalBlocked}
   <div class="callout danger">
-    <strong>この起動方法では R2 の承認を完了できません。</strong>
+    <strong>この起動方法では承認できません。</strong>
     {#if approval}<span>{approvalModeLabel(approval)}</span>{/if}
   </div>
 {/if}
@@ -178,7 +177,7 @@
     class:active={tab === 'history'}
     onclick={() => (tab = 'history')}
   >
-    履歴 <span class="count">{history.length}</span>
+    処理済み <span class="count">{history.length}</span>
   </button>
 </div>
 
@@ -192,6 +191,7 @@
       {#each visible as request (request.connection_id)}
         {@const providers = providersOf(request)}
         {@const status = isExpired(request) ? 'expired' : request.status}
+        {@const detail = statusDetail(status, request)}
         <article class="connection-card" class:pending={status === 'pending'}>
           <div class="connection-head">
             <div class="connection-title">
@@ -213,9 +213,9 @@
             </div>
           </div>
 
-          <p class:warning={status === 'pending'} class="status-detail">
-            {statusDetail(status, request)}
-          </p>
+          {#if detail}
+            <p class="status-detail">{detail}</p>
+          {/if}
 
           <div class="connection-meta">
             <div>
@@ -243,14 +243,7 @@
               <h4>
                 登録する Provider <span class="count">{providers.length}</span>
               </h4>
-              {#if request.provider_replace}
-                <p class="warning small">
-                  アプリは同名 Provider の置換を希望しています。承認時に「置換する」を選ばないと、
-                  同名の承認済み Provider がある場合は承認に失敗します。
-                </p>
-              {/if}
               <ProviderList {providers} replaceRequested={request.provider_replace} />
-              <p class="muted small provider-hint">{providerHint(request.grants)}</p>
             </section>
           </div>
 
@@ -286,7 +279,7 @@
           {#if status === 'pending'}
             <div class="actions">
               <button class="primary" disabled={busy} onclick={() => openDecision(request, true)}>
-                承認内容を確認
+                承認
               </button>
               <button class="danger" disabled={busy} onclick={() => openDecision(request, false)}>
                 拒否
@@ -320,21 +313,13 @@
       replace = false;
     }}
   >
-    <p><strong>{decision.request.name}</strong> からの接続要求です。</p>
-    {#if approval}
-      <div class="approval-line">
-        <span class="badge {approvalTone(approval)}">端末承認</span>
-        <span class="small">{approvalModeLabel(approval)}</span>
-      </div>
-      {#if decision.allow && approval.mode === 'terminal' && approval.terminal_available}
-        <p class="muted small">
-          下の「承認する」を押した後、管理アプリを起動したターミナルで <kbd>y</kbd> を押すと 承認が確定します。
-        </p>
-      {:else if decision.allow && approval.mode === 'session'}
-        <p class="muted small">
-          この起動方法では端末確認を行いません。ブラウザのこの確認だけが最終確認になります。
-        </p>
-      {/if}
+    <p><strong>{decision.request.name}</strong></p>
+    {#if approval && decision.allow && approval.mode === 'terminal' && approval.terminal_available}
+      <p class="muted small">
+        承認すると、起動したターミナルで <kbd>y</kbd> を押します。
+      </p>
+    {:else if approval && decision.allow && approval.mode === 'session'}
+      <p class="muted small">この起動方法では端末確認を行いません。</p>
     {/if}
     <dl class="confirm-grid">
       <dt>Callback</dt>
@@ -357,29 +342,17 @@
       />
       {#if previewProviders.length}
         {#if decision.request.provider_replace}
-          <p class="muted small">
-            アプリは同名 Provider の置換を希望しています。既存の同名 Provider を置き換える場合だけ、
-            次を選んでください。
-          </p>
+          <p class="muted small">既存の同名 Provider を置き換える場合だけ選んでください。</p>
         {:else}
-          <p class="muted small">
-            同名の承認済み Provider が既にある場合、置換を選ばないと承認は失敗します。
-            心当たりがない場合はオフのままにしてください。
-          </p>
+          <p class="muted small">同名の承認済み Provider がある場合は置換が必要です。</p>
         {/if}
         <label class="check">
           <input type="checkbox" bind:checked={replace} />
           同名の承認済み Provider を置換する
         </label>
       {/if}
-      <p class="muted small">
-        承認すると、アプリ権限の確定、OAuth クライアントの作成、Provider
-        の登録・承認を1つの操作で行います。トークンはアプリが完了通知を送った時点で発行されます。
-      </p>
     {:else}
-      <p class="muted small">
-        この要求には資格情報も Provider も発行されません。アプリ側には拒否として通知されます。
-      </p>
+      <p class="muted small">トークンと Provider は発行されません。</p>
     {/if}
   </Confirm>
 {/if}

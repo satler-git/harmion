@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, errorMessage, short } from '../lib/api.svelte';
-  import type { InterpreterDescription, InterpreterProvider } from '../lib/types';
+  import type { ApprovalStatus, InterpreterDescription, InterpreterProvider } from '../lib/types';
   import Confirm from '../lib/Confirm.svelte';
   import {
     interpreterStatusLabel,
@@ -10,6 +10,15 @@
     shortId,
   } from '../lib/format';
 
+  let {
+    embedded = false,
+    approval = null,
+    onchange,
+  }: {
+    embedded?: boolean;
+    approval?: ApprovalStatus | null;
+    onchange?: () => void;
+  } = $props();
   let providers = $state<InterpreterProvider[]>([]);
   let descriptions = $state<Record<string, InterpreterDescription>>({});
   let busy = $state(false),
@@ -20,6 +29,10 @@
 
   const waiting = $derived(providers.filter((provider) => provider.status === 'pending'));
   const approved = $derived(providers.filter((provider) => provider.status === 'approved'));
+  const approvalBlocked = $derived(
+    approval?.mode === 'deny' ||
+      (approval?.terminal_required === true && approval.terminal_available === false),
+  );
   const superseded = $derived(providers.filter((provider) => provider.status === 'superseded'));
 
   async function load() {
@@ -63,10 +76,11 @@
         provider: pending.provider_id,
         replace,
       });
-      message = `「${pending.name}」を承認しました。アプリが接続すると呼び出し可能になります。`;
+      message = `「${pending.name}」を承認しました。`;
       pending = null;
       replace = false;
       await load();
+      onchange?.();
     } catch (e) {
       error = errorMessage(e);
     } finally {
@@ -80,15 +94,20 @@
   onMount(load);
 </script>
 
-<div class="page-title">
-  <div>
-    <h1>Interpreter 提供元</h1>
+{#if !embedded}
+  <div class="page-title">
+    <div>
+      <h1>Provider</h1>
+    </div>
+    <button class="quiet" disabled={busy} onclick={load}>{busy ? '更新中…' : '再読み込み'}</button>
   </div>
-  <button class="quiet" disabled={busy} onclick={load}>{busy ? '更新中…' : '再読み込み'}</button>
-</div>
+{/if}
 
 {#if error}<p class="error" role="alert">{error}</p>{/if}
 {#if message}<p class="success" role="status">{message}</p>{/if}
+{#if approvalBlocked}
+  <div class="callout danger">この起動方法では承認できません。</div>
+{/if}
 
 {#if providers.length === 0}
   <section class="panel">
@@ -102,10 +121,6 @@
       <div class="section-head">
         <div>
           <h2>承認待ち</h2>
-          <p class="muted small">
-            名前・契約バージョン・スキーマを確認してください。同名の承認済み提供元がある場合は、
-            置換を明示したときだけ承認できます。
-          </p>
         </div>
         <span class="badge badge-warn">{waiting.length} 件</span>
       </div>
@@ -126,8 +141,12 @@
                 <p class="mono muted small">{short(provider.provider_id)}</p>
               </div>
               <div class="actions">
-                <button class="primary" disabled={busy} onclick={() => openApproval(provider)}>
-                  承認内容を確認
+                <button
+                  class="primary"
+                  disabled={busy || approvalBlocked}
+                  onclick={() => openApproval(provider)}
+                >
+                  承認
                 </button>
                 <button class="quiet" disabled={busy} onclick={() => describe(provider)}>
                   {descriptions[provider.provider_id] ? '定義を閉じる' : '定義を表示'}
@@ -148,10 +167,6 @@
     <div class="section-head">
       <div>
         <h2>承認済み</h2>
-        <p class="muted small">
-          「接続中」は提供元アプリが現在 WebSocket を開いている状態です。未接続の提供元は
-          呼び出し時に使えません。
-        </p>
       </div>
       <span class="badge badge-ok">{approved.length} 件</span>
     </div>
@@ -197,9 +212,6 @@
       <div class="section-head">
         <div>
           <h2>置換済み</h2>
-          <p class="muted small">
-            同じ名前の新しい提供元に置き換えられた登録です。呼び出しには使われません。
-          </p>
         </div>
         <span class="badge badge-muted">{superseded.length} 件</span>
       </div>
@@ -230,28 +242,11 @@
   {/if}
 {/if}
 
-<section class="panel">
-  <h2>承認と接続の違い</h2>
-  <dl class="explain-grid">
-    <dt>承認</dt>
-    <dd>
-      このノードが Provider 名を信頼した状態です。統合接続の承認、またはこの画面の承認で確定します。
-    </dd>
-    <dt>接続</dt>
-    <dd>
-      提供元アプリが認証付き WebSocket を開いている状態です。ノード再起動やアプリ終了で失われます。
-    </dd>
-    <dt>同名の置換</dt>
-    <dd>
-      ノード内で承認済みの名前は1つだけです。別の提供元へ切り替えるときは、承認時に「置換」を明示します。
-    </dd>
-  </dl>
-</section>
-
 {#if pending}
   <Confirm
     title="Interpreter 提供元を承認"
     {busy}
+    disabled={approvalBlocked}
     confirmLabel="承認する"
     onsubmit={approve}
     oncancel={() => {
@@ -271,10 +266,14 @@
       <input type="checkbox" bind:checked={replace} />
       同じ名前の承認済み提供元を置換する
     </label>
-    <p class="muted small">
-      置換を選ばない場合、同名の承認済み提供元があれば承認は失敗します。置換すると以前の提供元の
-      セッションは閉じられ、その名前の呼び出しは新しい提供元へ切り替わります。
-    </p>
+    <p class="muted small">同名の提供元がある場合は置換が必要です。</p>
+    {#if approval && approval.mode === 'terminal' && approval.terminal_available}
+      <p class="muted small">
+        承認すると、起動したターミナルで <kbd>y</kbd> を押します。
+      </p>
+    {:else if approval && approval.mode === 'session'}
+      <p class="muted small">この起動方法では端末確認を行いません。</p>
+    {/if}
   </Confirm>
 {/if}
 
@@ -330,15 +329,6 @@
     max-height: 24rem;
     overflow: auto;
   }
-  .explain-grid {
-    grid-template-columns: 7rem minmax(0, 1fr);
-    gap: 0.5rem 1rem;
-    margin: 0;
-  }
-  .explain-grid dt {
-    font-weight: 600;
-    color: #b9c6e6;
-  }
   .confirm-grid {
     grid-template-columns: 8rem minmax(0, 1fr);
     gap: 0.35rem 1rem;
@@ -347,7 +337,6 @@
     .provider-head {
       flex-direction: column;
     }
-    .explain-grid,
     .confirm-grid {
       grid-template-columns: 1fr;
     }

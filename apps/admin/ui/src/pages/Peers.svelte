@@ -178,26 +178,26 @@
 
 <div class="page-title">
   <div>
-    <h1>Peer</h1>
+    <h1>ノード</h1>
   </div>
-  <button disabled={busy} onclick={refresh}>{busy ? '更新中…' : '状態を更新'}</button>
+  <button disabled={busy} onclick={refresh}>{busy ? '更新中…' : '更新'}</button>
 </div>
 
 {#if error}<p class="error" role="alert">{error}</p>{/if}
 {#if message}<p class="success" role="status">{message}</p>{/if}
 
 {#if readOnly}
-  <section class="panel" aria-label="Peer の状態">
+  <section class="panel" aria-label="ノードの状態">
     <div class="worker-summary">
       <span>参加 {workerActive} / {workerMembers.length}</span>
-      <span>Peer {workerPeers.length}</span>
+      <span>接続 {workerPeers.length}</span>
       <span>pin {workerPeers.filter((peer) => peer.pinned).length}</span>
       {#if workerPending.length}<span class="badge badge-warn">
           退役証明 {workerPending.length}
         </span>{/if}
     </div>
 
-    <h2>メンバー</h2>
+    <h2>ノード</h2>
     {#if workerMembers.length === 0}
       <p class="empty">参加状態はまだありません。</p>
     {:else}
@@ -231,9 +231,9 @@
       {/each}
     {/if}
 
-    <h2>Peer 接続</h2>
+    <h2>接続</h2>
     {#if workerPeers.length === 0}
-      <p class="empty">登録された Peer はありません。</p>
+      <p class="empty">接続中のノードはありません。</p>
     {:else}
       {#each workerPeers as peer}
         <div class="peer-row">
@@ -268,7 +268,6 @@
 
     {#if workerPending.length}
       <h2>保留中の退役証明</h2>
-      <p class="muted small">確定・却下はローカルの管理画面で行います。</p>
       {#each workerPending as pending}
         <div class="peer-row">
           <div>
@@ -291,9 +290,6 @@
   <div class="two-columns">
     <section class="panel">
       <h2>このノードを共有</h2>
-      <p class="muted">
-        相手の管理画面で読み取るか、接続コードを貼り付けてください。参加の向きによって使う操作が異なります。
-      </p>
       {#if qr}
         <button class="qr-button" type="button" title="QR を拡大" onclick={() => (qrZoom = true)}>
           <img class="qr" src={qr} alt="このノードの接続コードを含む QR" width="360" height="360" />
@@ -302,30 +298,21 @@
           <button type="button" onclick={() => (qrZoom = true)}>QR を拡大</button>
           <a class="button" href={qr} download="harmion-peer.png">QR を保存</a>
         </div>
-        <p class="muted small">
-          Android のカメラで読み取れない場合は、下の接続コードをコピーして貼り付けてください。
-        </p>
       {/if}
       {#if qrError}<p class="warning">{qrError}</p>{/if}
       {#if overview && overview.peer_transfer}
-        <label for="own-code">Peer 接続コード</label>
+        <label for="own-code">接続コード</label>
         <textarea id="own-code" class="code-input" value={overview.peer_transfer} readonly
         ></textarea>
         <Clipboard text={overview.peer_transfer} label="接続コードをコピー" />
       {:else}
-        <p class="muted small">
-          このノードは現在 Peer 接続コードを発行していません。ノードの識別情報と Peer
-          通信設定を確認してください。
-        </p>
+        <p class="muted small">接続コードを発行していません。</p>
       {/if}
     </section>
 
     <section class="panel">
-      <h2>Peer を追加</h2>
-      <p class="muted">
-        相手から受け取った接続コードを貼り付けます。操作の向きを選んでから内容を確認してください。
-      </p>
-      <label for="peer-code">相手の接続コード</label>
+      <h2>ノードを追加</h2>
+      <label for="peer-code">接続コード</label>
       <textarea
         id="peer-code"
         class="code-input"
@@ -353,15 +340,9 @@
       </select>
       <div class="hint-box">
         {#if mode === 'approve'}
-          <p>
-            相手のコードを貼り替えると、相手ノードをこのクラスタへ迎え入れます。相手がまだ
-            このクラスタに参加していない場合に使います。
-          </p>
+          <p>相手をこのクラスタへ追加します。</p>
         {:else}
-          <p>
-            このノードを相手のクラスタへ参加させます。参加先の既存ノードで先に承認されたコードを
-            使ってください。
-          </p>
+          <p>参加先で先に承認されたコードを使います。</p>
         {/if}
       </div>
       <button class="primary" disabled={busy || !input.trim()} onclick={review}>
@@ -371,7 +352,7 @@
       {#if preview}
         <Confirm
           title={preview.action === 'approve'
-            ? 'この Peer を参加させますか？'
+            ? 'このノードを参加させますか？'
             : 'このクラスタへ参加しますか？'}
           {busy}
           onsubmit={connect}
@@ -397,8 +378,7 @@
             </dd>
           </dl>
           <p>
-            相手の画面と Cluster ID・Node ID・公開鍵を照合してください。承認後、相手はクラスタの
-            全データを複製できます。
+            Cluster ID・Node ID・公開鍵を照合してください。承認後、相手は全データを複製できます。
           </p>
         </Confirm>
       {/if}
@@ -419,9 +399,6 @@
     <div class="section-head">
       <div>
         <h2>参加状態</h2>
-        <p class="muted small">
-          有効は参加資格がある状態です。オンラインかどうかは手動同期の結果で確認できます。
-        </p>
       </div>
       <span class="badge badge-ok">
         {overview?.members.members.filter((member) => member.state === 'active').length ?? 0} 台が有効
@@ -462,17 +439,14 @@
     {/if}
 
     {#if confirmNode}
-      <Confirm title="Peer の退役" {busy} onsubmit={retire} oncancel={() => (confirmNode = null)}>
+      <Confirm title="ノードの退役" {busy} onsubmit={retire} oncancel={() => (confirmNode = null)}>
         <p class="mono">{confirmNode}</p>
         <p>この Node ID の参加を取り消します。再参加には新しい Node ID が必要です。</p>
       </Confirm>
     {/if}
 
     {#if overview && overview.members.pending_retirements.length}
-      <h3>判断待ちの退役証明</h3>
-      <p class="muted small">
-        他のノードが発行した退役証明です。対象と発行元を確認して、確定または却下してください。
-      </p>
+      <h3>保留中の退役証明</h3>
       {#each overview.members.pending_retirements as pending}
         <div class="peer-row">
           <div>

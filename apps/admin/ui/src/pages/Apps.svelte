@@ -146,11 +146,7 @@
 <section class="panel">
   <div class="section-head">
     <div>
-      <h2>登録・認可コードを確認</h2>
-      <p class="muted small">
-        アプリが表示したコードを貼り付けます。認可要求では、要求元アプリと権限を確認してから
-        認可画面を開きます。
-      </p>
+      <h2>コードを確認</h2>
     </div>
   </div>
   <form
@@ -172,9 +168,6 @@
       autocomplete="off"
       required
     />
-    <p class="muted">
-      コードはアプリの認可画面からコピーしてください。要求された権限は次の確認画面に表示されます。
-    </p>
     <button class="primary" disabled={busy || !oauthEnabled}>
       {busy ? '確認中…' : '要求を確認'}
     </button>
@@ -234,11 +227,7 @@
 <section class="panel">
   <div class="section-head">
     <div>
-      <h2>既存アプリの権限を変更・失効</h2>
-      <p class="muted small">
-        指定した権限でアプリの権限を置き換えます。現在の権限は自動では引き継がれません。 OAuth
-        アプリでは権限の拡大は拒否され、縮小と失効だけが反映されます。
-      </p>
+      <h2>権限を変更・失効</h2>
     </div>
   </div>
   <form
@@ -301,10 +290,6 @@
           placeholder="ledger/balance, docs/search"
         />
       </label>
-      <p class="muted small">
-        空にすると「すべての Provider 名」を意味します。OAuth アプリでは既存より広い権限への
-        変更は拒否されるため、通常は現在の名前を明示してください。
-      </p>
     {/if}
     <label class="check">
       <input type="checkbox" bind:checked={revoke} onchange={() => (changing = false)} />
@@ -315,10 +300,6 @@
         失効は取り消せません。アプリを再び使うには、新しい接続または登録が必要です。
       </p>
     {/if}
-    <p class="muted small">
-      読み取り・書き込み・Interpreter 権限をまとめて置き換えます。管理用アプリ自身を指定すると
-      管理画面が使えなくなる可能性があるため、対象の Client ID を確認してください。
-    </p>
     <button disabled={busy} class={revoke ? 'danger' : 'primary'}> 変更内容を確認 </button>
   </form>
 

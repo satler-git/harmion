@@ -1,5 +1,6 @@
 export type Page =
   | 'overview'
+  | 'approvals'
   | 'contents'
   | 'conflicts'
   | 'peers'

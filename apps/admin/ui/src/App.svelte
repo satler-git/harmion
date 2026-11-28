@@ -16,25 +16,24 @@
     workerAdmin,
     writes,
   } from './lib/api.svelte';
-  import type { Overview, Page } from './lib/types';
+  import type { ConnectionList, InterpreterProvider, Overview, Page } from './lib/types';
   import OverviewPage from './pages/Overview.svelte';
   import Contents from './pages/Contents.svelte';
   import Conflicts from './pages/Conflicts.svelte';
   import Peers from './pages/Peers.svelte';
   import Apps from './pages/Apps.svelte';
   import Export from './pages/Export.svelte';
-  import Interpreters from './pages/Interpreters.svelte';
-  import Connections from './pages/Connections.svelte';
+  import Approvals from './pages/Approvals.svelte';
   const links: { id: Page; label: string; icon: string }[] = [
     { id: 'overview', label: '概要', icon: '◈' },
+    { id: 'approvals', label: '承認', icon: '✓' },
+    { id: 'peers', label: 'ノード', icon: '◎' },
     { id: 'contents', label: 'Content', icon: '▤' },
-    { id: 'conflicts', label: '競合解決', icon: '⇄' },
-    { id: 'peers', label: 'Peer', icon: '⌘' },
     { id: 'apps', label: 'アプリ', icon: '▦' },
-    { id: 'interpreters', label: 'Interpreter', icon: '⚙' },
-    { id: 'connections', label: '接続要求', icon: '⇄' },
     { id: 'export', label: 'Export', icon: '↗' },
   ];
+  const labels: Partial<Record<Page, string>> = { conflicts: '競合解決' };
+  const routes: Page[] = [...links.map((link) => link.id), 'conflicts'];
   let page = $state<Page>('overview'),
     overview = $state<Overview | null>(null),
     busy = $state(false),
@@ -45,17 +44,21 @@
     requested = $state(''),
     tokenInput = $state(''),
     worker = $state(false),
+    approvalCount = $state(0),
     now = $state(Date.now());
   const capabilities = $derived(workerAdmin.capabilities);
-  const visibleLinks = $derived(
-    capabilities ? links.filter((link) => capabilities?.sections?.[link.id] !== false) : links,
-  );
   const readOnly = $derived(worker || (capabilities?.read_only ?? false));
+  const visibleLinks = $derived.by(() => {
+    if (readOnly) return links.filter((link) => link.id === 'overview' || link.id === 'peers');
+    return capabilities
+      ? links.filter((link) => capabilities.sections?.[link.id] !== false)
+      : links;
+  });
   const remaining = $derived(
     Math.min(30, Math.max(0, Math.ceil((session.expiresAt - now) / 60000))),
   );
   $effect(() => {
-    if (!visibleLinks.some((link) => link.id === page)) page = 'overview';
+    if (page !== 'conflicts' && !visibleLinks.some((link) => link.id === page)) page = 'overview';
   });
   async function authenticateWorker() {
     opening = true;
@@ -89,17 +92,28 @@
       ]);
       overview = nextOverview;
       sampledAt = new Date().toLocaleTimeString('ja-JP');
+      if (!worker) await refreshApprovalCount();
     } catch (e) {
       error = errorMessage(e);
     } finally {
       busy = false;
     }
   }
+  async function refreshApprovalCount() {
+    const [connections, providers] = await Promise.all([
+      api<ConnectionList>('/connect-list', {}).catch(() => null),
+      api<{ providers: InterpreterProvider[] }>('/interpreter-list', {}).catch(() => null),
+    ]);
+    approvalCount =
+      (connections?.connections.filter((request) => request.status === 'pending').length ?? 0) +
+      (providers?.providers.filter((provider) => provider.status === 'pending').length ?? 0);
+  }
   onMount(() => {
     let alive = true;
     const query = new URLSearchParams(location.search);
     const initial = query.get('page');
-    if (links.some((link) => link.id === initial)) page = initial as Page;
+    const target = initial === 'connections' || initial === 'interpreters' ? 'approvals' : initial;
+    if (target && routes.includes(target as Page)) page = target as Page;
     const content = query.get('content');
     if (content) {
       requested = content;
@@ -142,7 +156,11 @@
 </script>
 
 <svelte:head>
-  <title>Harmion · {visibleLinks.find((link) => link.id === page)?.label ?? '管理'}</title>
+  <title
+    >Harmion · {visibleLinks.find((link) => link.id === page)?.label ??
+      labels[page] ??
+      '管理'}</title
+  >
 </svelte:head>
 {#if !session.token}
   <div class="access-page">
@@ -192,11 +210,19 @@
       <div class="brand"><span class="brand-icon">H</span>Harmion</div>
       <nav aria-label="管理画面">
         {#each visibleLinks as link}<button
-            class:active={page === link.id}
-            aria-current={page === link.id ? 'page' : undefined}
+            class:active={page === link.id || (link.id === 'contents' && page === 'conflicts')}
+            aria-current={page === link.id || (link.id === 'contents' && page === 'conflicts')
+              ? 'page'
+              : undefined}
             onclick={() => navigate(link.id)}
           >
-            <span class="nav-icon" aria-hidden="true">{link.icon}</span>{link.label}
+            <span class="nav-icon" aria-hidden="true">
+              {link.icon}
+            </span>{link.label}{#if link.id === 'approvals' && approvalCount > 0}<span
+                class="nav-count"
+              >
+                {approvalCount}
+              </span>{/if}
           </button>{/each}
       </nav>
       <div class="sidebar-footer">
@@ -209,30 +235,19 @@
       <header>
         <div class="actions">
           <span class="badge">{readOnly ? '読み取り専用' : '所有者'}</span>
-          {#if overview?.approval}
+          {#if overview?.approval && (overview.approval.mode === 'deny' || (overview.approval.terminal_required && !overview.approval.terminal_available))}
             <span
-              class="badge {overview.approval.mode === 'session'
-                ? 'badge-warn'
-                : overview.approval.mode === 'deny' ||
-                    (overview.approval.terminal_required && !overview.approval.terminal_available)
-                  ? 'badge-danger'
-                  : 'badge-info'}"
-              title={overview.approval.mode === 'session'
-                ? 'R2 はブラウザ確認だけで実行されます（--approval=session）'
-                : overview.approval.mode === 'deny'
-                  ? 'R2 は拒否する設定です（--approval=deny）'
-                  : overview.approval.terminal_required && !overview.approval.terminal_available
-                    ? '起動端末が TTY でないため、R2 は実行できません'
-                    : 'R2 は起動したターミナルで y を押して承認します'}
+              class="badge badge-danger"
+              title="起動端末で承認できないため、R2 操作は実行できません"
             >
-              {overview.approval.mode === 'session'
-                ? '端末確認なし'
-                : overview.approval.mode === 'deny'
-                  ? 'R2 拒否'
-                  : overview.approval.terminal_required && !overview.approval.terminal_available
-                    ? '端末確認不可'
-                    : '端末確認あり'}
+              端末承認不可
             </span>
+          {:else if overview?.approval?.mode === 'session'}
+            <span class="badge badge-warn" title="ブラウザ確認だけで R2 を実行します">
+              端末確認なし
+            </span>
+          {:else if overview?.approval?.mode === 'terminal' && overview.approval.terminal_available}
+            <span class="badge badge-info" title="承認時に起動端末で y を押します">端末承認</span>
           {/if}
           {#if !worker}<span class="muted small">残り約 {remaining} 分</span>{/if}<button
             class="quiet"
@@ -263,9 +278,16 @@
             {navigate}
             {readOnly}
             {now}
+            {approvalCount}
           />
         </div>
         {#if !readOnly}
+          <div class:hidden={page !== 'approvals'}>
+            <Approvals
+              approval={overview?.approval ?? null}
+              oncount={(count) => (approvalCount = count)}
+            />
+          </div>
           <div class:hidden={page !== 'contents'}><Contents {resolve} /></div>
           <div class:hidden={page !== 'conflicts'}><Conflicts {requested} /></div>
         {/if}
@@ -274,10 +296,6 @@
         </div>
         {#if !readOnly}
           <div class:hidden={page !== 'apps'}><Apps {overview} /></div>
-          <div class:hidden={page !== 'interpreters'}><Interpreters /></div>
-          <div class:hidden={page !== 'connections'}>
-            <Connections approval={overview?.approval ?? null} />
-          </div>
           <div class:hidden={page !== 'export'}><Export /></div>
         {/if}
       </main>

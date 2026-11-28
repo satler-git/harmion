@@ -10,6 +10,7 @@
     next = $state<string | null>(null),
     selected = $state<ContentItem | null>(null);
   let filter = $state(''),
+    conflictOnly = $state(false),
     busy = $state(false),
     error = $state(''),
     id = $state('');
@@ -20,11 +21,14 @@
     value: unknown;
   }
 
+  const conflicted = $derived(items.filter((item) => item.conflicted));
   const filtered = $derived(
-    items.filter((item) =>
-      (item.body + ' ' + item.id + ' ' + item.kinds.join(' '))
-        .toLocaleLowerCase()
-        .includes(filter.toLocaleLowerCase()),
+    items.filter(
+      (item) =>
+        (!conflictOnly || item.conflicted) &&
+        (item.body + ' ' + item.id + ' ' + item.kinds.join(' '))
+          .toLocaleLowerCase()
+          .includes(filter.toLocaleLowerCase()),
     ),
   );
   const selectedAttributes = $derived(selected ? parseAttributes(selected.attributes) : []);
@@ -70,29 +74,42 @@
   <div>
     <h1>Content</h1>
   </div>
-  <button disabled={busy} onclick={() => load()}>{busy ? '読み込み中…' : '一覧を更新'}</button>
+  <button disabled={busy} onclick={() => load()}>{busy ? '読み込み中…' : '更新'}</button>
 </div>
 
 <div class="browser-layout">
   <section class="panel content-list">
-    <div class="section-head">
-      <div>
-        <h2>一覧</h2>
-        <p class="muted small">
-          読み込んだ {items.length} 件の中を検索します。サーバー全体の検索ではありません。
-        </p>
-      </div>
-      <span class="badge">{filtered.length} / {items.length}</span>
+    <input
+      id="content-filter"
+      aria-label="Content を検索"
+      bind:value={filter}
+      placeholder="本文・Kind・IDで検索"
+    />
+    <div class="segmented content-filters" role="tablist" aria-label="Content の絞り込み">
+      <button
+        role="tab"
+        aria-selected={!conflictOnly}
+        class:active={!conflictOnly}
+        onclick={() => (conflictOnly = false)}
+      >
+        すべて <span class="count">{items.length}</span>
+      </button>
+      <button
+        role="tab"
+        aria-selected={conflictOnly}
+        class:active={conflictOnly}
+        onclick={() => (conflictOnly = true)}
+      >
+        競合 <span class="count">{conflicted.length}</span>
+      </button>
     </div>
-    <label for="content-filter">読み込んだ Content を絞り込み</label>
-    <input id="content-filter" bind:value={filter} placeholder="本文・Kind・ID で検索" />
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if busy && items.length === 0}
       <p class="empty">Content を読み込んでいます…</p>
     {:else if items.length === 0}
-      <p class="empty">表示できる Content はありません。</p>
+      <p class="empty">Content はありません。</p>
     {:else if filtered.length === 0}
-      <p class="empty">「{filter}」に一致する Content はありません。</p>
+      <p class="empty">該当する Content はありません。</p>
     {:else}
       <div class="list">
         {#each filtered as item (item.id)}
@@ -116,35 +133,33 @@
     {#if next}
       <button disabled={busy} onclick={() => load(true)}>続きを読み込む</button>
     {/if}
-    <p class="muted small">
-      {items.length} 件読み込み済み{next ? ' · さらに結果があります' : ' · 最後まで読み込みました'}
-    </p>
-    <hr />
-    <label for="open-id">Content ID から競合解決を開く</label>
-    <form
-      onsubmit={(event) => {
-        event.preventDefault();
-        resolve(id.trim());
-      }}
-    >
-      <input
-        id="open-id"
-        bind:value={id}
-        pattern={'[a-fA-F0-9]{64}'}
-        required
-        placeholder="削除済み Content の ID も指定できます"
-      /><button>開く</button>
-    </form>
+    <details class="technical">
+      <summary>IDから開く</summary>
+      <form
+        onsubmit={(event) => {
+          event.preventDefault();
+          resolve(id.trim());
+        }}
+      >
+        <label for="open-id">Content ID</label>
+        <input
+          id="open-id"
+          bind:value={id}
+          pattern={'[a-fA-F0-9]{64}'}
+          required
+          placeholder="削除済みの ID も指定できます"
+        /><button>開く</button>
+      </form>
+    </details>
   </section>
 
   <section class="panel reader">
     {#if selected}
-      <div class="page-title">
-        <div>
-          <p class="muted small">表示しているのは現在値です。</p>
+      {#if selected.conflicted}
+        <div class="actions">
+          <button onclick={() => resolve(selected!.id)}>競合を解決</button>
         </div>
-        <button onclick={() => resolve(selected!.id)}>競合解決で開く</button>
-      </div>
+      {/if}
       <div class="id-line">
         <p class="mono muted small">{selected.id}</p>
         <Clipboard text={selected.id} label="ID をコピー" />
@@ -178,6 +193,22 @@
 </div>
 
 <style>
+  .content-filters {
+    margin: 0.7rem 0 0;
+  }
+  .technical {
+    border-top: 1px solid var(--line);
+    padding-top: 0.55rem;
+    margin-top: 1rem;
+  }
+  .technical summary {
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
+  .technical form {
+    margin-top: 0.6rem;
+  }
   .list-meta {
     display: flex;
     align-items: center;
