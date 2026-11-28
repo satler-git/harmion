@@ -28,7 +28,7 @@ Install or update the native Harmion binaries (~/.local/bin).
 
 Options:
   --version TAG     Install a specific tag (e.g. v0.1.0 or v0.2.0-rc.1)
-  --from-local DIR  Build DIR instead of the GitHub flake
+  --from-local DIR  Build DIR's git-tracked tree (commit changes first)
   --rollback        Switch back to the previous profile
   --list            List installed profiles
   --prune           Remove profiles other than current and previous
@@ -167,7 +167,19 @@ case "$action" in
             if [[ -z "$tag" ]]; then
                 tag="$(git -C "$from_local" describe --tags --always 2>/dev/null || echo local)"
             fi
-            flake_ref="path:$from_local"
+            if local_root="$(git -C "$from_local" rev-parse --show-toplevel 2>/dev/null)"; then
+                # `path:` copies ignored build artifacts (target/ alone can be
+                # hundreds of GiB) to the Nix store. Use the git source so only
+                # tracked files enter the build. Uncommitted/untracked files are
+                # not a production input; commit them first if needed.
+                flake_ref="git+file://$local_root"
+                if [[ -n "$(git -C "$local_root" status --porcelain 2>/dev/null)" ]]; then
+                    log "warning: local source has uncommitted or untracked changes; only git-tracked files are used"
+                fi
+            else
+                flake_ref="path:$from_local"
+                log "warning: $from_local is not a git checkout; path source may include build artifacts"
+            fi
         else
             if [[ -z "$tag" ]]; then
                 tag="$(latest_tag)"

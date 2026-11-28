@@ -59,6 +59,8 @@ clone から初めて入れる場合:
 
 `~/.local/bin` に symlink し、`~/.local/share/harmion/profiles/<tag>` を GC root として保持します。dotfiles や home-manager は介しません。`--systemd` で unit を配置し、`--restart` で `harmion@main.service` を再起動できます。
 
+作業ツリーから入れる場合は `--from-local .` を使う。git checkoutでは**git管理下のファイルだけ**をビルドし、`target/` などのignored artifactはNix storeへコピーしない。未コミット・untrackedの変更は本番入力にしない。
+
 flake から直接ビルドする場合:
 
 ```sh
