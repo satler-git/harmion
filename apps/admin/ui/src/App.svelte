@@ -24,13 +24,18 @@
   import Apps from './pages/Apps.svelte';
   import Export from './pages/Export.svelte';
   import Approvals from './pages/Approvals.svelte';
-  const links: { id: Page; label: string; icon: string }[] = [
-    { id: 'overview', label: '概要', icon: '◈' },
-    { id: 'approvals', label: '承認', icon: '✓' },
-    { id: 'peers', label: 'ノード', icon: '◎' },
-    { id: 'contents', label: 'Content', icon: '▤' },
-    { id: 'apps', label: 'アプリ', icon: '▦' },
-    { id: 'export', label: 'Export', icon: '↗' },
+  import Icon from './lib/Icon.svelte';
+  const links: {
+    id: Page;
+    label: string;
+    icon: 'overview' | 'approvals' | 'nodes' | 'content' | 'apps' | 'export';
+  }[] = [
+    { id: 'overview', label: '概要', icon: 'overview' },
+    { id: 'approvals', label: '承認', icon: 'approvals' },
+    { id: 'peers', label: 'ノード', icon: 'nodes' },
+    { id: 'contents', label: 'Content', icon: 'content' },
+    { id: 'apps', label: 'アプリ', icon: 'apps' },
+    { id: 'export', label: 'Export', icon: 'export' },
   ];
   const labels: Partial<Record<Page, string>> = { conflicts: '競合解決' };
   const routes: Page[] = [...links.map((link) => link.id), 'conflicts'];
@@ -54,9 +59,10 @@
       ? links.filter((link) => capabilities.sections?.[link.id] !== false)
       : links;
   });
-  const remaining = $derived(
-    Math.min(30, Math.max(0, Math.ceil((session.expiresAt - now) / 60000))),
-  );
+  const remainingClock = $derived.by(() => {
+    const total = Math.max(0, Math.ceil((session.expiresAt - now) / 1000));
+    return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+  });
   $effect(() => {
     if (page !== 'conflicts' && !visibleLinks.some((link) => link.id === page)) page = 'overview';
   });
@@ -211,13 +217,14 @@
       <nav aria-label="管理画面">
         {#each visibleLinks as link}<button
             class:active={page === link.id || (link.id === 'contents' && page === 'conflicts')}
+            class:nav-export={link.id === 'export'}
             aria-current={page === link.id || (link.id === 'contents' && page === 'conflicts')
               ? 'page'
               : undefined}
             onclick={() => navigate(link.id)}
           >
-            <span class="nav-icon" aria-hidden="true">
-              {link.icon}
+            <span class="nav-icon">
+              <Icon name={link.icon} size={17} />
             </span>{link.label}{#if link.id === 'approvals' && approvalCount > 0}<span
                 class="nav-count"
               >
@@ -225,14 +232,14 @@
               </span>{/if}
           </button>{/each}
       </nav>
-      <div class="sidebar-footer">
-        <span class="status-dot"></span>
-        {worker ? 'Worker・読み取り専用' : 'ローカル接続'}
-        <p class="mono">{overview ? short(overview.identity.node_id) : '状態を取得中…'}</p>
-      </div>
     </aside>
     <div class="main-column">
       <header>
+        <div class="topbar-context">
+          <span class="status-dot"></span>
+          <span>{worker ? 'Worker' : 'ローカルノード'}</span>
+          <span class="mono muted">{overview ? short(overview.identity.node_id) : '—'}</span>
+        </div>
         <div class="actions">
           <span class="badge">{readOnly ? '読み取り専用' : '所有者'}</span>
           {#if overview?.approval && (overview.approval.mode === 'deny' || (overview.approval.terminal_required && !overview.approval.terminal_available))}
@@ -249,11 +256,16 @@
           {:else if overview?.approval?.mode === 'terminal' && overview.approval.terminal_available}
             <span class="badge badge-info" title="承認時に起動端末で y を押します">端末承認</span>
           {/if}
-          {#if !worker}<span class="muted small">残り約 {remaining} 分</span>{/if}<button
-            class="quiet"
+          {#if !worker}
+            <span class="topbar-clock">残り <strong>{remainingClock}</strong></span>
+          {/if}
+          <button
+            class="icon-button"
+            aria-label="セッションを終了"
+            title="セッションを終了"
             onclick={() => endSession()}
           >
-            セッションを終了
+            <Icon name="power" size={17} />
           </button>
         </div>
       </header>
@@ -278,6 +290,7 @@
             {navigate}
             {readOnly}
             {now}
+            active={page === 'overview'}
             {approvalCount}
           />
         </div>
@@ -295,7 +308,7 @@
           <Peers {overview} {refresh} active={page === 'peers'} {readOnly} />
         </div>
         {#if !readOnly}
-          <div class:hidden={page !== 'apps'}><Apps {overview} /></div>
+          <div class:hidden={page !== 'apps'}><Apps {overview} {navigate} /></div>
           <div class:hidden={page !== 'export'}><Export /></div>
         {/if}
       </main>

@@ -126,7 +126,7 @@ p {
   margin: 0 0 0.75rem;
 }
 h1 {
-  font-size: 2rem;
+  font-size: 1.7rem;
   font-weight: 620;
   letter-spacing: -0.04em;
   line-height: 1.35;
@@ -238,6 +238,7 @@ form > button {
   padding: 0.65rem 0.75rem;
 }
 .sidebar nav button.active {
+  box-shadow: inset 2px 0 0 #a6b6ff;
   background: #232b41;
   color: #cad4ff;
   border-color: #303d5d;
@@ -919,4 +920,99 @@ footer {
   .page-title h1 {
     font-size: 1.7rem;
   }
+}
+
+/* Design pass: shared chrome */
+header {
+  justify-content: space-between;
+  min-height: 58px;
+  padding: 0.65rem 2.4rem;
+}
+.topbar-context {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #b9c3d4;
+  font-size: 0.78rem;
+  min-width: 0;
+}
+.topbar-context .mono {
+  color: #77849a;
+  font-size: 0.7rem;
+}
+.topbar-clock {
+  color: #8d99ad;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+.topbar-clock strong {
+  color: #e3e7ef;
+  font-weight: 600;
+  margin-left: 0.25rem;
+  font-variant-numeric: tabular-nums;
+}
+.icon-button {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  background: transparent;
+  border-color: transparent;
+  color: #aeb9cb;
+}
+.icon-button:hover:enabled {
+  background: #1b2331;
+  border-color: #354055;
+}
+.page-title > .icon-button {
+  width: 2.1rem;
+  height: 2.1rem;
+}
+.sidebar nav {
+  flex: 1;
+}
+.sidebar nav button {
+  min-height: 2.35rem;
+}
+.nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  color: #98a5ba;
+}
+.sidebar nav button.active .nav-icon {
+  color: #b9c6ff;
+}
+.nav-export {
+  margin-top: auto;
+}
+
+/* Design pass: tables */
+.data-table {
+  margin-top: 0.65rem;
+}
+.data-head,
+.data-row {
+  display: grid;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0;
+}
+.data-head {
+  color: #828fa5;
+  font-size: 0.72rem;
+  border-bottom: 1px solid var(--line);
+  padding-top: 0;
+}
+.data-row {
+  border-bottom: 1px solid #1e2531;
+}
+.data-row:last-child {
+  border-bottom: 0;
+}
+.data-row strong {
+  display: block;
+  font-size: 0.86rem;
+  font-weight: 600;
 }

@@ -1,12 +1,25 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { api, errorMessage } from '../lib/api.svelte';
-  import type { AppPreview, Overview, Filter } from '../lib/types';
-  import Confirm from '../lib/Confirm.svelte';
+  import type {
+    AppPreview,
+    ConnectionList,
+    ConnectionRequest,
+    Filter,
+    InterpreterProvider,
+    Overview,
+    Page,
+    ProviderManifest,
+  } from '../lib/types';
   import Clipboard from '../lib/Clipboard.svelte';
+  import Confirm from '../lib/Confirm.svelte';
   import Grants from '../lib/Grants.svelte';
-  import { formatDateTime } from '../lib/format';
+  import Icon from '../lib/Icon.svelte';
+  import { formatDateTime, shortId } from '../lib/format';
 
-  let { overview }: { overview: Overview | null } = $props();
+  let { overview, navigate }: { overview: Overview | null; navigate: (page: Page) => void } =
+    $props();
+
   let input = $state(''),
     preview = $state<AppPreview | null>(null),
     busy = $state(false),
@@ -24,9 +37,56 @@
     provideNames = $state(''),
     revoke = $state(false),
     changing = $state(false);
+  let connections = $state<ConnectionRequest[]>([]);
+  let providers = $state<InterpreterProvider[]>([]);
+  let statusError = $state('');
 
   const oauthEnabled = $derived(overview?.capabilities.oauth ?? false);
+  const connected = $derived(
+    connections.filter(
+      (request) => request.status === 'approved' || request.status === 'completed',
+    ),
+  );
+  const approvedProviders = $derived(
+    providers.filter((provider) => provider.status === 'approved'),
+  );
+  const history = $derived(
+    connections.filter(
+      (request) =>
+        request.status === 'completed' ||
+        request.status === 'denied' ||
+        request.status === 'expired',
+    ),
+  );
 
+  function providersOf(request: ConnectionRequest): ProviderManifest[] {
+    if (request.providers?.length) return request.providers;
+    return request.provider ? [request.provider] : [];
+  }
+  function permissionSummary(request: ConnectionRequest): string {
+    const parts: string[] = [];
+    if (request.grants.read) parts.push('読み取り');
+    if (request.grants.write) parts.push('書き込み');
+    if (request.grants.call) parts.push('Interpreter');
+    if (request.grants.provide) parts.push('Provider');
+    return parts.length ? parts.join(' / ') : 'なし';
+  }
+  function connectionState(request: ConnectionRequest): string {
+    return request.status === 'completed' ? '接続中' : '承認済み';
+  }
+  async function loadStatus() {
+    statusError = '';
+    try {
+      const [connectionList, providerList] = await Promise.all([
+        api<ConnectionList>('/connect-list', {}),
+        api<{ providers: InterpreterProvider[] }>('/interpreter-list', {}),
+      ]);
+      connections = connectionList.connections;
+      providers = providerList.providers;
+    } catch (e) {
+      statusError = errorMessage(e);
+    }
+  }
   async function review() {
     busy = true;
     error = '';
@@ -67,6 +127,7 @@
         message = '認可画面で要求を確認し、許可または拒否してください。';
       }
       preview = null;
+      void loadStatus();
     } catch (e) {
       error = errorMessage(e);
     } finally {
@@ -127,11 +188,20 @@
       busy = false;
     }
   }
+  onMount(() => {
+    void loadStatus();
+  });
 </script>
 
 <div class="page-title">
   <div>
     <h1>アプリ</h1>
+  </div>
+  <div class="actions">
+    <button class="primary" onclick={() => navigate('approvals')}>接続を許可</button>
+    <button class="icon-button" aria-label="更新" title="更新" onclick={loadStatus}>
+      <Icon name="refresh" size={17} />
+    </button>
   </div>
 </div>
 
@@ -141,216 +211,327 @@
   </p>
 {/if}
 {#if error}<p class="error" role="alert">{error}</p>{/if}
+{#if statusError}<p class="warning" role="status">{statusError}</p>{/if}
 {#if message}<p class="success" role="status">{message}</p>{/if}
 
-<section class="panel">
-  <div class="section-head">
-    <div>
-      <h2>コードを確認</h2>
+<div class="app-columns">
+  <section class="panel">
+    <div class="section-head">
+      <div>
+        <h2>接続済み</h2>
+      </div>
+      <span class="muted small">{connected.length}</span>
     </div>
-  </div>
-  <form
-    onsubmit={(event) => {
-      event.preventDefault();
-      void review();
-    }}
-  >
-    <label for="app-request">認可コードまたは登録コード</label>
-    <input
-      id="app-request"
-      bind:value={input}
-      oninput={() => {
-        preview = null;
-        consent = '';
-        registered = '';
-      }}
-      placeholder="harmion-auth:v1:… または harmion-app:v1:…"
-      autocomplete="off"
-      required
-    />
-    <button class="primary" disabled={busy || !oauthEnabled}>
-      {busy ? '確認中…' : '要求を確認'}
-    </button>
-  </form>
+    {#if connected.length === 0}
+      <p class="empty">接続済みのアプリはありません。</p>
+    {:else}
+      <div class="app-cards">
+        {#each connected as request (request.connection_id)}
+          <article class="app-card">
+            <div class="app-card-head">
+              <strong>{request.name}</strong>
+              <span class="badge {request.status === 'completed' ? 'badge-ok' : 'badge-info'}">
+                {connectionState(request)}
+              </span>
+            </div>
+            <p class="muted small">{permissionSummary(request)}</p>
+            <p class="mono muted small">{request.redirect_uri}</p>
+            <p class="muted small">
+              {request.completed_at
+                ? `接続 ${formatDateTime(request.completed_at)}`
+                : `承認 ${formatDateTime(request.approved_at)}`}
+            </p>
+          </article>
+        {/each}
+      </div>
+    {/if}
+  </section>
 
-  {#if preview}
-    <Confirm
-      title={preview.type === 'registration' ? 'アプリを登録しますか？' : 'アプリへの権限を確認'}
-      {busy}
-      confirmLabel={preview.type === 'registration' ? '登録する' : '認可画面を準備'}
-      onsubmit={approve}
-      oncancel={() => (preview = null)}
-    >
-      <dl>
-        <dt>アプリ名</dt>
-        <dd>{preview.type === 'registration' ? preview.name : preview.preview.name}</dd>
-        <dt>コールバック</dt>
-        <dd class="mono">
-          {preview.type === 'registration' ? preview.redirect_uri : preview.preview.redirect_uri}
-        </dd>
-        {#if preview.type === 'authorization'}
-          <dt>Client ID</dt>
-          <dd class="mono">{preview.preview.client_id}</dd>
-          <dt>要求の有効期限</dt>
-          <dd>{formatDateTime(preview.preview.expires_at)}</dd>
-        {/if}
-      </dl>
-      {#if preview.type === 'authorization'}
-        <h4>要求された権限</h4>
-        <Grants grants={preview.preview.grants} dense />
-      {/if}
-      <p>
-        {preview.type === 'registration'
-          ? '登録した後にアプリが認可を要求します。登録情報は要求元アプリへ渡してください。'
-          : '自分が開始したアプリの要求であることを確認してください。認可画面で許可すると、登録されたコールバックへ認可コードを返します。'}
-      </p>
-    </Confirm>
-  {/if}
-
-  {#if registered}
-    <label for="registered">要求元アプリへ渡す登録情報</label>
-    <textarea id="registered" class="code-input" value={registered} readonly></textarea>
-    <Clipboard text={registered} label="登録情報をコピー" />
-  {/if}
-
-  {#if consent}
-    <a class="button primary" href={consent} target="_blank" rel="noopener noreferrer">
-      Harmion の認可画面を開く ↗
-    </a>
-    <p class="muted small">
-      認可画面で許可すると、登録されたコールバックへ認可コードを返します。この画面は要求を
-      準備しただけで、まだ権限は付与されていません。
-    </p>
-  {/if}
-</section>
+  <section class="panel">
+    <div class="section-head">
+      <div>
+        <h2>Provider</h2>
+      </div>
+      <span class="muted small">{approvedProviders.length}</span>
+    </div>
+    {#if approvedProviders.length === 0}
+      <p class="empty">承認済みの Provider はありません。</p>
+    {:else}
+      <div class="provider-stack">
+        {#each approvedProviders as provider (provider.provider_id)}
+          <article class="provider-row">
+            <div>
+              <strong>{provider.name}</strong>
+              <p class="mono muted small">{shortId(provider.provider_id, 12, 8)}</p>
+            </div>
+            <div class="provider-meta">
+              <span class="badge badge-ok">承認済み</span>
+              <span class="muted small">v{provider.contract_version}</span>
+              <span class="muted small">{provider.connected ? '接続中' : '未接続'}</span>
+            </div>
+          </article>
+        {/each}
+      </div>
+    {/if}
+  </section>
+</div>
 
 <section class="panel">
   <div class="section-head">
     <div>
-      <h2>権限を変更・失効</h2>
+      <h2>接続履歴</h2>
     </div>
+    <span class="muted small">{history.length}</span>
   </div>
-  <form
-    onsubmit={(event) => {
-      event.preventDefault();
-      changing = true;
-    }}
-  >
-    <label for="app-id">Client ID / App ID</label>
-    <input
-      id="app-id"
-      bind:value={appId}
-      oninput={() => (changing = false)}
-      pattern={'[a-fA-F0-9]{64}'}
-      placeholder="64桁の hex"
-      required
-    />
-    <div class="two-columns">
-      {#each ['read', 'write'] as op}
-        <div>
-          <label for={op + '-mode'}>{op === 'read' ? '読み取り' : '書き込み'}</label>
-          {#if op === 'read'}
-            <select id="read-mode" bind:value={readMode} onchange={() => (changing = false)}>
-              <option value="none">なし</option>
-              <option value="all">全 Content</option>
-              <option value="kinds">指定 Kind</option>
-            </select>
-            {#if readMode === 'kinds'}
-              <label for="read-kinds">Kind 名（カンマ区切り）</label>
-              <input id="read-kinds" bind:value={readKinds} oninput={() => (changing = false)} />
-            {/if}
-          {:else}
-            <select id="write-mode" bind:value={writeMode} onchange={() => (changing = false)}>
-              <option value="none">なし</option>
-              <option value="all">全 Content</option>
-              <option value="kinds">指定 Kind</option>
-            </select>
-            {#if writeMode === 'kinds'}
-              <label for="write-kinds">Kind 名（カンマ区切り）</label>
-              <input id="write-kinds" bind:value={writeKinds} oninput={() => (changing = false)} />
-            {/if}
-          {/if}
+  {#if history.length === 0}
+    <p class="empty">接続履歴はありません。</p>
+  {:else}
+    <div class="data-table history-table" role="table" aria-label="接続履歴">
+      <div class="data-head" role="row">
+        <span>アプリ</span><span>種類</span><span>結果</span><span>時刻</span>
+      </div>
+      {#each history as request (request.connection_id)}
+        <div class="data-row" role="row">
+          <strong>{request.name}</strong>
+          <span class="muted small">接続</span>
+          <span class="badge {request.status === 'completed' ? 'badge-ok' : 'badge-muted'}">
+            {request.status === 'completed'
+              ? '接続'
+              : request.status === 'denied'
+                ? '拒否'
+                : '期限切れ'}
+          </span>
+          <span class="muted small">
+            {formatDateTime(request.completed_at ?? request.approved_at ?? request.created_at)}
+          </span>
         </div>
       {/each}
     </div>
-    <label class="check">
-      <input type="checkbox" bind:checked={callGrant} onchange={() => (changing = false)} />
-      Interpreter を呼び出せる
-    </label>
-    <label class="check">
-      <input type="checkbox" bind:checked={provideGrant} onchange={() => (changing = false)} />
-      Interpreter を提供できる
-    </label>
-    {#if provideGrant}
-      <label>
-        提供を許可する Provider 名（カンマ区切り）
-        <input
-          bind:value={provideNames}
-          oninput={() => (changing = false)}
-          placeholder="ledger/balance, docs/search"
-        />
-      </label>
-    {/if}
-    <label class="check">
-      <input type="checkbox" bind:checked={revoke} onchange={() => (changing = false)} />
-      アプリを失効させる（発行済みトークンも無効になります）
-    </label>
-    {#if revoke}
-      <p class="warning small">
-        失効は取り消せません。アプリを再び使うには、新しい接続または登録が必要です。
-      </p>
-    {/if}
-    <button disabled={busy} class={revoke ? 'danger' : 'primary'}> 変更内容を確認 </button>
-  </form>
-
-  {#if changing}
-    <Confirm
-      title={revoke ? 'アプリを失効' : 'アプリの権限を置き換え'}
-      {busy}
-      danger={revoke}
-      onsubmit={change}
-      oncancel={() => (changing = false)}
-    >
-      <p class="mono">{appId}</p>
-      <p class="muted small">
-        読み取り {readMode === 'kinds'
-          ? readKinds || '指定なし'
-          : readMode === 'none'
-            ? 'なし'
-            : '全 Content'}
-        / 書き込み {writeMode === 'kinds'
-          ? writeKinds || '指定なし'
-          : writeMode === 'none'
-            ? 'なし'
-            : '全 Content'}
-      </p>
-      <h4>Interpreter</h4>
-      <p class="small">
-        {callGrant ? '呼び出し可' : '呼び出し不可'} · {provideGrant
-          ? `提供可（${names().join('、') || 'すべての名前'}）`
-          : '提供不可'}
-      </p>
-      {#if revoke}<p class="warning small">
-          このアプリは失効し、発行済みトークンも無効になります。
-        </p>{/if}
-      {#if provideGrant && names().length === 0}
-        <p class="warning small">
-          Provider 名が空です。すべての名前を許可する要求として扱われます。
-        </p>
-      {/if}
-      <p class="muted small">
-        {revoke
-          ? 'この操作は取り消せません。必要なら新しい接続を作り直してください。'
-          : '現在の権限を置き換えます。意図しない縮小がないか確認してください。'}
-      </p>
-    </Confirm>
   {/if}
 </section>
 
+<details class="panel management-panel">
+  <summary>登録・権限</summary>
+  <div class="management-body">
+    <section>
+      <h2>コードを確認</h2>
+      <form
+        onsubmit={(event) => {
+          event.preventDefault();
+          void review();
+        }}
+      >
+        <label for="app-request">認可コードまたは登録コード</label>
+        <input
+          id="app-request"
+          bind:value={input}
+          oninput={() => {
+            preview = null;
+            consent = '';
+            registered = '';
+          }}
+          placeholder="harmion-auth:v1:… または harmion-app:v1:…"
+          autocomplete="off"
+          required
+        />
+        <button class="primary" disabled={busy || !oauthEnabled}>
+          {busy ? '確認中…' : '要求を確認'}
+        </button>
+      </form>
+
+      {#if preview}
+        <Confirm
+          title={preview.type === 'registration'
+            ? 'アプリを登録しますか？'
+            : 'アプリへの権限を確認'}
+          {busy}
+          confirmLabel={preview.type === 'registration' ? '登録する' : '認可画面を準備'}
+          onsubmit={approve}
+          oncancel={() => (preview = null)}
+        >
+          <dl>
+            <dt>アプリ名</dt>
+            <dd>{preview.type === 'registration' ? preview.name : preview.preview.name}</dd>
+            <dt>コールバック</dt>
+            <dd class="mono">
+              {preview.type === 'registration'
+                ? preview.redirect_uri
+                : preview.preview.redirect_uri}
+            </dd>
+            {#if preview.type === 'authorization'}
+              <dt>Client ID</dt>
+              <dd class="mono">{preview.preview.client_id}</dd>
+              <dt>要求の有効期限</dt>
+              <dd>{formatDateTime(preview.preview.expires_at)}</dd>
+            {/if}
+          </dl>
+          {#if preview.type === 'authorization'}
+            <h4>要求された権限</h4>
+            <Grants grants={preview.preview.grants} dense />
+          {/if}
+        </Confirm>
+      {/if}
+
+      {#if registered}
+        <label for="registered">要求元アプリへ渡す登録情報</label>
+        <textarea id="registered" class="code-input" value={registered} readonly></textarea>
+        <Clipboard text={registered} label="登録情報をコピー" />
+      {/if}
+
+      {#if consent}
+        <a class="button primary" href={consent} target="_blank" rel="noopener noreferrer">
+          Harmion の認可画面を開く ↗
+        </a>
+      {/if}
+    </section>
+
+    <section>
+      <h2>権限を変更・失効</h2>
+      <form
+        onsubmit={(event) => {
+          event.preventDefault();
+          void change();
+        }}
+      >
+        <label for="app-id">Client ID / App ID</label>
+        <input id="app-id" bind:value={appId} placeholder="64桁の hex" required />
+        <div class="grant-grid">
+          <div>
+            <label for="read-mode">読み取り</label>
+            <select id="read-mode" bind:value={readMode}>
+              <option value="none">なし</option>
+              <option value="all">すべて</option>
+              <option value="kinds">Kind 指定</option>
+            </select>
+            {#if readMode === 'kinds'}
+              <input bind:value={readKinds} placeholder="Kind をカンマ区切り" />
+            {/if}
+          </div>
+          <div>
+            <label for="write-mode">書き込み</label>
+            <select id="write-mode" bind:value={writeMode}>
+              <option value="none">なし</option>
+              <option value="all">すべて</option>
+              <option value="kinds">Kind 指定</option>
+            </select>
+            {#if writeMode === 'kinds'}
+              <input bind:value={writeKinds} placeholder="Kind をカンマ区切り" />
+            {/if}
+          </div>
+        </div>
+        <label class="check">
+          <input type="checkbox" bind:checked={callGrant} />
+          Interpreter を呼び出せる
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={provideGrant} />
+          Interpreter を提供できる
+        </label>
+        {#if provideGrant}
+          <label for="provide-names">Provider 名（空ならすべて）</label>
+          <input id="provide-names" bind:value={provideNames} placeholder="wiki, mote" />
+        {/if}
+        <label class="check">
+          <input type="checkbox" bind:checked={revoke} />
+          アプリを失効させる（発行済みトークンも無効になります）
+        </label>
+        <button disabled={busy} class={revoke ? 'danger' : 'primary'}> 変更内容を確認 </button>
+      </form>
+    </section>
+  </div>
+</details>
+
 <style>
-  .panel h4 {
-    margin: 0.9rem 0 0.4rem;
-    font-size: 0.85rem;
-    color: #b9c6e6;
+  .app-columns {
+    display: grid;
+    grid-template-columns: minmax(0, 1.45fr) minmax(18rem, 1fr);
+    gap: 1rem;
+    align-items: start;
+  }
+  .app-cards,
+  .provider-stack {
+    display: grid;
+    gap: 0.55rem;
+    margin-top: 0.6rem;
+  }
+  .app-card,
+  .provider-row {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #121721;
+    padding: 0.8rem 0.9rem;
+  }
+  .app-card-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .app-card-head strong {
+    font-size: 0.92rem;
+  }
+  .app-card p {
+    margin: 0.3rem 0 0;
+  }
+  .provider-row {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .provider-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    flex-wrap: wrap;
+  }
+  .history-table .data-head,
+  .history-table .data-row {
+    grid-template-columns: minmax(9rem, 1.5fr) 5rem 6rem 9rem;
+  }
+  .management-panel {
+    padding: 0;
+    overflow: hidden;
+  }
+  .management-panel > summary {
+    padding: 1rem 1.4rem;
+    cursor: pointer;
+    color: #b8c4da;
+    font-size: 0.86rem;
+  }
+  .management-body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    padding: 0 1.4rem 1.4rem;
+    border-top: 1px solid var(--line);
+  }
+  .management-body h2 {
+    margin-top: 1rem;
+  }
+  .grant-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.8rem;
+  }
+  @media (max-width: 900px) {
+    .app-columns,
+    .management-body {
+      grid-template-columns: 1fr;
+    }
+  }
+  @media (max-width: 650px) {
+    .history-table .data-head,
+    .history-table .data-row {
+      grid-template-columns: minmax(8rem, 1.5fr) 5rem 6rem;
+    }
+    .history-table .data-head > :last-child,
+    .history-table .data-row > :last-child {
+      display: none;
+    }
+    .grant-grid {
+      grid-template-columns: 1fr;
+    }
   }
 </style>

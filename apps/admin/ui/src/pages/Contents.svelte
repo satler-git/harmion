@@ -3,6 +3,7 @@
   import { api, errorMessage, short } from '../lib/api.svelte';
   import type { ContentItem, ContentPage } from '../lib/types';
   import Clipboard from '../lib/Clipboard.svelte';
+  import Icon from '../lib/Icon.svelte';
   import { prettyJson } from '../lib/format';
 
   let { resolve }: { resolve: (id: string) => void } = $props();
@@ -74,17 +75,22 @@
   <div>
     <h1>Content</h1>
   </div>
-  <button disabled={busy} onclick={() => load()}>{busy ? '読み込み中…' : '更新'}</button>
+  <button class="icon-button" aria-label="更新" title="更新" disabled={busy} onclick={() => load()}>
+    <Icon name="refresh" size={17} />
+  </button>
 </div>
 
 <div class="browser-layout">
   <section class="panel content-list">
-    <input
-      id="content-filter"
-      aria-label="Content を検索"
-      bind:value={filter}
-      placeholder="本文・Kind・IDで検索"
-    />
+    <div class="search-field">
+      <Icon name="search" size={15} />
+      <input
+        id="content-filter"
+        aria-label="Content を検索"
+        bind:value={filter}
+        placeholder="本文・Kind・IDで検索"
+      />
+    </div>
     <div class="segmented content-filters" role="tablist" aria-label="Content の絞り込み">
       <button
         role="tab"
@@ -114,7 +120,10 @@
       <div class="list">
         {#each filtered as item (item.id)}
           <button class:chosen={selected?.id === item.id} onclick={() => (selected = item)}>
-            <span>{item.preview.trim() || '本文なし'}</span>
+            <span class="item-title">
+              {item.preview.trim() || '本文なし'}
+              {#if item.conflicted}<span class="conflict-dot"></span>{/if}
+            </span>
             <small class="list-meta">
               <span class="mono">{short(item.id)}</span>
               {#if item.kinds.length}
@@ -156,13 +165,16 @@
   <section class="panel reader">
     {#if selected}
       {#if selected.conflicted}
-        <div class="actions">
-          <button onclick={() => resolve(selected!.id)}>競合を解決</button>
+        <div class="conflict-bar">
+          <span class="conflict-dot"></span>
+          <strong>本文が競合</strong>
+          <button class="quiet" onclick={() => resolve(selected!.id)}>解決</button>
         </div>
       {/if}
-      <div class="id-line">
-        <p class="mono muted small">{selected.id}</p>
-        <Clipboard text={selected.id} label="ID をコピー" />
+      <h2 class="reader-title">{selected.preview.trim() || '本文なし'}</h2>
+      <div class="reader-meta">
+        <span class="mono muted small">{short(selected.id)}</span>
+        <Clipboard text={selected.id} label="ID をコピー" iconOnly />
       </div>
       <div class="tags">
         {#each selected.kinds as kind}<span class="badge">{kind}</span>{/each}
@@ -171,7 +183,6 @@
             Kind なし
           </span>{/if}
       </div>
-      <h3>本文</h3>
       <pre class="body-text">{selected.body || '（本文なし）'}</pre>
       <h3>属性</h3>
       {#if selectedAttributes.length}
@@ -184,6 +195,23 @@
       {:else}
         <p class="muted small">属性はありません。</p>
       {/if}
+      <footer class="reader-foot">
+        <div>
+          <span class="meta-label">Content ID</span>
+          <span class="mono reader-foot-value">
+            {short(selected.id)}
+            <Clipboard text={selected.id} label="Content ID をコピー" iconOnly />
+          </span>
+        </div>
+        <div>
+          <span class="meta-label">Kind</span>
+          <span class="reader-foot-value">{selected.kinds.join('、') || 'なし'}</span>
+        </div>
+        <div>
+          <span class="meta-label">属性</span>
+          <span class="reader-foot-value">{selectedAttributes.length}</span>
+        </div>
+      </footer>
     {:else}
       <div class="empty">
         <h2>Content を選択</h2>
@@ -193,6 +221,82 @@
 </div>
 
 <style>
+  .search-field {
+    position: relative;
+  }
+  .search-field :global(svg) {
+    position: absolute;
+    left: 0.7rem;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #7f8ca2;
+    pointer-events: none;
+  }
+  .search-field input {
+    padding-left: 2.2rem;
+  }
+  .item-title {
+    position: relative;
+    padding-right: 1.1rem;
+  }
+  .conflict-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #ff8e85;
+    vertical-align: middle;
+    margin-left: 0.4rem;
+  }
+  .conflict-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border: 1px solid #62332f;
+    background: #2d1b1a;
+    border-radius: 8px;
+    padding: 0.55rem 0.7rem;
+    margin-bottom: 1rem;
+    color: #ffb1ac;
+  }
+  .conflict-bar button {
+    margin-left: auto;
+  }
+  .reader-title {
+    font-size: 1.35rem;
+    font-weight: 600;
+    letter-spacing: -0.03em;
+    margin: 0 0 0.3rem;
+  }
+  .reader-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .reader-meta :global(button) {
+    padding: 0.15rem 0.45rem;
+    font-size: 0.72rem;
+  }
+  .reader-foot {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr 1fr;
+    gap: 1rem;
+    border-top: 1px solid var(--line);
+    padding-top: 0.9rem;
+    margin-top: 2rem;
+  }
+  .reader-foot-value {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-top: 0.2rem;
+    font-size: 0.8rem;
+  }
+  .reader-foot :global(.icon-button) {
+    width: 1.5rem;
+    height: 1.5rem;
+  }
   .content-filters {
     margin: 0.7rem 0 0;
   }
@@ -224,19 +328,6 @@
     font-size: 0.9rem;
     color: #b9c6e6;
   }
-  .id-line {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    flex-wrap: wrap;
-  }
-  .id-line p {
-    margin: 0;
-  }
-  .id-line :global(button) {
-    padding: 0.2rem 0.5rem;
-    font-size: 0.75rem;
-  }
   .attribute-list {
     grid-template-columns: minmax(8rem, 14rem) minmax(0, 1fr);
     gap: 0.5rem 1rem;
@@ -251,7 +342,8 @@
     overflow: auto;
   }
   @media (max-width: 730px) {
-    .attribute-list {
+    .attribute-list,
+    .reader-foot {
       grid-template-columns: 1fr;
     }
   }

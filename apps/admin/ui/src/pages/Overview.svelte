@@ -1,14 +1,25 @@
 <script lang="ts">
-  import type { Capabilities, Overview, Page } from '../lib/types';
-  import { count, peersOf, short, workerAdmin } from '../lib/api.svelte';
+  import { api, count, peersOf, short, workerAdmin } from '../lib/api.svelte';
+  import type {
+    Capabilities,
+    ConnectionList,
+    ConnectionRequest,
+    InterpreterProvider,
+    Overview,
+    Page,
+  } from '../lib/types';
   import Clipboard from '../lib/Clipboard.svelte';
   import Grants from '../lib/Grants.svelte';
+  import Icon from '../lib/Icon.svelte';
   import WorkerRegistration from '../lib/WorkerRegistration.svelte';
   import {
     formatDateTime,
     membershipStateLabel,
     membershipStateTone,
+    microsDate,
     relativeTime,
+    remainingTime,
+    shortId,
     transportLabel,
   } from '../lib/format';
 
@@ -22,6 +33,7 @@
     navigate,
     readOnly,
     now,
+    active,
     approvalCount = 0,
   }: {
     overview: Overview | null;
@@ -33,6 +45,7 @@
     navigate: (page: Page) => void;
     readOnly: boolean;
     now: number;
+    active: boolean;
     approvalCount?: number;
   } = $props();
 
@@ -69,7 +82,9 @@
   const activeMembers = $derived(
     overview?.members.members.filter((member) => member.state === 'active').length ?? 0,
   );
-  const pinnedPeers = $derived(peers.filter((peer) => peer.pinned).length);
+  const retiredMembers = $derived(
+    overview?.members.members.filter((member) => member.state === 'retired').length ?? 0,
+  );
   const lastInboundAt = $derived(hostStatus?.sync.last_inbound_at ?? null);
   const lastInboundText = $derived(
     !hostStatus ? '—' : lastInboundAt ? relativeTime(lastInboundAt, now) : '未受信',
@@ -89,11 +104,17 @@
     if (syncInterval < 60000) return `${Math.round(syncInterval / 1000)} 秒間隔`;
     return `${Math.round(syncInterval / 60000)} 分間隔`;
   });
+  const nextSyncText = $derived.by(() => {
+    if (!worker) return '手動';
+    if (!hostStatus) return '—';
+    if (hostStatus.sync.alarm_next_at) return relativeTime(hostStatus.sync.alarm_next_at, now);
+    return syncInterval > 0 ? '待機' : '無効';
+  });
   const configIssues = $derived([
     ...new Set([...(hostStatus?.config.missing ?? []), ...(hostStatus?.config.invalid ?? [])]),
   ]);
   const status = $derived.by((): { tone: string; label: string } | null => {
-    if (!worker) return null;
+    if (!worker) return { tone: 'badge-ok', label: '正常' };
     if (!hostStatus) {
       if (workerAdmin.statusCode === 404) return { tone: 'badge-muted', label: '未対応' };
       if (workerAdmin.statusError) return { tone: 'badge-danger', label: '状態取得不可' };
@@ -143,9 +164,88 @@
       : null,
   );
 
-  // A refresh can reveal a changed identity/origin while the stored identity is
-  // still the old one; remount so the registration code is fetched from the
-  // current deployment rather than reused.
+  let connections = $state<ConnectionRequest[]>([]);
+  let providers = $state<InterpreterProvider[]>([]);
+  let pendingLoaded = $state(false);
+
+  const pendingConnections = $derived(
+    connections.filter((request) => {
+      if (request.status !== 'pending') return false;
+      const expires = microsDate(request.expires_at);
+      return expires === null || expires.getTime() > now;
+    }),
+  );
+  const pendingProviders = $derived(providers.filter((provider) => provider.status === 'pending'));
+  const connectedCount = $derived(
+    connections.filter((request) => request.status === 'approved' || request.status === 'completed')
+      .length,
+  );
+  const attention = $derived([
+    ...pendingConnections.map((request) => ({
+      key: request.connection_id,
+      kind: '接続' as const,
+      title: request.name,
+      detail: request.web_origin ?? 'CLI / ネイティブアプリ',
+      remaining: remainingTime(request.expires_at, now),
+    })),
+    ...pendingProviders.map((provider) => ({
+      key: provider.provider_id,
+      kind: 'Provider' as const,
+      title: provider.name,
+      detail: `契約 v${provider.contract_version}`,
+      remaining: provider.connected ? '接続中' : '接続前',
+    })),
+  ]);
+  const nodeRows = $derived(
+    [...(overview?.members.members ?? [])]
+      .sort(
+        (left, right) =>
+          Number(right.node_id === overview?.identity.node_id) -
+          Number(left.node_id === overview?.identity.node_id),
+      )
+      .map((member) => {
+        const peer = peers.find((item) => item.node_id === member.node_id);
+        const transport = member.binding?.transport ?? peer?.binding.transport;
+        return {
+          member,
+          self: member.node_id === overview?.identity.node_id,
+          transport: transport ? transportLabel(transport) : '—',
+          received: peer?.received_through ? count(peer.received_through) : '—',
+        };
+      }),
+  );
+  const metricContent = $derived(
+    worker
+      ? stats
+        ? count(stats.contents)
+        : '—'
+      : overview?.metrics
+        ? count(overview.metrics.visible_contents)
+        : '—',
+  );
+  const metricContentDetail = $derived(
+    worker ? '削除込み' : overview?.metrics ? `削除込み ${count(overview.metrics.contents)}` : '—',
+  );
+  const metricUpdates = $derived(
+    worker
+      ? stats
+        ? count(stats.accepted_updates)
+        : '—'
+      : overview?.metrics
+        ? count(overview.metrics.accepted_updates)
+        : '—',
+  );
+  const metricBytes = $derived(
+    worker
+      ? stats
+        ? bytes(stats.record_bytes)
+        : '—'
+      : overview?.metrics
+        ? bytes(overview.metrics.record_bytes)
+        : '—',
+  );
+  const metricApps = $derived(overview?.metrics ? count(overview.metrics.active_apps) : '—');
+
   const registrationKey = $derived(
     [
       sampledAt,
@@ -155,31 +255,71 @@
       bindingDetail,
     ].join('|'),
   );
+
+  async function loadPending() {
+    const [connectionList, providerList] = await Promise.all([
+      api<ConnectionList>('/connect-list', {}).catch(() => null),
+      api<{ providers: InterpreterProvider[] }>('/interpreter-list', {}).catch(() => null),
+    ]);
+    if (connectionList) connections = connectionList.connections;
+    if (providerList) providers = providerList.providers;
+    pendingLoaded = true;
+  }
+  async function refreshAll() {
+    await Promise.resolve(refresh());
+    await loadPending();
+  }
+  () => {
+    if (active) void loadPending();
+  };
 </script>
 
 <div class="page-title">
   <div>
     <h1>概要</h1>
   </div>
-  <button disabled={busy} onclick={refresh}>{busy ? '取得中…' : '更新'}</button>
+  <button class="icon-button" aria-label="更新" title="更新" disabled={busy} onclick={refreshAll}>
+    <Icon name="refresh" size={17} />
+  </button>
 </div>
 
 {#if error}<p class="error" role="alert">{error}</p>{/if}
+
 {#if overview}
-  {#if worker && status}
-    <div class="status-strip">
-      <span class="badge {status.tone}">{status.label}</span>
-      {#if hostStatus?.provisioning.bootstrap_enabled}
-        <span class="badge badge-warn">初期設定 受付中</span>
-      {/if}
-      {#if hostStatus?.provisioning.allow_reprovision}
-        <span class="badge badge-warn">再初期化 許可</span>
-      {/if}
-      {#if configIssues.length}
-        <span class="badge badge-danger">設定 {configIssues.length} 件</span>
-      {/if}
-    </div>
-  {/if}
+  <div class="status-strip">
+    <span class="badge {status?.tone ?? 'badge-muted'}">{status?.label ?? '確認中'}</span>
+    {#if worker}
+      <span class="status-item">
+        <span class="meta-label">最終受信</span>
+        <strong>{lastInboundText}</strong>
+        <span class="muted small">{lastInboundDetail}</span>
+      </span>
+      <span class="status-item">
+        <span class="meta-label">次回同期</span>
+        <strong>{nextSyncText}</strong>
+        <span class="muted small">{syncIntervalText}</span>
+      </span>
+    {:else}
+      <span class="status-item">
+        <span class="meta-label">同期</span>
+        <strong>手動</strong>
+      </span>
+    {/if}
+    <span class="status-item status-sampled">
+      <span class="meta-label">取得</span>
+      <strong>{sampledAt || '—'}</strong>
+    </span>
+    {#if worker && hostStatus?.provisioning.bootstrap_enabled}
+      <span class="badge badge-warn">初期設定 受付中</span>
+    {/if}
+    {#if worker && hostStatus?.provisioning.allow_reprovision}
+      <span class="badge badge-warn">再初期化 許可</span>
+    {/if}
+    {#if configIssues.length}
+      <span class="badge badge-danger">設定 {configIssues.length} 件</span>
+    {/if}
+  </div>
+
   {#if worker && workerAdmin.statusError && !hostStatus}
     <p class="warning" role="status">
       {workerAdmin.statusCode === 404
@@ -188,119 +328,56 @@
     </p>
   {/if}
 
-  {#if worker}
-    <div class="stats">
-      <article>
-        <span>最終受信</span><strong>{lastInboundText}</strong>
-        <small>{lastInboundDetail}</small>
-      </article>
-      <article>
-        <span>保持する更新</span><strong>{stats ? count(stats.accepted_updates) : '—'}</strong>
-        <small>{stats ? bytes(stats.record_bytes) + ' の履歴' : '集計できません'}</small>
-      </article>
-      <article>
-        <span>Content</span><strong>{stats ? count(stats.contents) : '—'}</strong>
-        <small>削除済みを含む</small>
-      </article>
-      <article>
-        <span>ノード</span><strong>{peers.length}</strong>
-        <small>pin {pinnedPeers} · 参加 {activeMembers}</small>
-      </article>
-    </div>
-  {:else if overview.metrics}
-    <div class="stats">
-      <article>
-        <span>Content</span><strong>{count(overview.metrics.visible_contents)}</strong>
-        <small>削除込み {count(overview.metrics.contents)}</small>
-      </article>
-      <article>
-        <span>受信した更新</span><strong>{count(overview.metrics.accepted_updates)}</strong>
-      </article>
-      <article>
-        <span>データ量</span><strong>{bytes(overview.metrics.record_bytes)}</strong>
-        <small>更新レコード</small>
-      </article>
-      <article>
-        <span>アプリ</span><strong>{count(overview.metrics.active_apps)}</strong>
-      </article>
-    </div>
-  {/if}
+  <div class="metrics">
+    <article class="metric-card">
+      <span>ノード</span>
+      <strong>{count(String(overview.members.members.length))}</strong>
+      <small>有効 {activeMembers} · 退役 {retiredMembers}</small>
+    </article>
+    <article class="metric-card">
+      <span>Content</span>
+      <strong>{metricContent}</strong>
+      <small>{metricContentDetail}</small>
+    </article>
+    <article class="metric-card">
+      <span>受信した更新</span>
+      <strong>{metricUpdates}</strong>
+      <small>{metricBytes}</small>
+    </article>
+    <article class="metric-card">
+      <span>アプリ</span>
+      <strong>{metricApps}</strong>
+      <small>{pendingLoaded ? `接続中 ${connectedCount}` : '—'}</small>
+    </article>
+  </div>
 
-  <div class="two-columns">
-    <section class="panel">
+  {#if !readOnly && attention.length}
+    <section class="panel attention-panel">
       <div class="section-head">
         <div>
-          <h2>識別情報</h2>
+          <h2>要対応</h2>
         </div>
+        <span class="badge badge-warn">{attention.length}</span>
       </div>
-      <dl>
-        <dt>Node ID</dt>
-        <dd class="mono id-line">
-          <span>{overview.identity.node_id}</span>
-          <Clipboard text={overview.identity.node_id} label="コピー" />
-        </dd>
-        <dt>Cluster ID</dt>
-        <dd class="mono id-line">
-          <span>{overview.identity.cluster_id}</span>
-          <Clipboard text={overview.identity.cluster_id} label="コピー" />
-        </dd>
-        {#if worker && overview.identity.epoch}
-          <dt>Epoch</dt>
-          <dd class="mono id-line">
-            <span class="small">{overview.identity.epoch}</span>
-            <Clipboard text={overview.identity.epoch} label="コピー" />
-          </dd>
-        {/if}
-        <dt>接続方式</dt>
-        <dd>
-          {binding ? transportLabel(binding.transport) : '—'}
-          {#if bindingDetail}<span class="mono muted small binding-detail">
-              {bindingDetail}
-            </span>{/if}
-        </dd>
-        {#if overview.identity.signing_key}
-          <dt>署名公開鍵</dt>
-          <dd class="mono small">{overview.identity.signing_key}</dd>
-        {/if}
-        {#if worker && overview.identity.cluster_root}
-          <dt>Cluster Root</dt>
-          <dd>
-            <details>
-              <summary class="mono small">{short(overview.identity.cluster_root)}</summary>
-              <p class="mono small">{overview.identity.cluster_root}</p>
-            </details>
-          </dd>
-        {/if}
-        {#if worker}
-          <dt>自分の参加状態</dt>
-          <dd><span class="badge {selfTone}">{selfLabel}</span></dd>
-          <dt>初期設定</dt>
-          <dd>
-            {overview.configured ? '済み' : '未設定'}
-            {#if hostStatus?.provisioning.provisioned_at}
-              <span class="muted small">
-                · {formatDateTime(hostStatus.provisioning.provisioned_at)}
-              </span>
-            {/if}
-            {#if hostStatus?.provisioning.provisioned}
-              <span
-                class="badge {hostStatus.provisioning.identity_matches
-                  ? 'badge-ok'
-                  : 'badge-danger'}"
-              >
-                {hostStatus.provisioning.identity_matches ? '設定と一致' : '設定と不一致'}
-              </span>
-            {/if}
-          </dd>
-        {/if}
-        {#if overview.permissions}
-          <dt>権限</dt>
-          <dd><Grants grants={overview.permissions} dense /></dd>
-        {/if}
-      </dl>
+      <div class="attention-list">
+        {#each attention as item (item.key)}
+          <div class="attention-row">
+            <span class="badge {item.kind === '接続' ? 'badge-info' : 'badge-ok'}">
+              {item.kind}
+            </span>
+            <strong>{item.title}</strong>
+            <span class="muted">{item.detail}</span>
+            <span class="attention-when">{item.remaining}</span>
+            <button class="quiet" onclick={() => navigate('approvals')}>確認</button>
+          </div>
+        {/each}
+      </div>
     </section>
+  {/if}
 
-    {#if worker}
+  {#if worker}
+    <div class="two-columns overview-worker">
+      {@render identityPanel()}
       <section class="panel">
         <div class="section-head">
           <div>
@@ -316,9 +393,7 @@
           <dt>保持位置</dt>
           <dd class="mono small">{stats ? count(stats.accepted_updates) : '—'}</dd>
           <dt>外部同期</dt>
-          <dd>
-            {syncIntervalText}
-          </dd>
+          <dd>{syncIntervalText}</dd>
           {#if hostStatus?.sync.alarm_next_at}
             <dt>次回</dt>
             <dd>{relativeTime(hostStatus.sync.alarm_next_at, now)}</dd>
@@ -353,69 +428,47 @@
           <button onclick={() => navigate('peers')}>ノードを表示</button>
         </div>
       </section>
-    {:else}
-      <div class="stack">
-        <section class="panel">
-          <div class="section-head">
-            <div>
-              <h2>接続</h2>
+    </div>
+  {:else}
+    <div class="overview-grid">
+      <section class="panel node-table-panel">
+        <div class="section-head">
+          <div>
+            <h2>ノード一覧</h2>
+          </div>
+          <button class="quiet" onclick={() => navigate('peers')}>すべて表示</button>
+        </div>
+        {#if nodeRows.length === 0}
+          <p class="empty">参加ノードはありません。</p>
+        {:else}
+          <div class="data-table" role="table" aria-label="ノード一覧">
+            <div class="data-head" role="row">
+              <span>ノード</span>
+              <span>状態</span>
+              <span>接続</span>
+              <span>受信位置</span>
             </div>
-          </div>
-          <dl>
-            <dt>参加が有効なノード</dt>
-            <dd>{activeMembers} 台</dd>
-            <dt>保留中の退役証明</dt>
-            <dd>{overview.members.pending_retirements.length} 件</dd>
-            {#if approvalCount > 0}
-              <dt>承認待ち</dt>
-              <dd>{approvalCount} 件</dd>
-            {/if}
-            <dt>OAuth</dt>
-            <dd>
-              {overview.capabilities.oauth ? '有効' : '無効'}
-              {#if oauthOrigin}<span class="mono muted small binding-detail">
-                  {oauthOrigin}
-                </span>{/if}
-            </dd>
-          </dl>
-          <div class="actions">
-            <button onclick={() => navigate('peers')}>ノード</button>
-            {#if !readOnly}<button onclick={() => navigate('approvals')}>承認</button>{/if}
-            {#if !readOnly}<button class="primary" onclick={() => navigate('apps')}>
-                アプリ
-              </button>{/if}
-          </div>
-        </section>
-        <section class="panel">
-          <div class="section-head">
-            <div>
-              <h2>ノード</h2>
-            </div>
-            <button class="quiet" onclick={() => navigate('peers')}>すべて</button>
-          </div>
-          {#if overview.members.members.length === 0}
-            <p class="empty">参加ノードはありません。</p>
-          {:else}
-            {#each overview.members.members as member}
-              <div class="node-row">
-                <div class="title-line">
-                  <strong>
-                    {member.node_id === overview.identity.node_id
-                      ? 'このノード'
-                      : short(member.node_id)}
-                  </strong>
-                  <span class="badge {membershipStateTone(member.state)}">
-                    {membershipStateLabel(member.state)}
+            {#each nodeRows as row (row.member.node_id)}
+              <div class="data-row" role="row">
+                <div>
+                  <strong>{row.self ? 'このノード' : short(row.member.node_id)}</strong>
+                  <span class="mono row-sub" title={row.member.node_id}>
+                    {short(row.member.node_id)}
                   </span>
                 </div>
-                <p class="mono muted small" title={member.node_id}>{short(member.node_id)}</p>
+                <span class="badge {membershipStateTone(row.member.state)}">
+                  {membershipStateLabel(row.member.state)}
+                </span>
+                <span class="muted small">{row.transport}</span>
+                <span class="muted small">{row.received}</span>
               </div>
             {/each}
-          {/if}
-        </section>
-      </div>
-    {/if}
-  </div>
+          </div>
+        {/if}
+      </section>
+      {@render identityPanel()}
+    </div>
+  {/if}
 
   {#if worker}
     {#if configIssues.length}
@@ -434,58 +487,264 @@
       {/if}
     {/key}
   {/if}
-
-  <p class="muted small">取得 {sampledAt || '—'}</p>
 {:else if busy}
   <p class="empty">ノードの状態を取得しています…</p>
 {/if}
 
+{#snippet identityPanel()}
+  <section class="panel identity-panel">
+    <div class="section-head">
+      <div>
+        <h2>識別情報</h2>
+      </div>
+    </div>
+    <dl class="identity-list">
+      <dt>Node ID</dt>
+      <dd>
+        <span class="mono">{shortId(overview!.identity.node_id, 14, 8)}</span>
+        <Clipboard text={overview!.identity.node_id} label="Node ID をコピー" iconOnly />
+      </dd>
+      <dt>Cluster ID</dt>
+      <dd>
+        <span class="mono">{shortId(overview!.identity.cluster_id, 14, 8)}</span>
+        <Clipboard text={overview!.identity.cluster_id} label="Cluster ID をコピー" iconOnly />
+      </dd>
+      <dt>接続方式</dt>
+      <dd class="identity-stack">
+        <span>{binding ? transportLabel(binding.transport) : '—'}</span>
+        {#if bindingDetail}<span class="mono muted small binding-detail" title={bindingDetail}>
+            {bindingDetail.length > 32 ? shortId(bindingDetail, 18, 10) : bindingDetail}
+          </span>{/if}
+      </dd>
+      {#if overview!.identity.signing_key}
+        <dt>公開鍵</dt>
+        <dd>
+          <span class="mono">{shortId(overview!.identity.signing_key, 10, 6)}</span>
+          <Clipboard text={overview!.identity.signing_key} label="公開鍵をコピー" iconOnly />
+        </dd>
+      {/if}
+      {#if worker && overview!.identity.cluster_root}
+        <dt>Cluster Root</dt>
+        <dd>
+          <details>
+            <summary class="mono small">{short(overview!.identity.cluster_root)}</summary>
+            <p class="mono small">{overview!.identity.cluster_root}</p>
+          </details>
+        </dd>
+      {/if}
+      {#if worker}
+        <dt>自分の参加状態</dt>
+        <dd><span class="badge {selfTone}">{selfLabel}</span></dd>
+        <dt>初期設定</dt>
+        <dd>
+          {overview!.configured ? '済み' : '未設定'}
+          {#if hostStatus?.provisioning.provisioned}
+            <span
+              class="badge {hostStatus.provisioning.identity_matches ? 'badge-ok' : 'badge-danger'}"
+            >
+              {hostStatus.provisioning.identity_matches ? '設定と一致' : '設定と不一致'}
+            </span>
+          {/if}
+        </dd>
+      {/if}
+    </dl>
+    {#if overview!.permissions}
+      <details class="identity-grants">
+        <summary>権限</summary>
+        <Grants grants={overview!.permissions} dense />
+      </details>
+    {/if}
+  </section>
+{/snippet}
+
 <style>
-  .id-line {
+  .status-strip {
     display: flex;
-    align-items: start;
-    gap: 0.5rem;
+    align-items: center;
+    gap: 1.1rem;
     flex-wrap: wrap;
+    border: 1px solid #283041;
+    border-left: 2px solid #5dd39e;
+    border-radius: 10px;
+    background: #0f131b;
+    padding: 0.7rem 0.9rem;
+    margin: 0 0 1rem;
   }
-  .id-line > span {
+  .status-item {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
     min-width: 0;
   }
-  .id-line :global(button) {
-    padding: 0.15rem 0.45rem;
+  .status-item strong {
+    font-weight: 600;
+  }
+  .status-sampled {
+    margin-left: auto;
+  }
+  .status-sampled strong {
+    color: #aab4c8;
+    font-weight: 500;
+  }
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.8rem;
+    margin-bottom: 1rem;
+  }
+  .metric-card {
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: #121721;
+    padding: 0.95rem 1rem 0.85rem;
+    display: grid;
+    gap: 0.3rem;
+  }
+  .metric-card > span {
+    color: #9aa7bd;
+    font-size: 0.78rem;
+  }
+  .metric-card > strong {
+    font-size: 1.7rem;
+    line-height: 1.25;
+    font-weight: 600;
+    letter-spacing: -0.04em;
+  }
+  .metric-card small {
+    color: #8f9bb0;
+    font-size: 0.75rem;
+  }
+  .attention-panel {
+    border-color: #3a3020;
+    background: linear-gradient(180deg, #181711 0%, #121721 6rem);
+    margin-bottom: 1rem;
+  }
+  .attention-list {
+    display: flex;
+    flex-direction: column;
+  }
+  .attention-row {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.6rem 0;
+    border-top: 1px solid #2d2a22;
+    flex-wrap: wrap;
+  }
+  .attention-row:first-child {
+    border-top: 0;
+  }
+  .attention-row strong {
+    font-weight: 600;
+  }
+  .attention-row > .muted {
+    min-width: 8rem;
+  }
+  .attention-when {
+    margin-left: auto;
+    color: #c2a86e;
+    font-size: 0.78rem;
+  }
+  .attention-row :global(button) {
+    padding: 0.3rem 0.65rem;
+    font-size: 0.78rem;
+  }
+  .overview-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.65fr) minmax(19rem, 1fr);
+    gap: 1rem;
+    align-items: start;
+  }
+  .overview-worker {
+    align-items: start;
+  }
+  .data-table {
+    margin-top: 0.7rem;
+  }
+  .data-head,
+  .data-row {
+    display: grid;
+    grid-template-columns: minmax(9rem, 1.5fr) 5.5rem minmax(6rem, 1fr) 6rem;
+    gap: 0.6rem;
+    align-items: center;
+    padding: 0.55rem 0;
+  }
+  .data-head {
+    color: #828fa5;
     font-size: 0.72rem;
+    border-bottom: 1px solid var(--line);
+    padding-top: 0;
+  }
+  .data-row {
+    border-bottom: 1px solid #1e2531;
+  }
+  .data-row:last-child {
+    border-bottom: 0;
+  }
+  .data-row strong {
+    display: block;
+    font-size: 0.86rem;
+    font-weight: 600;
+  }
+  .row-sub {
+    display: block;
+    color: #7e8ba0;
+    font-size: 0.7rem;
+    margin-top: 0.15rem;
+  }
+  .identity-panel {
+    position: sticky;
+    top: 1rem;
+  }
+  .identity-list {
+    margin: 0.4rem 0 0;
+    grid-template-columns: 6.5rem minmax(0, 1fr);
+    gap: 0.65rem 0.7rem;
+    align-items: baseline;
+  }
+  .identity-list dt {
+    color: #8c99ae;
+    font-size: 0.74rem;
+  }
+  .identity-list dd {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+    margin: 0;
+  }
+  .identity-list dd > .mono {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .identity-list :global(.icon-button) {
     flex-shrink: 0;
+    width: 1.55rem;
+    height: 1.55rem;
+    padding: 0;
+  }
+  .identity-list dd.identity-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.15rem;
+  }
+  .identity-stack > span:first-child {
+    flex-shrink: 0;
+  }
+  .identity-grants {
+    margin-top: 0.7rem;
+    border-top: 1px solid var(--line);
+    padding-top: 0.6rem;
+  }
+  .identity-grants summary {
+    color: #aeb9cc;
+    cursor: pointer;
+    font-size: 0.78rem;
   }
   .binding-detail {
     display: block;
-    margin-top: 0.2rem;
-  }
-  .panel summary {
-    color: var(--accent);
-    cursor: pointer;
-    font-size: 0.8rem;
-  }
-  .panel summary + p {
-    margin: 0.4rem 0 0;
-  }
-  .section-head {
-    margin-bottom: 0.4rem;
-  }
-  .section-head + dl {
-    margin-top: 0.8rem;
-  }
-  .panel dl :global(.grant-list) {
-    margin: 0;
-  }
-  .status-strip {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.7rem;
-    flex-wrap: wrap;
-    border: 1px solid #2a3448;
-    border-radius: 10px;
-    background: #0e131c;
-    padding: 0.55rem 0.8rem;
-    margin: 1.2rem 0 0;
+    margin-top: 0.15rem;
   }
   .sync-entry {
     display: block;
@@ -498,36 +757,33 @@
     border-top: 1px solid var(--line);
     flex-wrap: wrap;
   }
-  .stack {
-    display: flex;
-    flex-direction: column;
-    gap: 1.3rem;
+  @media (max-width: 1050px) {
+    .metrics {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .overview-grid {
+      grid-template-columns: 1fr;
+    }
+    .identity-panel {
+      position: static;
+    }
   }
-  .node-row {
-    padding: 0.6rem 0;
-    border-top: 1px solid var(--line);
-  }
-  .node-row:first-of-type {
-    border-top: 0;
-  }
-  .node-row:first-of-type {
-    padding-top: 0.2rem;
-  }
-  .node-row p {
-    margin: 0.2rem 0 0;
-  }
-  .title-line {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-  .title-line strong {
-    font-size: 0.9rem;
-  }
-  .issues {
-    margin: 0.6rem 0 0;
-    padding-left: 1.2rem;
-    color: #e5c28d;
+  @media (max-width: 700px) {
+    .metrics {
+      grid-template-columns: 1fr;
+    }
+    .status-sampled {
+      margin-left: 0;
+    }
+    .data-head,
+    .data-row {
+      grid-template-columns: minmax(8rem, 1.4fr) 5rem 1fr;
+    }
+    .data-head > :nth-child(4),
+    .data-row > :nth-child(4),
+    .data-head > :nth-child(5),
+    .data-row > :nth-child(5) {
+      display: none;
+    }
   }
 </style>

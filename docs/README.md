@@ -53,7 +53,7 @@ Ledger は [roadmap.md](roadmap.md) の `L-` 項目として未着手。文書�
 |---|---|---|
 | [shipping.md](ops/shipping.md) | 出荷（CI/CD・署名・secret）の設計 | 設計 |
 | [ci-plan.md](ops/ci-plan.md) | CI/CD の実行プラン | 実装済み（Android と Worker） |
-| [admin.md](ops/admin.md) | harmion-admin の再設計 | 計画（作業中） |
+| [admin.md](ops/admin.md) | harmion-admin の再設計 | 実装済み（パスキーは設計） |
 | [admin-worker.md](ops/admin-worker.md) | Worker 管理画面の情報設計 | 実装済み（P0 + P1） |
 | [ui-copy.md](ops/ui-copy.md) | UI コピーの監査と方針 | 記録（P0 実装済み） |
 | [linux-service.md](ops/linux-service.md) | Linux user service と日常運用 | 手順 |
