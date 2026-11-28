@@ -1,3 +1,25 @@
+## Documentation
+
+- The index is [docs/README.md](docs/README.md). A document that is not listed there does not exist.
+- Work items are referenced by their ID in [docs/roadmap.md](docs/roadmap.md) (`D-` decision, `S-` spike, `W-`/`M-`/`L-`/`C-`/`A-`/`P-`/`T-` work). Do not use the word `Phase`.
+- The specification is [docs/core/requirements.md](docs/core/requirements.md); API contracts are [docs/core/app-api.md](docs/core/app-api.md) and [contracts/](contracts/); the implementation ledger is [docs/records/implementation-review.md](docs/records/implementation-review.md).
+- Records under `docs/records/` are append-only. Move decisions into the design documents.
+
+## Nix
+
+`flake.nix` is the source of truth for the toolchain. Do not rely on host-installed rustc/JDK/NDK; run everything through the devShells.
+
+```sh
+nix develop              # rustc/cargo/clippy/rustfmt (wasm32 std), node/npm, python3, C toolchain
+nix develop .#android    # JDK, NDK, Gradle
+nix build .#harmiond .#harmion .#harmion-admin .#mote .#mote-hud
+```
+
+- Keep `flake.nix` and `flake.lock` tracked by git.
+- native ships only through the flake. Do not attach binaries to GitHub Releases.
+- To install from a working tree, use `--from-local .`; only git-tracked files are built.
+- `wiki-gui` needs `WIKI_SANS_FONT` / `WIKI_MONO_FONT` at build time. Always set them in the Nix package.
+
 ## UI Copy Policy
 
 - Every visible text element must serve a concrete user need. Text is not decoration.
@@ -11,6 +33,8 @@
 - Before finalizing a UI, review every visible string. If removing it does not reduce usability, remove it.
 
 When in doubt, omit the text rather than inventing copy.
+
+Source and audit results: [docs/ops/ui-copy.md](docs/ops/ui-copy.md).
 
 ## Android production-signed dev install
 

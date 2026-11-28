@@ -1,10 +1,10 @@
 # Wiki app
 
 A local-first personal wiki on Harmion. The current shell and reading surface
-are described in [docs/wiki-ui-refresh.md](../../docs/wiki-ui-refresh.md), which
-supersedes the older [v5 mockup](../../docs/wiki-ui-design.html); implementation
+are described in [docs/apps/wiki/design.md](../../docs/apps/wiki/design.md), which
+supersedes the older [v5 mockup](../../docs/assets/source/wiki-ui-design.html); implementation
 status and platform gaps are in
-[docs/wiki-implementation-status.md](../../docs/wiki-implementation-status.md).
+[docs/apps/wiki/status.md](../../docs/apps/wiki/status.md).
 
 ## Layout
 
@@ -55,11 +55,17 @@ CLI helpers: `list`, `open`, `workspace`, `search`, `save`, `status`,
 ## Dev node mode
 
 `serve --node DIR` loads a snapshot of `kind=wiki` Contents using the node's
-`admin.secret` (`harmion-client`). Body saves are wired for development: the
-server re-reads the node, refuses if the body changed since the snapshot, gets a
-fresh edit token and saves only the body. Create/convert/delete and full
-conflict handling still return 501. OAuth refresh and subscriptions are not
-implemented. Do not point production credentials at this mode.
+`admin.secret` (`harmion-client`). Body saves, page/snippet creation, fence
+conversion, metadata updates and delete are wired to the node: the server
+re-reads the node, refuses if the body changed since the snapshot, and saves
+with a fresh edit token. What is still missing against a node:
+
+- app-level kind/delete conflict resolution (owner/admin only),
+- bulk `import` (outside the node write allowlist, returns 501),
+- push updates (reads are a startup snapshot; the GUI long-polls `watch`).
+
+Prefer `wiki-server connect` over this mode for real data. See
+[docs/apps/wiki/status.md](../../docs/apps/wiki/status.md).
 
 ## Tests
 

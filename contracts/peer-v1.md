@@ -65,6 +65,6 @@ irohはALPN `harmion/peer/1`で、1接続の最初の双方向streamにHPQ要求
 
 TLS型を含まない`PeerTransport`を介して同じ固定highラウンドを実行する。pull応答保存時もtransaction内で有効なPeer登録を再検査する。irohのIP/portは参加資格の根拠にせず、Endpoint IDへの探索結果として扱う。
 
-実TCP/TLSとSQLiteを使い、並行編集、削除競合、同時開始、ACK再送、DB再open、未承認鍵、偽Node ID・cluster、偽サーバー証明書、接続中の退役、拒否ページの原子性をテストする。`design_checks/two_process_sync.py`はdaemon/CLIによる独立2プロセスを、標準のHTTPSと`--iroh`のローカルリレー経路で検証済み。5プロセスの検証範囲と管理証明の不足は[実装全体レビュー](../docs/implementation-review.md)を参照。
+実TCP/TLSとSQLiteを使い、並行編集、削除競合、同時開始、ACK再送、DB再open、未承認鍵、偽Node ID・cluster、偽サーバー証明書、接続中の退役、拒否ページの原子性をテストする。`design_checks/two_process_sync.py`はdaemon/CLIによる独立2プロセスを、標準のHTTPSと`--iroh`のローカルリレー経路で検証済み。5プロセスの検証範囲と管理証明の不足は[実装全体レビュー](../docs/records/implementation-review.md)を参照。
 
 実装参照: [Rustls WebPkiClientVerifier](https://docs.rs/rustls/0.23.46/rustls/server/struct.WebPkiClientVerifier.html)、[rcgen CertificateParams](https://docs.rs/rcgen/0.14.10/rcgen/struct.CertificateParams.html)。

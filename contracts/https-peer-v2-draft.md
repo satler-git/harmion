@@ -4,7 +4,7 @@
 2026-11-20, updated 2026-11-21. All new wire tags, routes, budgets and interface
 names below remain proposed; freeze them only after the implementation gates
 below. Since the first draft, the following are implemented and tested locally
-(see [implementation review](../docs/implementation-review.md) R33–R41): the
+(see [implementation review](../docs/records/implementation-review.md) R33–R41): the
 canonical envelope codec with independent fixtures, durable signed-identity pins
 with provenance/migration and cut-excluded-issuer tests, HMC v2 `SignedHttps`
 binding with a dual reader and registration v4, a bounded durable challenge
@@ -52,8 +52,8 @@ serves or accepts actual Peer data.
 ## 2. Existing contracts and narrow changes
 
 Read with [Peer v1](peer-v1.md), [membership v1](membership-v1.md),
-[Cloudflare design](../docs/cloudflare-design.md), and
-[architecture](../docs/architecture.md). The latter contains earlier high-level
+[Cloudflare design](../docs/core/cloudflare.md), and
+[architecture](../docs/core/architecture.md). The latter contains earlier high-level
 management wording; this draft specifically proposes Peer-only initial exposure.
 
 - Reuse exact `encode_peer_request` / `encode_peer_response` HPQ/HPS v1 bytes
@@ -602,5 +602,5 @@ and memory-host tests. Nothing below is frozen by the local implementation.
    never mark an interrupted Android attempt successful merely on reconnect.
 
 External Cloudflare/Access background sources are already recorded in the
-[Cloudflare design](../docs/cloudflare-design.md#tailnetと入口の追加保護).
+[Cloudflare design](../docs/core/cloudflare.md#tailnetと入口の追加保護).
 No new external-source verification or deployment validation is claimed here.

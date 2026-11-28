@@ -218,7 +218,7 @@ GitHub Actions deploys with a scoped Cloudflare API token stored in the
   provision it from an active native node, then delete the old Worker/DO when no
   longer needed. `CLUSTER` must not change for an existing cluster.
 - Backups: another full node holds the records. The native node directory is
-  backed up separately (see `docs/linux-service.md`); DO time-travel restore has
+  backed up separately (see `docs/ops/linux-service.md`); DO time-travel restore has
   not been tested.
 - Monitoring: `/state` for liveness, `/ready` for configuration/provisioning,
   Cloudflare logs/metrics for 5xx/429, and native `sync-status` for staleness.

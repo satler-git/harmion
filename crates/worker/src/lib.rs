@@ -6,7 +6,7 @@
 //! transport-agnostic Peer entry, and a read-only admin API. The wasm-bindgen
 //! bridge in `do_bridge` is compiled for wasm32 only. TLS termination, Cloudflare
 //! Access, secret distribution, deployment and routing remain host/deployment
-//! responsibilities; see docs/implementation-review.md R38-R41.
+//! responsibilities; see docs/records/implementation-review.md R38-R41.
 pub mod admin;
 pub mod challenge;
 #[cfg(target_arch = "wasm32")]

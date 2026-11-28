@@ -2,7 +2,7 @@
 
 Harmion は、アプリから独立した個人データ基盤です。データと権限は自分のノードに置いたまま、Android アプリや Linux の CLI/管理 UI から同じデータを使います。ノード間は同期し、必要な場合だけ Cloudflare Worker を中継に使います。
 
-現在は Rust 実装です。Android ノード、Mote、Linux native、Cloudflare Worker/DO まで動作し、Worker は `hub.satler.dev` にデプロイ済みです。機能ごとの実装範囲は[実装全体レビュー](docs/implementation-review.md)を参照してください。
+現在は Rust 実装です。Android ノード、Mote、Linux native、Cloudflare Worker/DO まで動作し、Worker は `hub.satler.dev` にデプロイ済みです。機能ごとの実装範囲は[実装全体レビュー](docs/records/implementation-review.md)を参照してください。
 
 ## 配布物
 
@@ -38,7 +38,7 @@ Harmion は、アプリから独立した個人データ基盤です。データ
 - Harmion node: `dev.satler.harmion`
 - Mote: `dev.satler.mote`
 
-初回起動後のノード設定・参加は[Androidノードの要件定義](docs/android-node.md)、Mote の使い方は[Mote の設計・起動手順](docs/mote-design.md)を参照してください。新しい Release は `node-v*` / `mote-v*` タグで作られます。
+初回起動後のノード設定・参加は[Androidノードの要件定義](docs/apps/node/requirements.md)、Mote の使い方は[Mote の設計・起動手順](docs/apps/mote/design.md)を参照してください。新しい Release は `node-v*` / `mote-v*` タグで作られます。
 
 ## Linux native
 
@@ -68,7 +68,7 @@ nix build .#default
 nix build .#harmiond .#harmion .#harmion-admin .#mote
 ```
 
-日常運用は[Linuxユーザーサービスと日常運用](docs/linux-service.md)、複数ノードの起動は[native 複数ノード同期](docs/native-quickstart.md)を参照してください。
+日常運用は[Linuxユーザーサービスと日常運用](docs/ops/linux-service.md)、複数ノードの起動は[native 複数ノード同期](docs/ops/native-quickstart.md)を参照してください。
 
 ## Cloudflare Worker
 
@@ -78,44 +78,15 @@ Worker は常設の中継・同期先を使う場合だけ必要です。通常�
 
 ## ドキュメント
 
-### 使う
+一覧は [docs/README.md](docs/README.md)。入口だけここに置く。
 
-- [Androidノードの要件定義・実装指針](docs/android-node.md)
-- [Androidノードの設計・実装状態](docs/android-design.md)
-- [Mote（Android Captureアプリ）の設計・起動手順](docs/mote-design.md)
-- [Mote CLI](docs/mote-cli.md)
-- [Linuxユーザーサービスと日常運用](docs/linux-service.md)
-- [native 複数ノード同期の実行](docs/native-quickstart.md)
-- [Android のリリースと署名](docs/android-release.md)
-- [Androidエミュレータでの検証手順](docs/android-emulator.md)
-
-### 仕様・設計
-
-- [現時点の仕様と設計方針](docs/specification.md)
-- [ArchitectureとRustパッケージ構成](docs/architecture.md)
-- [取得・編集・Subscribe・OAuthの契約](docs/app-api.md)
-- [内部表現と同期の初期設計](docs/internal-design.md)
-- [参加・退役の設計判断](docs/membership-design.md)
-- [署名付き参加・退役・却下証明の契約](contracts/membership-v1.md)
-- [HTTPS Peerと直接承認の契約](contracts/peer-v1.md)
-- [Interpreter v1の登録・呼び出し契約](contracts/interpreter-v1.md)
-- [App保存要求・認可・ローカル状態](contracts/app-save-v1.md)
-- [更新レコードの保存・転送形式v1](contracts/record-v1.md)
-- [Export v1](contracts/export-v1.md)
-- [Wikiアプリの要件定義](docs/wiki-app-requirements.md)
-- [Wiki GUIの刷新とフレームワーク判断](docs/wiki-ui-refresh.md)
-
-### 開発・運用
-
-- [実装全体レビュー・仕様との差異](docs/implementation-review.md)
-- [実用化改善の引継ぎ・停止位置と再開手順](docs/implementation-handoff.md)
-- [2ノード同期までの実装・レビュー記録](docs/implementation-progress.md)
-- [過去の議論との照合・整合性レビュー](docs/review.md)
-- [CI/CD とリリース運用の計画](docs/ci-plan.md)
-- [ship 戦略とロールアウト](docs/shipping.md)
-- [Cloudflare 中継の設計](docs/cloudflare-design.md)
-- [実装メモ（README から移した詳細）](docs/implementation-notes.md)
-- [サードパーティライセンス表記](docs/third-party-notices.md)
+- [ロードマップ](docs/roadmap.md) — 決定事項、作業項目、ゲート
+- [現時点の仕様](docs/core/requirements.md)
+- [Architecture](docs/core/architecture.md)
+- [Androidノードの要件](docs/apps/node/requirements.md)
+- [Mote の設計](docs/apps/mote/design.md)
+- [Wiki の要件](docs/apps/wiki/requirements.md)
+- [Linuxユーザーサービスと日常運用](docs/ops/linux-service.md)
 
 ## 開発
 
@@ -133,10 +104,10 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets
 ```
 
-native は GitHub Release のバイナリを作らず、flake からビルドします。Android は `node-v*` / `mote-v*`、Worker は `v*` タグでリリースします。詳細は[CI/CD 計画](docs/ci-plan.md)と[ship 戦略](docs/shipping.md)を参照してください。
+native は GitHub Release のバイナリを作らず、flake からビルドします。Android は `node-v*` / `mote-v*`、Worker は `v*` タグでリリースします。詳細は[CI/CD 計画](docs/ops/ci-plan.md)と[ship 戦略](docs/ops/shipping.md)を参照してください。
 
 ## ライセンス
 
 [LICENSE](LICENSE)
 
-配布物に同梱するサードパーティ通知の生成と確認は[サードパーティライセンス表記](docs/third-party-notices.md)を参照してください。
+配布物に同梱するサードパーティ通知の生成と確認は[サードパーティライセンス表記](docs/ops/licenses.md)を参照してください。
