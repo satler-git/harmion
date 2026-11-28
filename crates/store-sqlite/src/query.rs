@@ -1,7 +1,7 @@
 //! SQLite projection and execution for collection queries.
 
 use crate::{db, fixed};
-use harmion_domain::{AttributeValue, ContentId, ContentSnapshot, Graph, Number};
+use harmion_domain::{AttributeValue, ContentId, ContentSnapshot, FieldState, Graph, Life, Number};
 use harmion_node::{Error, access::Filter};
 use harmion_protocol::AppId;
 use harmion_protocol::query::{
@@ -14,8 +14,10 @@ pub(super) fn initialize(sql: &Connection) -> Result<(), Error> {
     sql.execute_batch(
         "CREATE TABLE search_contents (
             content BLOB PRIMARY KEY NOT NULL CHECK(length(content)=32),
-            last_edited_at INTEGER NOT NULL);
+            last_edited_at INTEGER NOT NULL,
+            conflicted INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX search_edited ON search_contents(last_edited_at,content);
+        CREATE INDEX search_conflicted ON search_contents(content) WHERE conflicted=1;
         CREATE TABLE search_kinds (
             content BLOB NOT NULL REFERENCES search_contents(content) ON DELETE CASCADE,
             kind TEXT NOT NULL, PRIMARY KEY(content,kind));
@@ -77,8 +79,8 @@ pub(super) fn put_projection(sql: &Connection, snapshot: &ContentSnapshot) -> Re
         return Ok(());
     };
     sql.execute(
-        "INSERT INTO search_contents VALUES (?1,?2)",
-        params![id, snapshot.last_edited_at],
+        "INSERT INTO search_contents VALUES (?1,?2,?3)",
+        params![id, snapshot.last_edited_at, conflict_state(snapshot)],
     )
     .map_err(db)?;
     let mut basis = sql
@@ -131,6 +133,26 @@ pub(super) fn put_projection(sql: &Connection, snapshot: &ContentSnapshot) -> Re
                     .map_err(db)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Conflict state is internal, so a hidden kind conflict still counts.
+fn conflict_state(snapshot: &ContentSnapshot) -> bool {
+    snapshot.life == Life::Conflict || snapshot.fields.values().any(FieldState::is_conflicted)
+}
+
+/// Fill the flag for rows projected before the column existed. The projection is
+/// derived from the graph, so replaying it is not a repair of authoritative data.
+pub(super) fn backfill_conflicts(sql: &Connection, graph: &Graph) -> Result<(), Error> {
+    let mut update = sql
+        .prepare_cached("UPDATE search_contents SET conflicted=?1 WHERE content=?2")
+        .map_err(db)?;
+    for id in graph.content_ids() {
+        let snapshot = graph.snapshot(id).ok_or(Error::CorruptLog)?;
+        update
+            .execute(params![conflict_state(&snapshot), id.0])
+            .map_err(db)?;
     }
     Ok(())
 }
@@ -263,6 +285,7 @@ fn predicate(
             format!("last_edited_at {} ?", comparison(*operator))
         }
         Condition::Attribute { key, predicate } => attribute_predicate(key, predicate, bindings)?,
+        Condition::Conflicted => "conflicted=1".into(),
     };
     Ok(expression)
 }

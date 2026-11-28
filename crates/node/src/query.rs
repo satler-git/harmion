@@ -6,7 +6,7 @@ use crate::{
     application::{Host, TokenPurpose, mint_token, view},
     storage::{Store, Transaction, read_content_graph},
 };
-use harmion_domain::{AttributeValue, ContentId, ContentSnapshot, UpdateId};
+use harmion_domain::{AttributeValue, ContentId, ContentSnapshot, FieldState, Life, UpdateId};
 use harmion_protocol::{
     AppId, EditToken, MAX_APP_RESPONSE_BYTES, ReadView,
     query::{
@@ -168,7 +168,13 @@ fn evaluate(snapshot: &ContentSnapshot, condition: &Condition) -> bool {
             .attributes
             .get(key)
             .is_some_and(|value| evaluate_attribute(value, predicate)),
+        Condition::Conflicted => conflicted(snapshot),
     }
+}
+
+/// Conflict state is internal, so a hidden kind conflict still matches.
+fn conflicted(snapshot: &ContentSnapshot) -> bool {
+    snapshot.life == Life::Conflict || snapshot.fields.values().any(FieldState::is_conflicted)
 }
 
 fn matches_order(operator: OrderOperator, order: Ordering) -> bool {

@@ -12,7 +12,6 @@ import org.harmion.android.HarmionApplication
 import org.harmion.android.R
 import org.harmion.android.core.NodeRuntimeController
 import org.harmion.android.ui.MainActivity
-import org.json.JSONObject
 
 /** Periodic, low-frequency check for conflicts and storage failures. */
 class IssueCheckWorker(
@@ -39,18 +38,8 @@ class IssueCheckWorker(
     private suspend fun countConflicts(controller: NodeRuntimeController): Int {
         val admin = controller.adminClient()
         return try {
-            val page = admin.query("""{"type":"and","conditions":[]}""", 32)
-            val items = page.optJSONArray("items") ?: return 0
-            var count = 0
-            for (index in 0 until items.length()) {
-                val item = items.getJSONObject(index)
-                if (item.optBoolean("deletion_conflict") ||
-                    (item.optJSONArray("conflicts")?.length() ?: 0) > 0
-                ) {
-                    count += 1
-                }
-            }
-            count
+            val page = admin.query("""{"type":"conflicted"}""", 32)
+            page.optJSONArray("items")?.length() ?: 0
         } finally {
             admin.close()
         }

@@ -1366,6 +1366,72 @@ fn public_query_uses_persisted_read_kinds_for_large_grants() {
 }
 
 #[test]
+fn queries_filter_conflicted_contents_and_survive_the_projection_upgrade() {
+    use harmion_node::query;
+    use harmion_protocol::query::Condition;
+
+    let mut t = Test::new();
+    let admin = t.admin.clone();
+    let (_, reader) = t.issue(read_write());
+    t.create();
+    let conflicted = ContentId([2; 32]);
+    let mut create = create_request(2);
+    create.content_id = conflicted;
+    let token = app::save(&mut t.store, &mut t.host, &admin, &create)
+        .unwrap()
+        .view
+        .unwrap()
+        .edit_token;
+    let edit = |n: u8, text: &str| {
+        let mut request = request(
+            n,
+            Command::Edit {
+                token,
+                fields: body(text),
+            },
+        );
+        request.content_id = conflicted;
+        request
+    };
+    // Two requests from the same basis leave sibling body candidates.
+    app::save(&mut t.store, &mut t.host, &admin, &edit(10, "left")).unwrap();
+    app::save(&mut t.store, &mut t.host, &admin, &edit(11, "right")).unwrap();
+
+    let page = query::start(
+        &mut t.store,
+        &mut t.host,
+        &reader,
+        &Condition::Conflicted,
+        32,
+    )
+    .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].content.id, conflicted);
+    assert_eq!(page.items[0].conflicts.len(), 1);
+
+    // Rows projected before the flag existed are refilled from the graph.
+    let db = rusqlite::Connection::open(t.path.join("node.db")).unwrap();
+    db.execute_batch(
+        "DROP INDEX search_conflicted;
+         ALTER TABLE search_contents DROP COLUMN conflicted;
+         PRAGMA user_version=18;",
+    )
+    .unwrap();
+    drop(db);
+    t.restart();
+    let page = query::start(
+        &mut t.store,
+        &mut t.host,
+        &reader,
+        &Condition::Conflicted,
+        32,
+    )
+    .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].content.id, conflicted);
+}
+
+#[test]
 fn query_pages_freeze_membership_value_and_edit_basis_with_current_read_checks() {
     use harmion_node::query;
     use harmion_protocol::query::Condition;
@@ -1591,7 +1657,7 @@ fn migration_preserves_v1_records_and_cursor_generation() {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 18);
+    assert_eq!(version, 19);
 }
 
 #[test]

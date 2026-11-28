@@ -506,7 +506,7 @@ fn schema_v17_database_upgrades_and_keeps_existing_connection_rows() {
     let version: i64 = sql
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 18);
+    assert_eq!(version, 19);
     let columns: i64 = sql
         .query_row(
             "SELECT COUNT(*) FROM pragma_table_info('connection_requests') WHERE name='providers'",

@@ -211,11 +211,19 @@ fn queries_apply_read_grants_to_the_normal_value_and_exclude_deleted_content() {
     graph.accept(edit(3, false)).unwrap();
     let visible = graph.snapshot(id).unwrap();
     assert!(visible.fields[&wiki].is_conflicted());
+    let conflicted = Condition::Conflicted;
     let wiki_reader = Grants {
         read: Some(Filter::Kinds(["wiki".into()].into())),
         ..Grants::default()
     };
     let admin = Grants::administrator();
+    assert!(matches(&visible, &admin, &conflicted));
+    // Conflict state is internal even when the conflicted kind is not public.
+    let non_admin = Grants {
+        read: Some(Filter::All),
+        ..Grants::default()
+    };
+    assert!(matches(&visible, &non_admin, &conflicted));
     let is_wiki = Condition::Kind("wiki".into());
     let all = Condition::And(vec![]);
     let not_wiki = Condition::Not(Box::new(is_wiki.clone()));
@@ -245,10 +253,12 @@ fn queries_apply_read_grants_to_the_normal_value_and_exclude_deleted_content() {
     assert_eq!(deleted.life, Life::Deleted);
     assert!(!matches(&deleted, &admin, &all));
     assert!(!matches(&deleted, &admin, &edited_at_or_after(3)));
+    assert!(!matches(&deleted, &admin, &conflicted));
 
     graph.accept(edit(5, true)).unwrap();
     let deletion_conflict = graph.snapshot(id).unwrap();
     assert_eq!(deletion_conflict.life, Life::Conflict);
+    assert!(matches(&deletion_conflict, &admin, &conflicted));
     assert!(matches(&deletion_conflict, &wiki_reader, &is_wiki));
     assert!(matches(
         &deletion_conflict,

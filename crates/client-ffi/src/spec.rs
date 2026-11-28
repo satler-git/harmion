@@ -275,6 +275,7 @@ enum ConditionSpec {
         key: String,
         predicate: PredicateSpec,
     },
+    Conflicted,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -334,6 +335,7 @@ fn condition(spec: &ConditionSpec) -> Result<Condition, String> {
         ),
         ConditionSpec::Not { condition: inner } => Condition::Not(Box::new(condition(inner)?)),
         ConditionSpec::Kind { kind } => Condition::Kind(kind.clone()),
+        ConditionSpec::Conflicted => Condition::Conflicted,
         ConditionSpec::LastEditedAt {
             operator,
             utc_micros,
@@ -420,6 +422,10 @@ mod tests {
             panic!("expected and");
         };
         assert_eq!(terms.len(), 3);
+        assert_eq!(
+            condition_from_str(r#"{"type":"conflicted"}"#),
+            Ok(Condition::Conflicted)
+        );
         assert!(condition_from_str(r#"{"type":"kind","kind":"x","extra":1}"#).is_err());
         assert!(
             condition_from_str(

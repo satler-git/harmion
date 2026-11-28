@@ -36,6 +36,8 @@ pub enum Condition {
         key: AttributeKey,
         predicate: AttributePredicate,
     },
+    /// A field with more than one candidate, or a deletion conflict.
+    Conflicted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -161,6 +163,7 @@ fn write_condition(
             encoder.string(&key.key)?;
             write_attribute(encoder, predicate, budget)
         }
+        Condition::Conflicted => encoder.tag(6),
     }
 }
 
@@ -197,6 +200,7 @@ fn read_condition(
             },
             predicate: read_attribute(decoder, budget)?,
         },
+        6 => Condition::Conflicted,
         _ => return Err(CodecError::InvalidTag),
     })
 }
@@ -338,6 +342,7 @@ mod tests {
                         .into(),
                     ),
                 ])),
+                Condition::Conflicted,
             ]),
             limit: 4,
         };

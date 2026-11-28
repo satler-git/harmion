@@ -87,17 +87,9 @@ fun ConflictsSection(controller: NodeRuntimeController) {
 private suspend fun loadConflicts(controller: NodeRuntimeController): List<JSONObject> {
     val admin = controller.adminClient()
     try {
-        val page = admin.query("""{"type":"and","conditions":[]}""", 32)
+        val page = admin.query("""{"type":"conflicted"}""", 32)
         val items = page.optJSONArray("items") ?: return emptyList()
-        val result = mutableListOf<JSONObject>()
-        for (index in 0 until items.length()) {
-            val item = items.getJSONObject(index)
-            val conflicted =
-                item.optBoolean("deletion_conflict") ||
-                    (item.optJSONArray("conflicts")?.length() ?: 0) > 0
-            if (conflicted) result += item
-        }
-        return result
+        return List(items.length()) { items.getJSONObject(it) }
     } finally {
         admin.close()
     }

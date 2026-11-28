@@ -313,7 +313,7 @@ impl SqliteStore {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(db)?;
-        if !(0..=18).contains(&version) {
+        if !(0..=19).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
@@ -577,6 +577,21 @@ impl SqliteStore {
             }
             tx.pragma_update(None, "user_version", 18).map_err(db)?;
         }
+        if version < 19 {
+            // Query filters on conflict state, so the projection carries it.
+            // Fresh databases create it below; existing rows are filled from the
+            // graph in the same startup.
+            if version >= 6 && !has_column(&tx, "search_contents", "conflicted")? {
+                tx.execute_batch(
+                    "ALTER TABLE search_contents
+                        ADD COLUMN conflicted INTEGER NOT NULL DEFAULT 0;
+                     CREATE INDEX IF NOT EXISTS search_conflicted ON search_contents(content)
+                        WHERE conflicted=1;",
+                )
+                .map_err(db)?;
+            }
+            tx.pragma_update(None, "user_version", 19).map_err(db)?;
+        }
         {
             let mut storage = SqlTransaction { sql: &tx, identity };
             // Reject broken bytes/dependencies at startup; never salvage only the
@@ -593,6 +608,10 @@ impl SqliteStore {
                 membership
             } else {
                 startup::verify_content_history(&tx, identity)?;
+                if version < 19 {
+                    let graph = harmion_node::storage::read_graph(&mut storage)?;
+                    query::backfill_conflicts(&tx, &graph)?;
+                }
                 harmion_node::membership_state::state(&mut storage)?
             };
             if version < 11 {
@@ -633,7 +652,7 @@ impl SqliteStore {
         let version: i64 = tx
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db)?;
-        if !(1..=18).contains(&version) {
+        if !(1..=19).contains(&version) {
             return Err(Error::Storage(format!(
                 "unsupported schema version {version}"
             )));
