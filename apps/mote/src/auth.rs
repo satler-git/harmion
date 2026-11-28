@@ -26,6 +26,7 @@ use std::{
 use crate::{Error, Result};
 
 pub const CREDENTIALS_FILE: &str = "mote-credentials.json";
+const CREDENTIALS_LOCK: &str = "mote-credentials.lock";
 const OAUTH_IDENTITY_FILE: &str = "oauth-identity.json";
 const CREDENTIALS_VERSION: u32 = 1;
 const MAX_CREDENTIALS_BYTES: usize = 64 * 1024;
@@ -106,6 +107,7 @@ impl Credentials {
     }
 
     pub fn clear(directory: &Path) -> Result<()> {
+        let _lock = lock_credentials(directory)?;
         let protected = ProtectedDir::open(directory).map_err(|error| {
             Error::Message(format!(
                 "cannot open node directory {}: {error}",
@@ -143,6 +145,17 @@ impl Credentials {
     }
 
     pub async fn refresh(&mut self, directory: &Path) -> Result<()> {
+        // Two Mote processes can refresh at the same time. The refresh token
+        // rotates on every use, so the one that loses the race would otherwise
+        // persist a dead token. Reload under the lock before refreshing.
+        let _lock = lock_credentials(directory)?;
+        if let Some(current) = Self::load(directory)?
+            && current.access_token != self.access_token
+            && current.expires_at > now_seconds().saturating_add(REFRESH_SKEW_SECONDS)
+        {
+            *self = current;
+            return Ok(());
+        }
         let origin = self.oauth_origin.as_deref().ok_or_else(|| {
             Error::Message("node published no OAuth origin; run `mote connect` again".into())
         })?;
@@ -199,6 +212,24 @@ impl Credentials {
         }
         Ok(())
     }
+}
+
+fn lock_credentials(directory: &Path) -> Result<std::fs::File> {
+    let path = directory.join(CREDENTIALS_LOCK);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| Error::Message(format!("cannot open {}: {error}", path.display())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    file.lock()
+        .map_err(|error| Error::Message(format!("cannot lock {}: {error}", path.display())))?;
+    Ok(file)
 }
 
 pub fn is_hex_64(value: &str) -> bool {

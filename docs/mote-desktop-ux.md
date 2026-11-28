@@ -2,6 +2,8 @@
 
 2026-11-27 / 状態: 草案（v2 Quick Panel 検討中）/ 対象: Linux デスクトップ（niri + Wayland を第一候補）
 
+実装の進め方は [mote-hud-plan.md](mote-hud-plan.md)。
+
 ## 0. 位置づけ
 
 [要件 v0.2](mote-requirements.md) §8.2 と §11 の将来項目「デスクトップ GUI」を具体化するための草案。要件の範囲を広げるものではなく、決定でもない。§9 の論点を決めてから設計を確定する。
@@ -151,7 +153,7 @@ Capture もできるが、主役は処理（Triage）。スマホのチャット
 - Wikiへ: まず frontmatter 付き Markdown をコピーする。将来は行き先が `wiki` Kind で自分の Content を作る。Mote は `capture` を増やさない。
 - タスクへ: 同様。V1 はコピー、将来はタスクアプリが自分の Kind で作る。
 - 完了: アーカイブだけ。ルートしない。
-- コピー: frontmatter 付きの Markdown をクリップボードへ。
+- コピー: 本文だけをクリップボードへ。frontmatter は既定では付けない（行き先が決まっている Wiki へなどで付ける）。
 
 外部へ渡した元はアーカイブし、配送後に不要なら明示的に削除する。コピーは行き先が自分の Kind で作り、`mote_id` を来歴に残す。Mote が `capture,wiki` のコピーを作らない。
 

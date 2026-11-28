@@ -196,6 +196,15 @@
             '';
           };
 
+          hudFonts = pkgs.symlinkJoin {
+            name = "mote-hud-fonts";
+            paths = [
+              pkgs.ibm-plex
+              pkgs.jetbrains-mono
+              pkgs.noto-fonts-cjk-sans
+            ];
+          };
+
           mkHarmion =
             {
               pname,
@@ -278,6 +287,51 @@
             '';
           };
 
+          mote-hud = mkHarmion {
+            pname = "mote-hud";
+            package = "mote-hud";
+            bins = [ "mote-hud" ];
+            extraAttrs = {
+              nativeBuildInputs = [
+                pkgs.pkg-config
+                pkgs.makeWrapper
+              ];
+              buildInputs = [
+                pkgs.sqlite
+                pkgs.fontconfig
+                pkgs.freetype
+                pkgs.wayland
+                pkgs.libxkbcommon
+                pkgs.vulkan-loader
+                pkgs.mesa
+                pkgs.libglvnd
+                pkgs.libxcb
+                pkgs.xcbutil
+                pkgs.xcbutilcursor
+                pkgs.xcbutilimage
+                pkgs.xcbutilkeysyms
+                pkgs.xcbutilrenderutil
+                pkgs.xcbutilwm
+                pkgs.xcbutilxrm
+                pkgs.libx11
+                pkgs.xkeyboardconfig
+              ];
+            };
+            extraInstall = ''
+              wrapProgram $out/bin/mote-hud \
+                --prefix LD_LIBRARY_PATH : ${
+                  pkgs.lib.makeLibraryPath [
+                    pkgs.wayland
+                    pkgs.vulkan-loader
+                    pkgs.libglvnd
+                    pkgs.mesa
+                  ]
+                } \
+                --suffix XDG_DATA_DIRS : ${hudFonts}/share
+              install -Dm644 ${./licenses/mote/THIRD-PARTY-NOTICES.txt} $out/share/licenses/mote-hud/THIRD-PARTY-NOTICES.txt
+            '';
+          };
+
           harmion-admin = mkHarmion {
             pname = "harmion-admin";
             package = "harmion-admin";
@@ -302,6 +356,7 @@
             harmion-update
             harmiond
             mote
+            mote-hud
             ;
 
           default = pkgs.buildEnv {
@@ -310,6 +365,7 @@
               harmiond
               harmion
               mote
+              mote-hud
               harmion-admin
               harmion-update
             ];

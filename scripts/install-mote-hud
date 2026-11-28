@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Build the HUD and point ~/.local/bin/mote-hud at the store path.
+# Other Harmion apps are installed the same way: a symlink under ~/.local/bin.
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+nix build .#mote-hud --out-link result
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$root/result/bin/mote-hud" "$HOME/.local/bin/mote-hud"
+printf 'installed %s -> %s\n' "$HOME/.local/bin/mote-hud" "$(readlink -f "$root/result/bin/mote-hud")"

@@ -94,7 +94,7 @@ pub struct Spool {
 
 impl Spool {
     pub fn open() -> Result<Self> {
-        let root = state_root()?;
+        let root = crate::state_dir()?;
         let dir = root.join("requests");
         create_private_dir(&root)?;
         create_private_dir(&dir)?;
@@ -105,6 +105,24 @@ impl Spool {
     fn at(dir: PathBuf) -> Result<Self> {
         create_private_dir(&dir)?;
         Ok(Self { dir })
+    }
+
+    /// Holds the outbox for one sender. `retry` and `forget` take this so two
+    /// Mote processes cannot send or discard the same record at once.
+    pub fn lock(&self) -> Result<std::fs::File> {
+        let path = self.dir.parent().unwrap_or(&self.dir).join("requests.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+        file.lock()?;
+        Ok(file)
     }
 
     pub fn save(&self, pending: &PendingCapture) -> Result<PathBuf> {
@@ -219,29 +237,6 @@ impl Spool {
             Err(error) => Err(error.into()),
         }
     }
-}
-
-fn state_root() -> Result<PathBuf> {
-    if let Some(value) = std::env::var_os("MOTE_STATE_DIR") {
-        let value = value
-            .into_string()
-            .map_err(|_| Error::Message("MOTE_STATE_DIR is not valid UTF-8".into()))?;
-        if value.trim().is_empty() {
-            return Err(Error::Message("MOTE_STATE_DIR is empty".into()));
-        }
-        return Ok(PathBuf::from(value));
-    }
-    if let Some(value) = std::env::var_os("XDG_STATE_HOME") {
-        let value = value
-            .into_string()
-            .map_err(|_| Error::Message("XDG_STATE_HOME is not valid UTF-8".into()))?;
-        if !value.trim().is_empty() {
-            return Ok(PathBuf::from(value).join("mote"));
-        }
-    }
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| Error::Message("HOME is not set; set MOTE_STATE_DIR".into()))?;
-    Ok(PathBuf::from(home).join(".local/state/mote"))
 }
 
 fn create_private_dir(path: &Path) -> Result<()> {

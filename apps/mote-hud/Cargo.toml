@@ -1,0 +1,25 @@
+[package]
+name = "mote-hud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "mote-hud"
+path = "src/main.rs"
+
+[dependencies]
+anti-webui = { git = "https://github.com/bea4dev/AntiWebUI", rev = "6908e3119db4ecf7080f57de59870e083f2cbc98", default-features = false, features = ["wayland", "x11", "svg", "svg-text", "wayland-shell", "shell-niri"] }
+anti-webui-symbols-outlined = { git = "https://github.com/bea4dev/AntiWebUI", rev = "6908e3119db4ecf7080f57de59870e083f2cbc98" }
+harmion-client = { version = "0.1.1", path = "../../crates/client" }
+harmion-local = { version = "0.1.1", path = "../../crates/local" }
+mote = { version = "0.1.1", path = "../mote" }
+mote-core = { version = "0.1.1", path = "../../crates/mote-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+time = { version = "0.3.55", features = ["formatting", "local-offset", "macros", "parsing"] }
+tokio = { version = "1.54.1", features = ["rt", "time"] }
+
+[lints]
+workspace = true

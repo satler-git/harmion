@@ -212,6 +212,7 @@ dependencies = [
  "anti-webui-core",
  "anti-webui-macros",
  "anti-webui-style",
+ "anti-webui-wayland-shell",
  "anti-webui-wgpu",
  "anti-webui-widgets",
 ]
@@ -259,6 +260,25 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-wlr",
  "xkbcommon",
+]
+
+[[package]]
+name = "anti-webui-wayland-shell"
+version = "0.1.0"
+source = "git+https://github.com/bea4dev/AntiWebUI?rev=6908e3119db4ecf7080f57de59870e083f2cbc98#6908e3119db4ecf7080f57de59870e083f2cbc98"
+dependencies = [
+ "anti-webui-app",
+ "anti-webui-core",
+ "anti-webui-wayland",
+ "bitflags",
+ "libc",
+ "rustix",
+ "serde_json",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "wayland-scanner",
 ]
 
 [[package]]
@@ -2785,6 +2805,22 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "mote-hud"
+version = "0.1.1"
+dependencies = [
+ "anti-webui",
+ "anti-webui-symbols-outlined",
+ "harmion-client",
+ "harmion-local",
+ "mote",
+ "mote-core",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
 ]
 
 [[package]]

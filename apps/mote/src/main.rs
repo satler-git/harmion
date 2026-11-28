@@ -1,8 +1,5 @@
-mod auth;
 mod cli;
-mod spool;
 
-use auth::{Credentials, Pkce};
 use clap::Parser;
 use cli::{AuthCommand, Cli, Command, ConnectArgs, ListArgs, QArgs, SearchArgs, ShowArgs};
 use harmion_client::{
@@ -12,35 +9,17 @@ use harmion_client::{
     },
     random_id,
 };
+use mote::auth::{self, Credentials, Pkce};
+use mote::spool::{PendingCapture, Spool};
+use mote::{Error, MAX_CAPTURE_BYTES, Result, now_micros};
 use mote_core::{Capture, Filter, Sort};
 use serde_json::{Value, json};
-use spool::{PendingCapture, Spool};
 use std::{
     io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::Instant,
 };
 use time::{OffsetDateTime, UtcOffset, macros::format_description};
-
-type Result<T> = std::result::Result<T, Error>;
-
-/// Leave room for the create envelope, attributes, and reply metadata under
-/// the node's 1 MiB record limit.
-const MAX_CAPTURE_BYTES: usize = 1024 * 1024 - 64 * 1024;
-
-#[derive(Debug, thiserror::Error)]
-enum Error {
-    #[error(transparent)]
-    Client(#[from] harmion_client::Error),
-    #[error(transparent)]
-    Capture(#[from] mote_core::Error),
-    #[error(transparent)]
-    Io(#[from] io::Error),
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
-    #[error("{0}")]
-    Message(String),
-}
 
 #[tokio::main]
 async fn main() {
@@ -323,6 +302,7 @@ fn pending_cmd(output: Output, clock: &Clock) -> Result<()> {
 
 fn forget_cmd(id: &str, output: Output) -> Result<()> {
     let spool = Spool::open()?;
+    let _lock = spool.lock()?;
     let pending = spool.find(id)?;
     spool.remove(&pending)?;
     if output.json {
@@ -342,6 +322,7 @@ fn forget_cmd(id: &str, output: Output) -> Result<()> {
 
 async fn retry(client: &Client, id: Option<String>, output: Output) -> Result<()> {
     let spool = Spool::open()?;
+    let _lock = spool.lock()?;
     let pending = match id {
         Some(prefix) => vec![spool.find(&prefix)?],
         None => spool.list()?,
@@ -1030,16 +1011,6 @@ fn content_id(value: &str) -> Result<ContentId> {
     Ok(ContentId(unhex::<32>(value).map_err(|_| {
         Error::Message("invalid content ID".into())
     })?))
-}
-
-fn now_micros() -> Result<i64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| Error::Message("system clock is before the Unix epoch".into()))
-        .and_then(|duration| {
-            i64::try_from(duration.as_micros())
-                .map_err(|_| Error::Message("system clock is out of range".into()))
-        })
 }
 
 fn resolve_mote_node(spec: &str) -> Result<std::path::PathBuf> {
