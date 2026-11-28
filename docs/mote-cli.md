@@ -82,6 +82,7 @@ mote q --reply-to 7f3a9c1e "返信"
 
 # 一覧（Inbox、古い順、20件）
 mote list
+mote ls                     # list の alias
 mote list --all --limit 0
 mote list --archived
 mote list --pinned
@@ -113,7 +114,7 @@ mote unpin 7f3a9c1e
 mote --owner --node ~/.local/share/harmion/main list
 ```
 
-Content ID は完全な64桁、または一意な4桁以上の prefix を受け付ける。prefix が複数に一致した場合は候補を表示して失敗する。`retry` の ID も同じ prefix を受け付ける。
+Content ID は完全な64桁、または一意な1桁以上の prefix を受け付ける。`show` / `archive` などは全captureに対して最短の一意prefixで解決し、複数に一致した場合は候補を表示して失敗する。`list` は表示中の行だけで一意な最短prefixを出す。`retry` の ID は4桁以上。
 
 ## ローカル outbox
 
@@ -135,8 +136,8 @@ Content ID は完全な64桁、または一意な4桁以上の prefix を受け�
 ```
 
 - 時刻はローカル時刻（分まで）
-- ID は8桁 prefix
-- flags は `A` archived、`P` pinned、`L` session open、`!` 表示可能な field / deletion conflict
+- ID は表示中の行で一意な最短prefix
+- flags は `A` archived、`P` pinned、`L` long capture、`D` open long session、`!` 表示可能な field / deletion conflict
 - 本文は先頭の非空行を72文字まで
 
 ### JSON
@@ -152,6 +153,7 @@ Content ID は完全な64桁、または一意な4桁以上の prefix を受け�
   "archived_at_micros": null,
   "pinned": true,
   "session_open": false,
+  "long": true,
   "reply_to": null,
   "kinds": ["capture"],
   "conflicted": false,

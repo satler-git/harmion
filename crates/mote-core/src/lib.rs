@@ -50,6 +50,7 @@ pub struct Capture {
     pub archived_at_micros: Option<i64>,
     pub pinned: bool,
     pub session_open: bool,
+    pub long: bool,
     pub reply_to: Option<String>,
     pub kinds: Vec<String>,
     pub conflicted: bool,
@@ -68,6 +69,7 @@ impl std::fmt::Debug for Capture {
             .field("archived_at_micros", &self.archived_at_micros)
             .field("pinned", &self.pinned)
             .field("session_open", &self.session_open)
+            .field("long", &self.long)
             .field("reply_to", &self.reply_to)
             .field("kinds", &self.kinds)
             .field("conflicted", &self.conflicted)
@@ -137,6 +139,7 @@ impl Capture {
             archived_at_micros,
             pinned: attribute_bool(&attributes, PINNED)?,
             session_open: attribute_bool(&attributes, SESSION_OPEN)?,
+            long: attributes.contains_key(SESSION_OPEN),
             reply_to,
             kinds: kinds.into_iter().collect(),
             conflicted,
@@ -526,6 +529,19 @@ mod tests {
     }
 
     #[test]
+    fn detects_finished_long_captures_by_attribute_presence() {
+        let capture = Capture::from_view(&view(
+            "finished long capture",
+            json!([
+                {"namespace":"capture","key":"session_open","value":false}
+            ]),
+        ))
+        .unwrap();
+        assert!(capture.long);
+        assert!(!capture.session_open);
+    }
+
+    #[test]
     fn rejects_non_capture_content() {
         let mut value = view("hello", json!([]));
         value["content"]["kinds"] = json!(["wiki"]);
@@ -562,6 +578,7 @@ mod tests {
                 archived_at_micros: Some(3),
                 pinned: false,
                 session_open: false,
+                long: false,
                 reply_to: None,
                 kinds: vec![CAPTURE_KIND.into()],
                 conflicted: false,
@@ -576,6 +593,7 @@ mod tests {
                 archived_at_micros: None,
                 pinned: false,
                 session_open: false,
+                long: false,
                 reply_to: None,
                 kinds: vec![CAPTURE_KIND.into()],
                 conflicted: false,
@@ -590,6 +608,7 @@ mod tests {
                 archived_at_micros: Some(2),
                 pinned: false,
                 session_open: false,
+                long: false,
                 reply_to: None,
                 kinds: vec![CAPTURE_KIND.into()],
                 conflicted: false,

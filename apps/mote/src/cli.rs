@@ -34,6 +34,7 @@ pub enum Command {
     /// Capture text. With no TEXT, reads non-interactive stdin.
     Q(QArgs),
     /// List captures.
+    #[command(alias = "ls")]
     List(ListArgs),
     /// Search capture bodies.
     Search(SearchArgs),
@@ -197,6 +198,12 @@ impl SearchArgs {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn list_has_an_ls_alias() {
+        let cli = Cli::parse_from(["mote", "ls"]);
+        assert!(matches!(cli.command, Command::List(_)));
+    }
 
     #[test]
     fn list_archive_flags_are_exclusive() {

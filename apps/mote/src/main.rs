@@ -982,11 +982,6 @@ async fn resolve(client: &Client, value: &str) -> Result<Capture> {
         }
         return Ok(capture);
     }
-    if id.len() < 4 {
-        return Err(Error::Message(
-            "content ID prefix must be at least 4 hex characters".into(),
-        ));
-    }
     let captures = fetch_all(
         client,
         protocol::query::Condition::Kind(mote_core::CAPTURE_KIND.into()),
@@ -1025,7 +1020,7 @@ async fn resolve(client: &Client, value: &str) -> Result<Capture> {
 
 fn normalize_id(value: &str) -> Result<String> {
     let id = value.trim().to_ascii_lowercase();
-    if id.len() < 4 || id.len() > 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if id.is_empty() || id.len() > 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(Error::Message(format!("invalid content ID `{value}`")));
     }
     Ok(id)
@@ -1225,9 +1220,10 @@ fn print_captures(captures: &mut [Capture], output: Output, clock: &Clock) -> Re
         }
         return Ok(());
     }
-    for capture in captures {
+    let prefixes = shortest_prefixes(captures);
+    for (capture, prefix) in captures.iter().zip(prefixes) {
         let time = clock.format(capture.created_at_micros);
-        let id = paint(output.color, "36", capture.short_id());
+        let id = paint(output.color, "36", &prefix);
         let flags = flags(capture);
         let flags = if output.color && !flags.trim().is_empty() {
             paint(output.color, "33", &flags)
@@ -1235,11 +1231,30 @@ fn print_captures(captures: &mut [Capture], output: Output, clock: &Clock) -> Re
             flags
         };
         let preview = capture.preview(72);
-        writeln!(io::stdout(), "{time}  {id}  {flags:<4}  {preview}")?;
+        writeln!(io::stdout(), "{time}  {id}  {flags:<5}  {preview}")?;
     }
     Ok(())
 }
 
+fn shortest_prefixes(captures: &[Capture]) -> Vec<String> {
+    captures
+        .iter()
+        .map(|capture| {
+            for length in 1..=capture.id.len() {
+                let prefix = &capture.id[..length];
+                if captures
+                    .iter()
+                    .filter(|other| other.id.starts_with(prefix))
+                    .count()
+                    == 1
+                {
+                    return prefix.to_owned();
+                }
+            }
+            capture.id.clone()
+        })
+        .collect()
+}
 fn print_tsv(capture: &Capture) -> Result<()> {
     writeln!(
         io::stdout(),
@@ -1285,6 +1300,11 @@ fn print_meta(capture: &Capture, clock: &Clock) -> Result<()> {
     )?;
     writeln!(
         io::stdout(),
+        "Long: {}",
+        if capture.long { "yes" } else { "no" }
+    )?;
+    writeln!(
+        io::stdout(),
         "Session: {}",
         if capture.session_open {
             "open"
@@ -1322,10 +1342,11 @@ fn print_meta(capture: &Capture, clock: &Clock) -> Result<()> {
 
 fn flags(capture: &Capture) -> String {
     format!(
-        "{}{}{}{}",
+        "{}{}{}{}{}",
         if capture.archived { 'A' } else { ' ' },
         if capture.pinned { 'P' } else { ' ' },
-        if capture.session_open { 'L' } else { ' ' },
+        if capture.long { 'L' } else { ' ' },
+        if capture.session_open { 'D' } else { ' ' },
         if capture.conflicted || capture.deletion_conflict {
             '!'
         } else {
@@ -1469,13 +1490,34 @@ mod tests {
     fn flags_include_state() {
         let mut capture = capture();
         capture.archived = true;
+        capture.long = true;
         capture.session_open = true;
-        assert_eq!(flags(&capture), "APL ");
+        assert_eq!(flags(&capture), "APLD ");
     }
 
     #[test]
     fn prefix_and_full_id_are_normalized() {
         assert_eq!(normalize_id("  AABB  ").unwrap(), "aabb");
+        assert_eq!(normalize_id("c").unwrap(), "c");
+        assert!(normalize_id("").is_err());
         assert!(normalize_id("not-hex").is_err());
+    }
+
+    #[test]
+    fn list_prefixes_are_the_shortest_unique_prefixes() {
+        let mut first = capture();
+        first.id = "ca".repeat(32);
+        let mut second = capture();
+        second.id = "ce".repeat(32);
+        let mut third = capture();
+        third.id = "5b".repeat(32);
+        assert_eq!(
+            shortest_prefixes(&[first.clone(), second.clone(), third.clone()]),
+            vec!["ca", "ce", "5"]
+        );
+        assert_eq!(
+            shortest_prefixes(&[third.clone(), first.clone()]),
+            vec!["5", "c"]
+        );
     }
 }
